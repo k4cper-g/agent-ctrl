@@ -165,6 +165,82 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
     await client!.closeSession(session);
   }, 120_000);
+
+  it("types Unicode text via SendInput and reads it back", async () => {
+    const session = await client!.openSession("uia");
+    const snap = await client!.snapshot(session, NOTEPAD_TARGET);
+
+    const editRef = findEditableRefs(snap)[0];
+    expect(editRef).toBeDefined();
+
+    // SendInput delivers to the focused control of the foreground window, so
+    // we have to bring Notepad forward AND set keyboard focus on the edit area
+    // before typing. UIA's SetFocus handles the latter.
+    bringToForeground("Notepad");
+    const focusRes = await client!.act(session, { kind: "focus", ref_id: editRef! });
+    expect(focusRes.ok).toBe(true);
+
+    // Mix of ASCII and a non-Latin script to exercise the UTF-16 path.
+    const text = "hello, агент!";
+    const typeRes = await client!.act(session, { kind: "type", text });
+    expect(typeRes.ok).toBe(true);
+
+    const snap2 = await waitFor(async () => {
+      const s = await client!.snapshot(session, NOTEPAD_TARGET);
+      const node = findNodeByRef(s, editRef!);
+      return node?.value && node.value.includes(text) ? s : null;
+    });
+
+    const node = findNodeByRef(snap2, editRef!);
+    expect(node?.value).toContain(text);
+
+    await client!.closeSession(session);
+  }, 120_000);
+
+  it("clears typed text with Ctrl+A then Delete", async () => {
+    const session = await client!.openSession("uia");
+    const snap = await client!.snapshot(session, NOTEPAD_TARGET);
+
+    const editRef = findEditableRefs(snap)[0];
+    expect(editRef).toBeDefined();
+
+    // Seed via Fill (path already verified in earlier test) so the Press
+    // assertions are about the chord, not about typing.
+    const seed = "to be deleted";
+    const fillRes = await client!.act(session, {
+      kind: "fill",
+      ref_id: editRef!,
+      value: seed,
+    });
+    expect(fillRes.ok).toBe(true);
+
+    // Wait until the Fill is reflected before clearing — otherwise a fast
+    // Press could race with Notepad's value-pattern apply.
+    await waitFor(async () => {
+      const s = await client!.snapshot(session, NOTEPAD_TARGET);
+      return findNodeByRef(s, editRef!)?.value?.includes(seed) ? s : null;
+    });
+
+    bringToForeground("Notepad");
+    await client!.act(session, { kind: "focus", ref_id: editRef! });
+
+    const selectRes = await client!.act(session, { kind: "press", keys: "Ctrl+A" });
+    expect(selectRes.ok).toBe(true);
+    const deleteRes = await client!.act(session, { kind: "press", keys: "Delete" });
+    expect(deleteRes.ok).toBe(true);
+
+    const snap2 = await waitFor(async () => {
+      const s = await client!.snapshot(session, NOTEPAD_TARGET);
+      const node = findNodeByRef(s, editRef!);
+      // Notepad reports an empty Document value as undefined or "".
+      return !node?.value ? s : null;
+    });
+
+    const node = findNodeByRef(snap2, editRef!);
+    expect(node?.value ?? "").toBe("");
+
+    await client!.closeSession(session);
+  }, 120_000);
 });
 
 // ---------- helpers ----------

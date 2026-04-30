@@ -28,7 +28,8 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
@@ -49,9 +50,16 @@ use windows::Win32::UI::Accessibility::{
     UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN,
+    VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK,
+    VK_PAUSE, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_SPACE,
+    VK_TAB, VK_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible,
+    GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
 };
 
 use agent_ctrl_core::{
@@ -639,6 +647,10 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::Click { ref_id } => act_click(state, ref_id),
         Action::Focus { ref_id } => act_focus(state, ref_id),
         Action::Fill { ref_id, value } => act_fill(state, ref_id, value),
+        Action::Type { text } => act_type(state, text),
+        Action::Press { keys } => act_press(state, keys),
+        Action::KeyDown { key } => act_key_down(state, key),
+        Action::KeyUp { key } => act_key_up(state, key),
         other => Err(Error::Unsupported {
             surface: SurfaceKind::Uia.as_str().into(),
             action: action_name(other).into(),
@@ -719,6 +731,284 @@ fn lookup_ref(state: &WorkerState, ref_id: &RefId) -> Result<RefEntry> {
         .get(ref_id)
         .cloned()
         .ok_or_else(|| Error::RefNotFound(ref_id.0.clone()))
+}
+
+// ---------- Keyboard input via SendInput ----------
+//
+// `SendInput` injects events into the system input queue; they are routed to
+// whichever window currently has keyboard focus. Each helper first calls
+// `ensure_foreground` to bring the snapshot's pinned HWND forward, so that
+// keystrokes land in the same window the agent took its snapshot of —
+// matching the design promise that "actions reuse the pinned HWND".
+
+/// Type a literal string at the current focus. Each UTF-16 code unit becomes
+/// a `KEYEVENTF_UNICODE` keystroke pair (down + up) — this bypasses keyboard
+/// layout translation entirely, so emoji and non-Latin scripts work without
+/// any per-locale handling. Surrogate pairs are sent as two events as the OS
+/// expects.
+fn act_type(state: &WorkerState, text: &str) -> Result<ActionResult> {
+    if text.is_empty() {
+        return Ok(ActionResult::ok());
+    }
+    ensure_foreground(state, "type")?;
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(text.encode_utf16().count() * 2);
+    for unit in text.encode_utf16() {
+        inputs.push(make_unicode_input(unit, false));
+        inputs.push(make_unicode_input(unit, true));
+    }
+    send_inputs(&inputs, "type")
+}
+
+/// Press a chord like `"Enter"`, `"Ctrl+A"`, or `"Ctrl+Shift+T"`. Modifiers
+/// are pressed in declaration order, the main key is tapped, then modifiers
+/// are released in reverse order — matching how a human keyboard handles it.
+fn act_press(state: &WorkerState, keys: &str) -> Result<ActionResult> {
+    let parsed = parse_chord(keys).map_err(|reason| Error::Action {
+        action: "press".into(),
+        reason,
+    })?;
+    ensure_foreground(state, "press")?;
+
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(parsed.modifiers.len() * 2 + 2);
+    for &m in &parsed.modifiers {
+        inputs.push(make_vk_input(m, false));
+    }
+    inputs.push(make_vk_input(parsed.key, false));
+    inputs.push(make_vk_input(parsed.key, true));
+    for &m in parsed.modifiers.iter().rev() {
+        inputs.push(make_vk_input(m, true));
+    }
+    send_inputs(&inputs, "press")
+}
+
+fn act_key_down(state: &WorkerState, key: &str) -> Result<ActionResult> {
+    let vk = vk_from_name(key).ok_or_else(|| Error::Action {
+        action: "key_down".into(),
+        reason: format!("unknown key name: {key:?}"),
+    })?;
+    ensure_foreground(state, "key_down")?;
+    send_inputs(&[make_vk_input(vk, false)], "key_down")
+}
+
+fn act_key_up(state: &WorkerState, key: &str) -> Result<ActionResult> {
+    let vk = vk_from_name(key).ok_or_else(|| Error::Action {
+        action: "key_up".into(),
+        reason: format!("unknown key name: {key:?}"),
+    })?;
+    ensure_foreground(state, "key_up")?;
+    send_inputs(&[make_vk_input(vk, true)], "key_up")
+}
+
+/// Bring the snapshot's pinned HWND to the foreground so subsequent
+/// `SendInput` events reach it. Uses the `AttachThreadInput` workaround for
+/// Windows' `ForegroundLockTimeout` policy, which otherwise silently rejects
+/// `SetForegroundWindow` from non-foreground processes — exactly the case we
+/// hit when the test runner / IDE is in front and we want to drive Notepad.
+fn ensure_foreground(state: &WorkerState, action: &str) -> Result<()> {
+    let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
+        action: action.into(),
+        reason: "no prior snapshot — call snapshot before keyboard input".into(),
+    })?;
+
+    // SAFETY: `GetForegroundWindow` is always sound; null is allowed.
+    let current = unsafe { GetForegroundWindow() };
+    if current.0 == hwnd.0 {
+        return Ok(());
+    }
+
+    // SAFETY: `GetCurrentThreadId` is always sound. `GetWindowThreadProcessId`
+    // accepts any HWND (including null, in which case it returns 0). We never
+    // dereference the returned thread ids directly.
+    let me_thread = unsafe { GetCurrentThreadId() };
+    let fg_thread = if current.0.is_null() {
+        0
+    } else {
+        unsafe { GetWindowThreadProcessId(current, None) }
+    };
+
+    // Attach our input queue to the foreground thread's queue (if there is
+    // one and it isn't already us) so SetForegroundWindow bypasses the
+    // foreground-lock policy. Detaching is mandatory regardless of outcome.
+    let attached = fg_thread != 0 && fg_thread != me_thread && {
+        // SAFETY: thread ids come from valid Win32 calls above.
+        unsafe { AttachThreadInput(fg_thread, me_thread, true) }.as_bool()
+    };
+
+    // SAFETY: hwnd is non-null per the snapshot path; SetForegroundWindow
+    // returns FALSE if blocked but is otherwise sound.
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+
+    if attached {
+        // SAFETY: paired detach for the AttachThreadInput above.
+        let _ = unsafe { AttachThreadInput(fg_thread, me_thread, false) };
+    }
+
+    // Give the foreground change a moment to propagate before SendInput.
+    // 50ms is enough on every Windows version we target without being a
+    // noticeable wait for an agent.
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(())
+}
+
+/// Build a virtual-key `INPUT` event. `key_up = false` is a press; `true` is
+/// a release. Extended-key handling is delegated to the OS — when `wVk` is
+/// set and `wScan = 0` Windows sets the EXTENDED flag itself for navigation
+/// keys, so we don't need to special-case arrow / Home / End / etc.
+fn make_vk_input(vk: VIRTUAL_KEY, key_up: bool) -> INPUT {
+    let flags = if key_up {
+        KEYEVENTF_KEYUP
+    } else {
+        KEYBD_EVENT_FLAGS(0)
+    };
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Build a UTF-16 `INPUT` event. `wVk = 0` and `KEYEVENTF_UNICODE` tells
+/// Windows to deliver `wScan` as a character to the focused control rather
+/// than as a scancode.
+fn make_unicode_input(code_unit: u16, key_up: bool) -> INPUT {
+    let mut flags = KEYEVENTF_UNICODE;
+    if key_up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: code_unit,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Submit a batch of `INPUT` events. Returns an error if the OS reports it
+/// inserted fewer events than we sent (typically because UIPI / UAC blocked
+/// us, or the input desktop changed mid-call).
+fn send_inputs(inputs: &[INPUT], action: &str) -> Result<ActionResult> {
+    if inputs.is_empty() {
+        return Ok(ActionResult::ok());
+    }
+    let expected = u32::try_from(inputs.len()).map_err(|_| Error::Action {
+        action: action.into(),
+        reason: format!("input batch too large ({} events)", inputs.len()),
+    })?;
+    let cb_size = i32::try_from(std::mem::size_of::<INPUT>()).map_err(|_| Error::Action {
+        action: action.into(),
+        reason: "INPUT struct size does not fit in i32".into(),
+    })?;
+    // SAFETY: `inputs` is a valid slice of `INPUT` for the duration of the
+    // call; `cb_size` is `sizeof(INPUT)` as required by the Win32 contract.
+    let sent = unsafe { SendInput(inputs, cb_size) };
+    if sent != expected {
+        return Err(Error::Action {
+            action: action.into(),
+            reason: format!(
+                "SendInput inserted {sent} of {expected} events (likely blocked by UIPI/UAC)"
+            ),
+        });
+    }
+    Ok(ActionResult::ok())
+}
+
+/// Parsed key chord: zero or more modifiers plus exactly one main key.
+struct Chord {
+    modifiers: Vec<VIRTUAL_KEY>,
+    key: VIRTUAL_KEY,
+}
+
+/// Split `"Ctrl+Shift+T"` into modifiers + main key. The last `+`-separated
+/// token is the main key; everything before it is treated as a modifier.
+/// Each token is run through [`vk_from_name`].
+fn parse_chord(keys: &str) -> std::result::Result<Chord, String> {
+    let tokens: Vec<&str> = keys.split('+').map(str::trim).collect();
+    if tokens.is_empty() || tokens.iter().any(|t| t.is_empty()) {
+        return Err(format!("malformed key chord: {keys:?}"));
+    }
+    // `split` always yields at least one element, so `split_last` is safe.
+    let (main, mods) = tokens
+        .split_last()
+        .ok_or_else(|| format!("empty key chord: {keys:?}"))?;
+    let key = vk_from_name(main).ok_or_else(|| format!("unknown key name: {main:?}"))?;
+    let modifiers: Vec<VIRTUAL_KEY> = mods
+        .iter()
+        .map(|t| vk_from_name(t).ok_or_else(|| format!("unknown modifier: {t:?}")))
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(Chord { modifiers, key })
+}
+
+/// Map a key name to its Windows virtual-key code. Case-insensitive.
+///
+/// Single ASCII letters and digits map to their VK directly (`VK_A == 0x41`,
+/// `VK_0 == 0x30`). Function keys `F1..F24` map to `VK_F1 + n - 1`. Everything
+/// else is a name in the table below.
+fn vk_from_name(name: &str) -> Option<VIRTUAL_KEY> {
+    let lower = name.trim().to_ascii_lowercase();
+
+    // Single ASCII letter / digit → its VK is the ASCII code itself.
+    if lower.len() == 1 {
+        let c = lower.chars().next()?;
+        if c.is_ascii_alphabetic() {
+            return Some(VIRTUAL_KEY(u16::from(c.to_ascii_uppercase() as u8)));
+        }
+        if c.is_ascii_digit() {
+            return Some(VIRTUAL_KEY(u16::from(c as u8)));
+        }
+    }
+
+    // `F1` .. `F24` → `VK_F1` (0x70) + n - 1.
+    if let Some(rest) = lower.strip_prefix('f') {
+        if let Ok(n) = rest.parse::<u16>() {
+            if (1..=24).contains(&n) {
+                return Some(VIRTUAL_KEY(0x70 + n - 1));
+            }
+        }
+    }
+
+    let vk = match lower.as_str() {
+        "ctrl" | "control" => VK_CONTROL,
+        "shift" => VK_SHIFT,
+        "alt" => VK_MENU,
+        "win" | "meta" | "cmd" | "super" | "lwin" => VK_LWIN,
+        "rwin" => VK_RWIN,
+        "enter" | "return" => VK_RETURN,
+        "tab" => VK_TAB,
+        "space" | "spacebar" => VK_SPACE,
+        "esc" | "escape" => VK_ESCAPE,
+        "backspace" => VK_BACK,
+        "delete" | "del" => VK_DELETE,
+        "insert" | "ins" => VK_INSERT,
+        "home" => VK_HOME,
+        "end" => VK_END,
+        "pageup" | "pgup" | "page_up" => VK_PRIOR,
+        "pagedown" | "pgdn" | "page_down" => VK_NEXT,
+        "left" | "arrowleft" => VK_LEFT,
+        "right" | "arrowright" => VK_RIGHT,
+        "up" | "arrowup" => VK_UP,
+        "down" | "arrowdown" => VK_DOWN,
+        "capslock" => VK_CAPITAL,
+        "numlock" => VK_NUMLOCK,
+        "scrolllock" => VK_SCROLL,
+        "printscreen" | "prtsc" | "prtscn" => VK_SNAPSHOT,
+        "pause" | "break" => VK_PAUSE,
+        "apps" | "menu" | "contextmenu" => VK_APPS,
+        _ => return None,
+    };
+    Some(vk)
 }
 
 /// Translate a [`WindowTarget`] into the HWND the snapshot/action will operate on.
@@ -999,5 +1289,66 @@ fn action_name(a: &Action) -> &'static str {
         Action::SwitchApp { .. } => "switch_app",
         Action::FocusWindow { .. } => "focus_window",
         Action::Screenshot { .. } => "screenshot",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{parse_chord, vk_from_name};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_A, VK_CONTROL, VK_DELETE, VK_F1, VK_F12, VK_RETURN, VK_SHIFT, VK_T,
+    };
+
+    #[test]
+    fn vk_letters_and_digits_match_ascii_codes() {
+        assert_eq!(vk_from_name("a"), Some(VK_A));
+        assert_eq!(vk_from_name("A"), Some(VK_A));
+        // Digits use the same VK encoding as their ASCII codepoint.
+        assert_eq!(vk_from_name("0").map(|v| v.0), Some(0x30));
+        assert_eq!(vk_from_name("9").map(|v| v.0), Some(0x39));
+    }
+
+    #[test]
+    fn vk_function_keys_span_f1_to_f24() {
+        assert_eq!(vk_from_name("F1"), Some(VK_F1));
+        assert_eq!(vk_from_name("f12"), Some(VK_F12));
+        assert_eq!(vk_from_name("F24").map(|v| v.0), Some(0x70 + 23));
+        assert_eq!(vk_from_name("F25"), None);
+        assert_eq!(vk_from_name("F0"), None);
+    }
+
+    #[test]
+    fn vk_named_keys_are_case_insensitive() {
+        assert_eq!(vk_from_name("Enter"), Some(VK_RETURN));
+        assert_eq!(vk_from_name("RETURN"), Some(VK_RETURN));
+        assert_eq!(vk_from_name("delete"), Some(VK_DELETE));
+        assert_eq!(vk_from_name("Del"), Some(VK_DELETE));
+        assert_eq!(vk_from_name("ctrl"), Some(VK_CONTROL));
+        assert_eq!(vk_from_name("Control"), Some(VK_CONTROL));
+        assert_eq!(vk_from_name("nonsense"), None);
+    }
+
+    #[test]
+    fn chord_parses_modifiers_then_key() {
+        let c = parse_chord("Ctrl+Shift+T").unwrap();
+        assert_eq!(c.modifiers, vec![VK_CONTROL, VK_SHIFT]);
+        assert_eq!(c.key, VK_T);
+    }
+
+    #[test]
+    fn chord_accepts_single_key_with_no_modifiers() {
+        let c = parse_chord("Enter").unwrap();
+        assert!(c.modifiers.is_empty());
+        assert_eq!(c.key, VK_RETURN);
+    }
+
+    #[test]
+    fn chord_rejects_empty_or_unknown_tokens() {
+        assert!(parse_chord("").is_err());
+        assert!(parse_chord("Ctrl+").is_err());
+        assert!(parse_chord("+A").is_err());
+        assert!(parse_chord("Ctrl+Bogus").is_err());
     }
 }

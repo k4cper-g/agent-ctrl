@@ -18,16 +18,16 @@ Stack: **Rust workspace** (engine + daemon + per-platform surfaces) +
 target is the agent-browser / Playwright pattern: ship a Rust binary inside
 an npm package.
 
-## Current state — v0.1 milestone reached
+## Current state — v0.1 milestone reached, keyboard input landed
 
-✅ End-to-end TS → Rust → live Windows app loop **works**.
+✅ End-to-end TS → Rust → live Windows app loop **works**, including SendInput-based keyboard.
 
 Verified in the last session:
 
-- `cargo test --workspace` — 7 tests pass (core, daemon)
+- `cargo test --workspace` — 13 tests pass (core, daemon, surface-uia keyboard helpers)
 - `npm run test --workspace=@agent-ctrl/client` — 3 mock tests pass
-- `RUN_UIA_TESTS=1 npm run test ...` — **3 UIA tests pass against live Notepad in ~3s**:
-  open session → snapshot Notepad → fill its edit area with text → re-snapshot reads it back → click a menu item.
+- `RUN_UIA_TESTS=1 npm run test ...` — **5 UIA tests pass against live Notepad in ~6s**:
+  open session → snapshot Notepad → fill via ValuePattern → click an Invoke menu item → type Unicode via SendInput → clear with `Ctrl+A` + `Delete`.
 - `cargo clippy --workspace --all-targets -- -D warnings` ✓
 - `cargo fmt --all -- --check` ✓
 - `tsc --noEmit` ✓
@@ -78,18 +78,20 @@ These are invariants that will silently break things if you violate them. Read b
 - **Action: Click** — `IUIAutomationInvokePattern.Invoke()`.
 - **Action: Focus** — `IUIAutomationElement::SetFocus()`.
 - **Action: Fill** — `IUIAutomationValuePattern.SetValue(BSTR)`.
+- **Action: Type** — `SendInput` with `KEYEVENTF_UNICODE`, one (down,up) pair per UTF-16 code unit. Bypasses keyboard layout entirely; emoji and non-Latin scripts work.
+- **Action: Press / KeyDown / KeyUp** — `SendInput` with virtual-key codes. Chord parser handles `"Ctrl+Shift+T"` style strings; modifiers are pressed in order and released in reverse. Key-name table covers letters, digits, `F1..F24`, modifiers (`Ctrl`/`Shift`/`Alt`/`Win`), navigation (`Home`/`End`/arrows/`PageUp`/`PageDown`), `Enter`/`Tab`/`Space`/`Escape`/`Backspace`/`Delete`/`Insert`, lock keys, `PrintScreen`/`Pause`/`Apps`.
+- **Foreground pinning for SendInput**: every keyboard helper calls `ensure_foreground` first, which uses the `AttachThreadInput` workaround to bypass `ForegroundLockTimeout`. Without it, keystrokes go to whatever window happened to be foreground (typically the IDE), not the snapshot's pinned HWND.
 - **Window targeting**: `Foreground` / `Pid` / `Title` / `ProcessName`. `ProcessName` is locale-independent and the right default for tests.
 - **Win32 class-name promotion** for `Custom` controls: `Edit`/`Static`/`Button`/`ComboBox`/`SysListView32`/`SysTreeView32`/`RichEdit*` get promoted back to canonical roles.
 
 ## What's NOT yet built (in priority order)
 
-1. **Action: Type / Press / KeyDown / KeyUp** via `SendInput`. Needed for typing into focused fields without ValuePattern. Modest amount of code (key code translation + `INPUT` array).
-2. **Populate `NativeHandle::Uia`** with `RuntimeId` + `AutomationId`. Currently `None`. With handles, action-time resolution can use `IUIAutomation::FindFirstBuildCache` with a `UIA_AutomationIdPropertyId` condition — O(1) instead of O(tree). See `docs/uia-mapping.md` §7.
-3. **Pattern-based state extraction**: `Toggle.ToggleState` → `state.checked`, `ExpandCollapse.State` → `state.expanded`, `SelectionItem.IsSelected` → `state.selected`. See `docs/uia-mapping.md` §2.
-4. **Pattern-based role promotion**: MenuItem+Toggle → MenuItemCheckbox, Window+IsModal → Dialog, ListItem-in-Selection → Option. See `docs/uia-mapping.md` §1 promotion rules.
-5. **Remaining actions** per `docs/uia-mapping.md` §4: DoubleClick, RightClick, Hover, Scroll, ScrollIntoView, Select, SelectAll, Drag, SwitchApp, FocusWindow, Screenshot.
-6. **CDP surface implementation** — cross-platform browser surface. Use agent-browser's `cli/src/native/cdp/` as the reference. After UIA, this is the next biggest demo unlock.
-7. **macOS AX surface** — once UIA shape is stable.
+1. **Populate `NativeHandle::Uia`** with `RuntimeId` + `AutomationId`. Currently `None`. With handles, action-time resolution can use `IUIAutomation::FindFirstBuildCache` with a `UIA_AutomationIdPropertyId` condition — O(1) instead of O(tree). See `docs/uia-mapping.md` §7.
+2. **Pattern-based state extraction**: `Toggle.ToggleState` → `state.checked`, `ExpandCollapse.State` → `state.expanded`, `SelectionItem.IsSelected` → `state.selected`. See `docs/uia-mapping.md` §2.
+3. **Pattern-based role promotion**: MenuItem+Toggle → MenuItemCheckbox, Window+IsModal → Dialog, ListItem-in-Selection → Option. See `docs/uia-mapping.md` §1 promotion rules.
+4. **Remaining actions** per `docs/uia-mapping.md` §4: DoubleClick, RightClick, Hover, Scroll, ScrollIntoView, Select, SelectAll, Drag, SwitchApp, FocusWindow, Screenshot.
+5. **CDP surface implementation** — cross-platform browser surface. Use agent-browser's `cli/src/native/cdp/` as the reference. After UIA, this is the next biggest demo unlock.
+6. **macOS AX surface** — once UIA shape is stable.
 
 ## Known pitfalls (you will hit these)
 
