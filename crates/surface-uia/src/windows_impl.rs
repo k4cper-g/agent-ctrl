@@ -1,0 +1,1003 @@
+//! Windows-only UIA implementation for [`super::UiaSurface`].
+//!
+//! UIA is a COM API. The [`IUIAutomation`] handle is `!Send`, so we own a
+//! dedicated worker thread that:
+//!
+//! 1. Initializes COM in the multi-threaded apartment (MTA).
+//! 2. Creates the `CUIAutomation` singleton and keeps the `IUIAutomation`
+//!    handle alive on this thread.
+//! 3. Receives `WorkerCmd`s over a `mpsc` channel and dispatches them.
+//! 4. Tears COM down cleanly when the channel closes or `Shutdown` arrives.
+//!
+//! Concurrent callers are serialized through the channel, which matches
+//! UIA's effective threading model anyway. See `docs/uia-mapping.md` §10.
+
+#![cfg(target_os = "windows")]
+
+use std::collections::HashMap;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Mutex;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime};
+
+use windows::core::Result as WinResult;
+use windows::core::BSTR;
+use windows::Win32::Foundation::LPARAM;
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
+    IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_ButtonControlTypeId,
+    UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
+    UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
+    UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId,
+    UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+    UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
+    UIA_ScrollBarControlTypeId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
+    UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
+    UIA_StatusBarControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+    UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_ThumbControlTypeId,
+    UIA_TitleBarControlTypeId, UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId,
+    UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId,
+    UIA_CONTROLTYPE_ID,
+};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible,
+};
+
+use agent_ctrl_core::{
+    Action, ActionResult, AppContext, Bounds, Error, Node, RefEntry, RefId, RefMap, Result, Role,
+    Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext, WindowTarget,
+};
+
+// ---------- Worker thread ----------
+
+/// A unit of work to run on the UIA worker thread. The closure receives the
+/// worker's mutable state and is responsible for shipping its own result back
+/// to the caller (typically via a captured `oneshot::Sender`).
+type WorkerJob = Box<dyn FnOnce(&mut WorkerState) + Send>;
+
+/// Commands the worker thread accepts.
+enum WorkerCmd {
+    /// Run an arbitrary closure with access to [`WorkerState`].
+    Run(WorkerJob),
+    /// Cooperative shutdown — drop COM objects and exit the loop.
+    Shutdown,
+}
+
+/// State held by the UIA worker thread. Owns the live COM objects plus the
+/// `RefMap` and target window from the most recent snapshot for action-time
+/// re-resolution.
+struct WorkerState {
+    automation: IUIAutomation,
+    /// `RefMap` from the most recent successful snapshot. Replaced wholesale
+    /// each time `snapshot()` runs, so action-time resolution can never use
+    /// stale entries from older snapshots.
+    last_refs: RefMap,
+    /// HWND that the most recent snapshot was taken from. `None` until the
+    /// first snapshot. Subsequent actions resolve elements relative to this
+    /// window, not the foreground (which may have changed in the meantime).
+    last_hwnd: Option<HWND>,
+}
+
+/// Owns the worker thread that holds the live UIA session.
+///
+/// Drop sends a `Shutdown` and waits for the worker to exit. If the worker
+/// has already died the drop is effectively a no-op.
+pub(crate) struct UiaInner {
+    sender: Mutex<mpsc::Sender<WorkerCmd>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl UiaInner {
+    /// Spawn the worker, wait for COM/UIA init to succeed (or fail fast).
+    pub(crate) fn new() -> Result<Self> {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCmd>();
+        let (ready_tx, ready_rx) = mpsc::channel::<WinResult<()>>();
+
+        let worker = thread::Builder::new()
+            .name("agent-ctrl-uia".into())
+            .spawn(move || {
+                // SAFETY: `CoInitializeEx` is sound to call once per thread. We
+                // pass `None` for the reserved pointer (documented usage) and
+                // `COINIT_MULTITHREADED` because UIA supports MTA and we never
+                // pump a message loop on this thread.
+                let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+                if init.is_err() {
+                    let _ = ready_tx.send(Err(init.into()));
+                    return;
+                }
+
+                // SAFETY: `CUIAutomation` and `IUIAutomation` are well-known COM
+                // identifiers shipped with Windows. `CLSCTX_INPROC_SERVER` is the
+                // documented activation context for the UIA client library.
+                let automation: IUIAutomation =
+                    match unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) } {
+                        Ok(a) => a,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e));
+                            // SAFETY: paired with the successful `CoInitializeEx` above.
+                            unsafe { CoUninitialize() };
+                            return;
+                        }
+                    };
+
+                let _ = ready_tx.send(Ok(()));
+
+                let mut state = WorkerState {
+                    automation,
+                    last_refs: RefMap::new(),
+                    last_hwnd: None,
+                };
+
+                while let Ok(cmd) = cmd_rx.recv() {
+                    match cmd {
+                        WorkerCmd::Run(job) => job(&mut state),
+                        WorkerCmd::Shutdown => break,
+                    }
+                }
+
+                // Order matters: drop COM interfaces BEFORE `CoUninitialize`,
+                // since releasing an interface after uninit is undefined behavior.
+                drop(state);
+
+                // SAFETY: paired with the successful `CoInitializeEx` above.
+                unsafe { CoUninitialize() };
+            })
+            .map_err(|e| Error::Surface(format!("failed to spawn UIA worker: {e}")))?;
+
+        // Wait for the worker to finish COM init and report status.
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => Ok(Self {
+                sender: Mutex::new(cmd_tx),
+                worker: Some(worker),
+            }),
+            Ok(Err(e)) => Err(Error::Surface(format!("UIA initialization failed: {e}"))),
+            Err(RecvTimeoutError::Timeout) => Err(Error::Surface(
+                "UIA worker did not complete init in 5s".into(),
+            )),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(Error::Surface("UIA worker died during init".into()))
+            }
+        }
+    }
+
+    /// Run a closure on the UIA worker thread and await its result.
+    ///
+    /// The closure receives a mutable reference to [`WorkerState`], giving it
+    /// access to the live `IUIAutomation` and the most recent snapshot's refs.
+    /// COM safety: the closure runs *on* the worker thread, so it can use
+    /// `!Send` UIA types freely. Only the returned `R` (which must be `Send`)
+    /// crosses thread boundaries.
+    async fn run<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut WorkerState) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let job: WorkerJob = Box::new(move |state| {
+            let _ = reply_tx.send(f(state));
+        });
+
+        // Send the job. Brief lock; released before the await.
+        let send_result = match self.sender.lock() {
+            Ok(sender) => sender.send(WorkerCmd::Run(job)),
+            Err(_) => return Err(Error::Surface("UIA worker sender mutex poisoned".into())),
+        };
+        if send_result.is_err() {
+            return Err(Error::Surface("UIA worker is no longer running".into()));
+        }
+
+        match reply_rx.await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Surface("UIA worker dropped reply channel".into())),
+        }
+    }
+
+    /// Capture a snapshot of the foreground window.
+    pub(crate) async fn snapshot(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
+        let opts = opts.clone();
+        self.run(move |state| capture_foreground(state, &opts))
+            .await
+    }
+
+    /// Execute an action against the most recent snapshot's refs.
+    pub(crate) async fn act(&self, action: Action) -> Result<ActionResult> {
+        self.run(move |state| act_dispatch(state, &action)).await
+    }
+}
+
+impl Drop for UiaInner {
+    fn drop(&mut self) {
+        if let Ok(sender) = self.sender.lock() {
+            let _ = sender.send(WorkerCmd::Shutdown);
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// ---------- Snapshot pieces ----------
+
+/// Build a [`Snapshot`] for the targeted window and store its refs + HWND
+/// on the [`WorkerState`] for subsequent action-time re-resolution.
+fn capture_foreground(state: &mut WorkerState, opts: &SnapshotOptions) -> Result<Snapshot> {
+    let hwnd = resolve_target_hwnd(&opts.target)?;
+    let snap = capture_with_options(&state.automation, opts, hwnd)?;
+    state.last_refs = snap.refs.clone();
+    state.last_hwnd = Some(hwnd);
+    Ok(snap)
+}
+
+fn capture_with_options(
+    automation: &IUIAutomation,
+    opts: &SnapshotOptions,
+    hwnd: HWND,
+) -> Result<Snapshot> {
+    // SAFETY: `hwnd` is either a valid window handle or null; `ElementFromHandle`
+    // is documented to return an error in the latter case rather than dereferencing.
+    let root_element = unsafe { automation.ElementFromHandle(hwnd) }
+        .map_err(|e| Error::Snapshot(format!("ElementFromHandle: {e}")))?;
+
+    // Capture per-window DPI once; we apply the same factor to every node's
+    // bounds since they all live in the same window. See docs §6.
+    let dpi_scale = window_dpi_scale(hwnd);
+
+    // The Control view walker is the right tradeoff for agents (see docs §9):
+    // skips the lowest-level rendering noise without hiding interactive controls.
+    let walker: IUIAutomationTreeWalker = unsafe { automation.ControlViewWalker() }
+        .map_err(|e| Error::Snapshot(format!("ControlViewWalker: {e}")))?;
+
+    let mut refs = RefMap::new();
+    // `nth_seen` tracks `(role, name) → count` *globally* across the whole
+    // snapshot in pre-order DFS. The action-time walker mirrors this exactly
+    // so it can rediscover any element the agent references.
+    let mut nth_seen: HashMap<(Role, String), usize> = HashMap::new();
+
+    let (mut root, root_editable) = build_node(&root_element, dpi_scale);
+    if root.role.is_interactive() || root_editable {
+        let key = (root.role.clone(), root.name.clone());
+        let counter = nth_seen.entry(key).or_insert(0);
+        let nth = *counter;
+        *counter += 1;
+        let id = refs.insert(root.role.clone(), root.name.clone(), nth, None);
+        root.ref_id = Some(id);
+    }
+    root.children = walk_children(
+        &walker,
+        &root_element,
+        &mut refs,
+        &mut nth_seen,
+        1,
+        opts,
+        dpi_scale,
+    )?;
+
+    let window_title = if root.name.is_empty() {
+        None
+    } else {
+        Some(root.name.clone())
+    };
+
+    // SAFETY: `root_element` is a valid COM interface.
+    let pid_signed = unsafe { root_element.CurrentProcessId() }
+        .map_err(|e| Error::Snapshot(format!("CurrentProcessId: {e}")))?;
+    let pid = u32::try_from(pid_signed)
+        .map_err(|_| Error::Snapshot(format!("invalid PID from UIA: {pid_signed}")))?;
+
+    let (app_id, app_name) = process_info(pid)?;
+
+    Ok(Snapshot {
+        captured_at: SystemTime::now(),
+        surface_kind: SurfaceKind::Uia,
+        app: AppContext {
+            id: app_id,
+            name: app_name,
+        },
+        window: Some(WindowContext {
+            id: format!("{:#x}", hwnd.0 as usize),
+            title: window_title,
+        }),
+        root,
+        refs,
+    })
+}
+
+/// Walk every Control-view child of `parent` and emit `Node`s.
+///
+/// Pre-order DFS. `nth_seen` is the *global* per-snapshot counter described
+/// in `capture_with_options`. Honors `opts.compact` (drop unnamed `Generic`
+/// nodes; their children are hoisted into the caller's list) and `opts.depth`.
+fn walk_children(
+    walker: &IUIAutomationTreeWalker,
+    parent: &IUIAutomationElement,
+    refs: &mut RefMap,
+    nth_seen: &mut HashMap<(Role, String), usize>,
+    depth: usize,
+    opts: &SnapshotOptions,
+    dpi_scale: f64,
+) -> Result<Vec<Node>> {
+    if let Some(max) = opts.depth {
+        if depth > max {
+            return Ok(Vec::new());
+        }
+    }
+
+    let mut result: Vec<Node> = Vec::new();
+
+    // SAFETY: `parent` is a valid COM interface; walker methods return Err
+    // (which we treat as "no more children") when there are no more siblings.
+    let mut maybe_child = unsafe { walker.GetFirstChildElement(parent) }.ok();
+    while let Some(child) = maybe_child {
+        let (mut node, has_editable_value) = build_node(&child, dpi_scale);
+
+        // Allocate ref BEFORE recursing so `nth` follows pre-order DFS.
+        // `find_in_tree` mirrors this exact ordering at action time.
+        // Refs are emitted for ARIA-interactive roles AND for any element
+        // that exposes an editable `ValuePattern` (catches Document-typed
+        // text editors like Win11 Notepad's main canvas).
+        if node.role.is_interactive() || has_editable_value {
+            let key = (node.role.clone(), node.name.clone());
+            let counter = nth_seen.entry(key).or_insert(0);
+            let nth = *counter;
+            *counter += 1;
+            let id = refs.insert(node.role.clone(), node.name.clone(), nth, None);
+            node.ref_id = Some(id);
+        }
+
+        node.children = walk_children(walker, &child, refs, nth_seen, depth + 1, opts, dpi_scale)?;
+
+        if opts.compact && is_compactable(&node) {
+            // Hoist the children into our caller's list — the empty Generic
+            // wrapper is dropped, but its descendants survive.
+            result.extend(std::mem::take(&mut node.children));
+        } else {
+            result.push(node);
+        }
+
+        // SAFETY: `child` is a valid COM interface obtained from the walker.
+        maybe_child = unsafe { walker.GetNextSiblingElement(&child) }.ok();
+    }
+
+    Ok(result)
+}
+
+/// Roles that may carry an editable value via UIA's `ValuePattern`. We only
+/// query the pattern for these to keep snapshot cost bounded — querying every
+/// node would add a COM round-trip per element on trees of thousands.
+fn role_might_have_value(role: &Role) -> bool {
+    matches!(
+        role,
+        Role::TextField
+            | Role::Document
+            | Role::ComboBox
+            | Role::SearchBox
+            | Role::SpinButton
+            | Role::Slider
+            | Role::Unknown(_)
+    )
+}
+
+/// Read the element's `ValuePattern` value when present.
+///
+/// Returns `(value, is_read_only)`. `None` if the pattern isn't supported.
+fn read_value_pattern(element: &IUIAutomationElement) -> Option<(String, bool)> {
+    // SAFETY: `element` is a valid COM interface; UIA pattern IDs are well-known.
+    let pattern: IUIAutomationValuePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_ValuePatternId) }.ok()?;
+    let value = unsafe { pattern.CurrentValue() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let read_only = unsafe { pattern.CurrentIsReadOnly() }.is_ok_and(BOOL::as_bool);
+    Some((value, read_only))
+}
+
+/// Map an [`IUIAutomationElement`] to a [`Node`] (no children populated).
+///
+/// Returns `(node, has_editable_value)`. Each property read is best-effort:
+/// if a particular UIA call fails (some controls just don't implement them
+/// all), we substitute a defensible default rather than failing the whole
+/// node. `has_editable_value` is `true` when the element exposes a
+/// non-read-only `ValuePattern`; the caller uses it to decide whether to
+/// allocate a `RefId` even when the role isn't ARIA-interactive (the typical
+/// case for Win11 Notepad's `Document`-typed edit area).
+fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
+    // SAFETY: each Current* getter dereferences only the COM `this` pointer
+    // (the receiver), which is valid for the lifetime of `element`.
+    let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+    let class_name = unsafe { element.CurrentClassName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let role = role_from_control_type(control_type, &class_name);
+
+    let name = unsafe { element.CurrentName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+
+    let is_enabled = unsafe { element.CurrentIsEnabled() }.is_ok_and(BOOL::as_bool);
+    let is_offscreen = unsafe { element.CurrentIsOffscreen() }.is_ok_and(BOOL::as_bool);
+    let has_focus = unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(BOOL::as_bool);
+
+    let bounds = unsafe { element.CurrentBoundingRectangle() }
+        .ok()
+        .map(|r| Bounds {
+            x: f64::from(r.left) / dpi_scale,
+            y: f64::from(r.top) / dpi_scale,
+            w: f64::from(r.right - r.left) / dpi_scale,
+            h: f64::from(r.bottom - r.top) / dpi_scale,
+        });
+
+    let (value, has_editable_value) = if role_might_have_value(&role) {
+        match read_value_pattern(element) {
+            Some((v, read_only)) => (if v.is_empty() { None } else { Some(v) }, !read_only),
+            None => (None, false),
+        }
+    } else {
+        (None, false)
+    };
+
+    let node = Node {
+        ref_id: None,
+        role,
+        name,
+        description: None,
+        value,
+        state: State {
+            visible: !is_offscreen,
+            enabled: is_enabled,
+            focused: has_focus,
+            ..State::default()
+        },
+        bounds,
+        level: None,
+        children: Vec::new(),
+        opaque: false,
+        native: None,
+    };
+    (node, has_editable_value)
+}
+
+/// Compact-mode predicate: drop unnamed structural-only wrapper nodes.
+fn is_compactable(node: &Node) -> bool {
+    matches!(node.role, Role::Generic) && node.name.is_empty() && !node.state.focused
+}
+
+/// UIA ControlType → canonical [`Role`]. Per `docs/uia-mapping.md` §1.
+fn role_from_control_type(ct: UIA_CONTROLTYPE_ID, class_name: &str) -> Role {
+    // Mappings are listed grouped by target Role so that ControlTypes which
+    // share a Role (e.g. Pane / ProgressBar / ScrollBar all become Generic)
+    // can be collapsed without confusing clippy.
+    if ct == UIA_ButtonControlTypeId || ct == UIA_SplitButtonControlTypeId {
+        Role::Button
+    } else if ct == UIA_CheckBoxControlTypeId {
+        Role::Checkbox
+    } else if ct == UIA_ComboBoxControlTypeId {
+        Role::ComboBox
+    } else if ct == UIA_CustomControlTypeId {
+        promote_class_name(class_name)
+    } else if ct == UIA_DataGridControlTypeId {
+        Role::Grid
+    } else if ct == UIA_DataItemControlTypeId {
+        Role::Row
+    } else if ct == UIA_DocumentControlTypeId {
+        Role::Document
+    } else if ct == UIA_EditControlTypeId {
+        Role::TextField
+    } else if ct == UIA_GroupControlTypeId
+        || ct == UIA_CalendarControlTypeId
+        || ct == UIA_SemanticZoomControlTypeId
+    {
+        Role::Group
+    } else if ct == UIA_HeaderControlTypeId {
+        Role::RowGroup
+    } else if ct == UIA_HeaderItemControlTypeId {
+        Role::ColumnHeader
+    } else if ct == UIA_HyperlinkControlTypeId {
+        Role::Link
+    } else if ct == UIA_ImageControlTypeId {
+        Role::Image
+    } else if ct == UIA_ListControlTypeId {
+        Role::List
+    } else if ct == UIA_ListItemControlTypeId {
+        Role::ListItem
+    } else if ct == UIA_MenuControlTypeId {
+        Role::Menu
+    } else if ct == UIA_MenuBarControlTypeId {
+        Role::MenuBar
+    } else if ct == UIA_MenuItemControlTypeId {
+        Role::MenuItem
+    } else if ct == UIA_PaneControlTypeId
+        || ct == UIA_ProgressBarControlTypeId
+        || ct == UIA_ScrollBarControlTypeId
+        || ct == UIA_SeparatorControlTypeId
+        || ct == UIA_TextControlTypeId
+        || ct == UIA_ThumbControlTypeId
+        || ct == UIA_TitleBarControlTypeId
+        || ct == UIA_ToolTipControlTypeId
+    {
+        Role::Generic
+    } else if ct == UIA_RadioButtonControlTypeId {
+        Role::Radio
+    } else if ct == UIA_SliderControlTypeId {
+        Role::Slider
+    } else if ct == UIA_SpinnerControlTypeId {
+        Role::SpinButton
+    } else if ct == UIA_StatusBarControlTypeId {
+        Role::Region
+    } else if ct == UIA_TabControlTypeId {
+        Role::TabList
+    } else if ct == UIA_TabItemControlTypeId {
+        Role::Tab
+    } else if ct == UIA_TableControlTypeId {
+        Role::Table
+    } else if ct == UIA_ToolBarControlTypeId {
+        Role::Toolbar
+    } else if ct == UIA_TreeControlTypeId {
+        Role::Tree
+    } else if ct == UIA_TreeItemControlTypeId {
+        Role::TreeItem
+    } else if ct == UIA_WindowControlTypeId {
+        Role::Window
+    } else {
+        Role::Unknown(format!("uia_ct_{}", ct.0))
+    }
+}
+
+/// Promotion table for legacy Win32 class names. Per `docs/uia-mapping.md` §1.1.
+fn promote_class_name(class_name: &str) -> Role {
+    let lower = class_name.to_ascii_lowercase();
+    if lower.starts_with("richedit") {
+        return Role::TextField;
+    }
+    match lower.as_str() {
+        "edit" => Role::TextField,
+        "static" => Role::Generic,
+        "button" => Role::Button,
+        "combobox" => Role::ComboBox,
+        "syslistview32" => Role::List,
+        "systreeview32" => Role::Tree,
+        _ => Role::Unknown(class_name.to_string()),
+    }
+}
+
+/// Returns the DPI scale factor (1.0 = 96 DPI) for the monitor hosting `hwnd`.
+/// Used to convert UIA's physical-pixel `BoundingRectangle` into the logical
+/// pixels our schema documents. Per `docs/uia-mapping.md` §6.
+fn window_dpi_scale(hwnd: HWND) -> f64 {
+    // SAFETY: `GetDpiForWindow` accepts any HWND; it returns 0 if the API is
+    // unavailable or the window is on an older OS, in which case we fall back
+    // to 1.0 (no scaling).
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 {
+        1.0
+    } else {
+        f64::from(dpi) / 96.0
+    }
+}
+
+/// Resolve a PID to `(executable path, executable file stem)`.
+fn process_info(pid: u32) -> Result<(String, String)> {
+    /// Capacity of the WCHAR buffer used for the executable path. 1024 chars
+    /// is comfortably above MAX_PATH (260) and the extended path limit (~32k
+    /// is theoretical; in practice almost no executable lives near it).
+    const BUFFER_LEN: u32 = 1024;
+
+    // SAFETY: `OpenProcess` is sound; we close the returned handle below.
+    // `PROCESS_QUERY_LIMITED_INFORMATION` is the minimum right needed to call
+    // `QueryFullProcessImageNameW` on most processes (including elevated ones
+    // for an unelevated client).
+    let handle: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map_err(|e| Error::Snapshot(format!("OpenProcess(pid={pid}): {e}")))?;
+
+    let mut buffer = [0u16; BUFFER_LEN as usize];
+    let mut size = BUFFER_LEN;
+
+    // SAFETY: `handle` is a valid process handle obtained from OpenProcess.
+    // `buffer` outlives the call; `&raw mut size` is a valid pointer to a u32
+    // holding the buffer capacity in WCHARs.
+    let query_result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &raw mut size,
+        )
+    };
+
+    // SAFETY: `handle` is valid; CloseHandle is required even on query failure.
+    let _ = unsafe { CloseHandle(handle) };
+
+    query_result.map_err(|e| Error::Snapshot(format!("QueryFullProcessImageNameW: {e}")))?;
+
+    let path = String::from_utf16_lossy(&buffer[..size as usize]);
+    let name = std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map_or_else(|| path.clone(), str::to_owned);
+
+    Ok((path, name))
+}
+
+// ---------- Action pieces ----------
+
+/// Top-level dispatch: route a typed `Action` to the right UIA call.
+fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult> {
+    match action {
+        Action::Click { ref_id } => act_click(state, ref_id),
+        Action::Focus { ref_id } => act_focus(state, ref_id),
+        Action::Fill { ref_id, value } => act_fill(state, ref_id, value),
+        other => Err(Error::Unsupported {
+            surface: SurfaceKind::Uia.as_str().into(),
+            action: action_name(other).into(),
+        }),
+    }
+}
+
+fn act_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
+        action: "resolve".into(),
+        reason: "no prior snapshot — call snapshot before act".into(),
+    })?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+
+    // SAFETY: `element` is a valid COM interface; pattern interface IDs are
+    // well-known UIA constants.
+    let pattern: IUIAutomationInvokePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_InvokePatternId) }.map_err(|e| Error::Action {
+            action: "click".into(),
+            reason: format!("element does not support InvokePattern: {e}"),
+        })?;
+
+    // SAFETY: `pattern` is a valid IUIAutomationInvokePattern.
+    unsafe { pattern.Invoke() }.map_err(|e| Error::Action {
+        action: "click".into(),
+        reason: format!("Invoke: {e}"),
+    })?;
+
+    Ok(ActionResult::ok())
+}
+
+fn act_focus(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
+        action: "resolve".into(),
+        reason: "no prior snapshot — call snapshot before act".into(),
+    })?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+
+    // SAFETY: `element` is a valid COM interface.
+    unsafe { element.SetFocus() }.map_err(|e| Error::Action {
+        action: "focus".into(),
+        reason: format!("SetFocus: {e}"),
+    })?;
+
+    Ok(ActionResult::ok())
+}
+
+fn act_fill(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
+        action: "resolve".into(),
+        reason: "no prior snapshot — call snapshot before act".into(),
+    })?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+
+    // SAFETY: `element` is a valid COM interface.
+    let pattern: IUIAutomationValuePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_ValuePatternId) }.map_err(|e| Error::Action {
+            action: "fill".into(),
+            reason: format!("element does not support ValuePattern: {e}"),
+        })?;
+
+    let bstr = BSTR::from(value);
+    // SAFETY: `pattern` is valid; `&bstr` outlives the call.
+    unsafe { pattern.SetValue(&bstr) }.map_err(|e| Error::Action {
+        action: "fill".into(),
+        reason: format!("SetValue: {e}"),
+    })?;
+
+    Ok(ActionResult::ok())
+}
+
+fn lookup_ref(state: &WorkerState, ref_id: &RefId) -> Result<RefEntry> {
+    state
+        .last_refs
+        .get(ref_id)
+        .cloned()
+        .ok_or_else(|| Error::RefNotFound(ref_id.0.clone()))
+}
+
+/// Translate a [`WindowTarget`] into the HWND the snapshot/action will operate on.
+fn resolve_target_hwnd(target: &WindowTarget) -> Result<HWND> {
+    match target {
+        WindowTarget::Foreground => {
+            // SAFETY: `GetForegroundWindow` is always sound; null check below.
+            let h = unsafe { GetForegroundWindow() };
+            if h.0.is_null() {
+                Err(Error::Snapshot("no foreground window".into()))
+            } else {
+                Ok(h)
+            }
+        }
+        WindowTarget::Pid { pid } => find_window_by_pid(*pid)
+            .ok_or_else(|| Error::Snapshot(format!("no visible top-level window for PID {pid}"))),
+        WindowTarget::Title { title } => find_window_by_title(title).ok_or_else(|| {
+            Error::Snapshot(format!(
+                "no visible top-level window with title containing {title:?}"
+            ))
+        }),
+        WindowTarget::ProcessName { name } => find_window_by_process_name(name).ok_or_else(|| {
+            Error::Snapshot(format!(
+                "no visible top-level window owned by a process named {name:?}"
+            ))
+        }),
+    }
+}
+
+/// State threaded through `EnumWindows` callbacks for finding a target window.
+struct EnumState {
+    /// Predicate evaluated against each enumerated visible top-level window.
+    predicate: Box<dyn FnMut(HWND) -> bool>,
+    /// First HWND for which `predicate` returned `true`.
+    found: Option<HWND>,
+}
+
+extern "system" fn enum_windows_proc(
+    hwnd: HWND,
+    lparam: LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    // SAFETY: `lparam` was set in the caller to a `*mut EnumState` with a
+    // valid lifetime. `EnumWindows` is single-threaded with respect to this
+    // callback, and the caller blocks until enumeration completes.
+    let state = unsafe { &mut *(lparam.0 as *mut EnumState) };
+    // SAFETY: `IsWindowVisible` accepts any HWND.
+    if unsafe { IsWindowVisible(hwnd) }.as_bool() && (state.predicate)(hwnd) {
+        state.found = Some(hwnd);
+        windows::Win32::Foundation::BOOL(0) // stop enumeration
+    } else {
+        windows::Win32::Foundation::BOOL(1) // continue
+    }
+}
+
+fn find_window_by_pid(target_pid: u32) -> Option<HWND> {
+    let mut state = EnumState {
+        predicate: Box::new(move |hwnd| {
+            let mut pid: u32 = 0;
+            // SAFETY: `hwnd` is valid (provided by EnumWindows); writing to a
+            // local u32 via &raw mut is sound.
+            let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
+            pid == target_pid
+        }),
+        found: None,
+    };
+    enumerate_top_level(&mut state);
+    state.found
+}
+
+fn find_window_by_title(needle: &str) -> Option<HWND> {
+    let needle = needle.to_ascii_lowercase();
+    let mut state = EnumState {
+        predicate: Box::new(move |hwnd| {
+            // SAFETY: `GetWindowTextLengthW` accepts any HWND.
+            let len = unsafe { GetWindowTextLengthW(hwnd) };
+            let Ok(len) = usize::try_from(len) else {
+                return false;
+            };
+            if len == 0 {
+                return false;
+            }
+            // +1 for the null terminator GetWindowTextW writes.
+            let mut buf = vec![0u16; len + 1];
+            // SAFETY: buffer is sized for `len + 1` u16s.
+            let written = unsafe { GetWindowTextW(hwnd, &mut buf) };
+            let Ok(written) = usize::try_from(written) else {
+                return false;
+            };
+            if written == 0 {
+                return false;
+            }
+            let title = String::from_utf16_lossy(&buf[..written]).to_ascii_lowercase();
+            title.contains(&needle)
+        }),
+        found: None,
+    };
+    enumerate_top_level(&mut state);
+    state.found
+}
+
+/// Find the first visible top-level window whose owning process executable's
+/// file stem matches `target_name` (case-insensitive). Locale-independent,
+/// unlike [`find_window_by_title`].
+fn find_window_by_process_name(target_name: &str) -> Option<HWND> {
+    let target = target_name.to_ascii_lowercase();
+    let mut state = EnumState {
+        predicate: Box::new(move |hwnd| {
+            let mut pid: u32 = 0;
+            // SAFETY: `hwnd` is valid; writing to a local u32 via raw pointer is sound.
+            let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
+            if pid == 0 {
+                return false;
+            }
+            let Ok((_path, name)) = process_info(pid) else {
+                return false;
+            };
+            name.to_ascii_lowercase() == target
+        }),
+        found: None,
+    };
+    enumerate_top_level(&mut state);
+    state.found
+}
+
+fn enumerate_top_level(state: &mut EnumState) {
+    let lparam = LPARAM(std::ptr::from_mut::<EnumState>(state) as isize);
+    // SAFETY: callback is `extern "system"`; `lparam` points to a valid `EnumState`
+    // for the duration of the call (this fn blocks until enumeration completes).
+    // We ignore the return code (False means a callback returned false to stop).
+    let _ = unsafe { EnumWindows(Some(enum_windows_proc), lparam) };
+}
+
+/// Re-resolve a [`RefEntry`] to a live [`IUIAutomationElement`] by walking
+/// the snapshot's target window's Control view. See `docs/uia-mapping.md` §7.
+fn resolve_element(
+    automation: &IUIAutomation,
+    hwnd: HWND,
+    target: &RefEntry,
+) -> Result<IUIAutomationElement> {
+    if hwnd.0.is_null() {
+        return Err(Error::Action {
+            action: "resolve".into(),
+            reason: "snapshot target window is no longer valid".into(),
+        });
+    }
+
+    // SAFETY: hwnd is non-null per the check above.
+    let root = unsafe { automation.ElementFromHandle(hwnd) }.map_err(|e| Error::Action {
+        action: "resolve".into(),
+        reason: format!("ElementFromHandle: {e}"),
+    })?;
+
+    // SAFETY: `automation` is a valid COM interface.
+    let walker = unsafe { automation.ControlViewWalker() }.map_err(|e| Error::Action {
+        action: "resolve".into(),
+        reason: format!("ControlViewWalker: {e}"),
+    })?;
+
+    find_in_tree(&walker, &root, target).ok_or_else(|| Error::Action {
+        action: "resolve".into(),
+        reason: format!(
+            "could not find element matching role={:?} name={:?} nth={}",
+            target.role, target.name, target.nth
+        ),
+    })
+}
+
+/// Walk the Control view in the same pre-order DFS the snapshot used,
+/// returning the element matching the target's `(role, name, nth)` triple.
+///
+/// `nth` is global across the snapshot, mirroring the snapshot-time scheme.
+/// Crucially, the predicate that decides whether an element "counts" toward
+/// `nth` must match snapshot's ref-emission predicate exactly (interactive
+/// role OR editable `ValuePattern`) — otherwise an element matching role+name
+/// that didn't get a ref in the snapshot would still bump the counter here,
+/// causing action-time resolution to land on the wrong element.
+fn find_in_tree(
+    walker: &IUIAutomationTreeWalker,
+    root: &IUIAutomationElement,
+    target: &RefEntry,
+) -> Option<IUIAutomationElement> {
+    let mut counter: usize = 0;
+
+    // Check the root itself first to mirror the snapshot's root handling.
+    if element_qualifies_as_ref(root, &target.role, &target.name) {
+        if counter == target.nth {
+            return Some(root.clone());
+        }
+        counter += 1;
+    }
+    descend(walker, root, target, &mut counter)
+}
+
+fn descend(
+    walker: &IUIAutomationTreeWalker,
+    parent: &IUIAutomationElement,
+    target: &RefEntry,
+    counter: &mut usize,
+) -> Option<IUIAutomationElement> {
+    // SAFETY: `parent` is a valid COM interface; walker.Get*ChildElement
+    // returns Err for "no more children".
+    let mut maybe_child = unsafe { walker.GetFirstChildElement(parent) }.ok();
+    while let Some(child) = maybe_child {
+        // Pre-order: check this element first.
+        if element_qualifies_as_ref(&child, &target.role, &target.name) {
+            if *counter == target.nth {
+                return Some(child);
+            }
+            *counter += 1;
+        }
+        // Then recurse into its subtree.
+        if let Some(found) = descend(walker, &child, target, counter) {
+            return Some(found);
+        }
+        // SAFETY: `child` is a valid COM interface obtained from the walker.
+        maybe_child = unsafe { walker.GetNextSiblingElement(&child) }.ok();
+    }
+    None
+}
+
+/// Mirrors snapshot's ref-emission predicate: returns `true` iff the element
+/// matches `(role, name)` AND would have been allocated a `RefId` during
+/// snapshot (interactive role, or editable `ValuePattern`).
+fn element_qualifies_as_ref(element: &IUIAutomationElement, role: &Role, name: &str) -> bool {
+    // SAFETY: `element` is valid; failed reads fall back to defaults.
+    let ct = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+    let class = unsafe { element.CurrentClassName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let r = role_from_control_type(ct, &class);
+    if &r != role {
+        return false;
+    }
+    let n = unsafe { element.CurrentName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    if n != name {
+        return false;
+    }
+
+    // Final gate: the snapshot only allocates a ref when the element is
+    // ARIA-interactive OR exposes a non-read-only `ValuePattern`. We check
+    // ValuePattern only for roles that might have one (avoids per-element
+    // COM calls during the cold portion of the walk).
+    if r.is_interactive() {
+        return true;
+    }
+    if role_might_have_value(&r) {
+        if let Some((_, read_only)) = read_value_pattern(element) {
+            if !read_only {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn action_name(a: &Action) -> &'static str {
+    match a {
+        Action::Click { .. } => "click",
+        Action::DoubleClick { .. } => "double_click",
+        Action::RightClick { .. } => "right_click",
+        Action::Hover { .. } => "hover",
+        Action::Focus { .. } => "focus",
+        Action::Type { .. } => "type",
+        Action::Fill { .. } => "fill",
+        Action::Press { .. } => "press",
+        Action::KeyDown { .. } => "key_down",
+        Action::KeyUp { .. } => "key_up",
+        Action::Scroll { .. } => "scroll",
+        Action::Drag { .. } => "drag",
+        Action::Select { .. } => "select",
+        Action::SelectAll { .. } => "select_all",
+        Action::ScrollIntoView { .. } => "scroll_into_view",
+        Action::Wait { .. } => "wait",
+        Action::SwitchApp { .. } => "switch_app",
+        Action::FocusWindow { .. } => "focus_window",
+        Action::Screenshot { .. } => "screenshot",
+    }
+}

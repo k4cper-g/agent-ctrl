@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/daemon",
+    "crates/cli",
+    "crates/surface-cdp",
+    "crates/surface-uia",
+    "crates/surface-ax",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["k4cper-g"]
+license = "Apache-2.0"
+repository = "https://github.com/k4cper-g/agent-ctrl"
+homepage = "https://github.com/k4cper-g/agent-ctrl"
+description = "Cross-platform computer-use framework for AI agents."
+
+[workspace.dependencies]
+agent-ctrl-core = { path = "crates/core", version = "0.1.0" }
+agent-ctrl-daemon = { path = "crates/daemon", version = "0.1.0" }
+agent-ctrl-surface-cdp = { path = "crates/surface-cdp", version = "0.1.0" }
+agent-ctrl-surface-uia = { path = "crates/surface-uia", version = "0.1.0" }
+agent-ctrl-surface-ax = { path = "crates/surface-ax", version = "0.1.0" }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "process", "signal"] }
+async-trait = "0.1"
+futures = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+thiserror = "1"
+anyhow = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# `doc_markdown` is noisy on product names (UIA, CDP, XCUITest, etc.) and
+# adds no real value. Code identifiers still get backticked manually.
+doc_markdown = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

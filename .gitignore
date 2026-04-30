@@ -1,0 +1,36 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Node
+node_modules
+**/dist
+*.tsbuildinfo
+
+# IDE
+/.vscode
+/.idea
+*.iml
+*.swp
+.DS_Store
+
+# Claude Code local-machine settings (permissions, etc.)
+.claude/settings.local.json
+
+# Local environment
+.env
+.env.local
+
+# Cargo
+# Keep Cargo.lock for the workspace (we ship a binary).
+# The reference clone of agent-browser is checked in by the user but not
+# tracked as part of agent-ctrl itself.
+/agent-browser
+
+# Build artifacts
+/dist
+/bin/native
+
+# OS
+Thumbs.db

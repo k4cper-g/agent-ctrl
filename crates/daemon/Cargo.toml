@@ -1,0 +1,30 @@
+[package]
+name = "agent-ctrl-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Long-running daemon that owns Surface sessions for agent-ctrl."
+
+[dependencies]
+agent-ctrl-core = { workspace = true, features = ["mock"] }
+agent-ctrl-surface-cdp.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+agent-ctrl-surface-uia.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+agent-ctrl-surface-ax.workspace = true
+
+[lints]
+workspace = true

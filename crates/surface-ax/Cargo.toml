@@ -1,0 +1,25 @@
+[package]
+name = "agent-ctrl-surface-ax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "macOS Accessibility (AX) surface for agent-ctrl."
+
+[dependencies]
+agent-ctrl-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+# Activated only when targeting macOS. Future implementation will add:
+#   objc2                 = "0.5"
+#   objc2-app-kit         = "0.2"
+#   core-foundation       = "0.10"
+#   accessibility-sys     = "0.1"
+[target.'cfg(target_os = "macos")'.dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,27 @@
+[package]
+name = "agent-ctrl-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types, schema, and Surface trait for agent-ctrl."
+
+[features]
+default = []
+# Enables `mock::MockSurface`, an in-memory `Surface` impl used for tests and
+# protocol demos. Off by default so non-test consumers don't pay for it.
+mock = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

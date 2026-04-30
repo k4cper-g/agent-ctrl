@@ -1,0 +1,17 @@
+{
+  "name": "agent-ctrl-monorepo",
+  "private": true,
+  "description": "Top-level workspace for the agent-ctrl TypeScript packages.",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
