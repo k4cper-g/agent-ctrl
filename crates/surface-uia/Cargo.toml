@@ -19,6 +19,7 @@ tracing.workspace = true
 windows = { version = "0.58", features = [
     "Win32_UI_Accessibility",
     "Win32_System_Com",
+    "Win32_System_Ole",
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",

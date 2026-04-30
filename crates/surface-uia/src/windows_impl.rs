@@ -21,19 +21,25 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use windows::core::Result as WinResult;
-use windows::core::BSTR;
+use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    SAFEARRAY,
+};
+use windows::Win32::System::Ole::{
+    SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
+    SafeArrayUnaccessData,
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-    IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_ButtonControlTypeId,
+    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+    IUIAutomationInvokePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern, TreeScope,
+    TreeScope_Subtree, UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId,
     UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
     UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
     UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
@@ -63,8 +69,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use agent_ctrl_core::{
-    Action, ActionResult, AppContext, Bounds, Error, Node, RefEntry, RefId, RefMap, Result, Role,
-    Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext, WindowTarget,
+    Action, ActionResult, AppContext, Bounds, Error, NativeHandle, Node, RefEntry, RefId, RefMap,
+    Result, Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext, WindowTarget,
 };
 
 // ---------- Worker thread ----------
@@ -278,7 +284,12 @@ fn capture_with_options(
         let counter = nth_seen.entry(key).or_insert(0);
         let nth = *counter;
         *counter += 1;
-        let id = refs.insert(root.role.clone(), root.name.clone(), nth, None);
+        let id = refs.insert(
+            root.role.clone(),
+            root.name.clone(),
+            nth,
+            root.native.clone(),
+        );
         root.ref_id = Some(id);
     }
     root.children = walk_children(
@@ -359,7 +370,12 @@ fn walk_children(
             let counter = nth_seen.entry(key).or_insert(0);
             let nth = *counter;
             *counter += 1;
-            let id = refs.insert(node.role.clone(), node.name.clone(), nth, None);
+            let id = refs.insert(
+                node.role.clone(),
+                node.name.clone(),
+                nth,
+                node.native.clone(),
+            );
             node.ref_id = Some(id);
         }
 
@@ -457,6 +473,8 @@ fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
         (None, false)
     };
 
+    let native = build_native_handle(element);
+
     let node = Node {
         ref_id: None,
         role,
@@ -473,9 +491,107 @@ fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
         level: None,
         children: Vec::new(),
         opaque: false,
-        native: None,
+        native,
     };
     (node, has_editable_value)
+}
+
+/// Build the platform handle stored on every emitted [`Node`]. The handle is
+/// later cloned into the `RefMap` entry for elements that get a `RefId`, so
+/// action-time resolution can take a fast path through UIA's property index
+/// rather than walking the full subtree.
+///
+/// Returns `None` only when both `RuntimeId` extraction and `AutomationId`
+/// reads fail — the element is then so degenerate that there's nothing
+/// useful to record.
+fn build_native_handle(element: &IUIAutomationElement) -> Option<NativeHandle> {
+    let runtime_id = extract_runtime_id(element).unwrap_or_default();
+    let automation_id = extract_automation_id(element);
+    if runtime_id.is_empty() && automation_id.is_none() {
+        return None;
+    }
+    Some(NativeHandle::Uia {
+        runtime_id,
+        automation_id,
+    })
+}
+
+/// Pull the UIA `RuntimeId` out of an element and pack it as little-endian
+/// bytes (4 bytes per `i32` slot). RuntimeIds are unstable across UIA
+/// sessions but stable within one; we expose them so downstream code (and a
+/// future fast-path resolver) can compare elements without re-walking.
+fn extract_runtime_id(element: &IUIAutomationElement) -> Option<Vec<u8>> {
+    // SAFETY: `element` is a valid COM interface; `GetRuntimeId` returns a
+    // SAFEARRAY pointer we own and must destroy.
+    let array_ptr = unsafe { element.GetRuntimeId() }.ok()?;
+    if array_ptr.is_null() {
+        return None;
+    }
+    let ids = read_i32_safearray(array_ptr);
+    let mut bytes = Vec::with_capacity(ids.len() * 4);
+    for id in ids {
+        bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
+    }
+}
+
+/// Read the `AutomationId` property. Most Win32 controls don't set it; WPF
+/// and WinUI controls do. Empty strings are normalized to `None` so a present
+/// `Some("")` never tricks the fast-path resolver into matching the wrong
+/// element.
+fn extract_automation_id(element: &IUIAutomationElement) -> Option<String> {
+    // SAFETY: `element` is a valid COM interface.
+    let bstr = unsafe { element.CurrentAutomationId() }.ok()?;
+    let s = bstr.to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Read a one-dimensional SAFEARRAY of `i32` (the only shape `GetRuntimeId`
+/// returns) into a `Vec<i32>`. Always destroys the SAFEARRAY before returning,
+/// even on read failure — leaking would slowly bloat the UIA process's heap
+/// across thousands of nodes.
+fn read_i32_safearray(array: *mut SAFEARRAY) -> Vec<i32> {
+    if array.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `array` is a valid SAFEARRAY pointer obtained from UIA. Each
+    // SafeArray* call below is safe given a valid pointer; we destroy the
+    // array on every exit path. Bounds come back as i32s; data is a slice
+    // of i32 we copy out before unaccessing.
+    unsafe {
+        let (Ok(lbound), Ok(ubound)) = (SafeArrayGetLBound(array, 1), SafeArrayGetUBound(array, 1))
+        else {
+            let _ = SafeArrayDestroy(array);
+            return Vec::new();
+        };
+        let count = ubound.checked_sub(lbound).and_then(|d| d.checked_add(1));
+        let Some(count) = count
+            .filter(|c| *c > 0)
+            .and_then(|c| usize::try_from(c).ok())
+        else {
+            let _ = SafeArrayDestroy(array);
+            return Vec::new();
+        };
+
+        let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+        if SafeArrayAccessData(array, &raw mut data).is_err() || data.is_null() {
+            let _ = SafeArrayDestroy(array);
+            return Vec::new();
+        }
+        let slice = std::slice::from_raw_parts(data.cast::<i32>(), count);
+        let out = slice.to_vec();
+        let _ = SafeArrayUnaccessData(array);
+        let _ = SafeArrayDestroy(array);
+        out
+    }
 }
 
 /// Compact-mode predicate: drop unnamed structural-only wrapper nodes.
@@ -746,6 +862,13 @@ fn lookup_ref(state: &WorkerState, ref_id: &RefId) -> Result<RefEntry> {
 /// layout translation entirely, so emoji and non-Latin scripts work without
 /// any per-locale handling. Surrogate pairs are sent as two events as the OS
 /// expects.
+///
+/// Caveat: some WinUI 3 / XAML controls (Win11 Notepad's Document is the one
+/// we hit in tests) don't honor `VK_PACKET` / `WM_CHAR` for non-ASCII
+/// codepoints and substitute a fallback char. ASCII works everywhere; for
+/// guaranteed Unicode delivery against an editable field, prefer
+/// `Fill { ref_id, value }`, which goes through `ValuePattern.SetValue` and
+/// updates the model directly.
 fn act_type(state: &WorkerState, text: &str) -> Result<ActionResult> {
     if text.is_empty() {
         return Ok(ActionResult::ok());
@@ -1141,8 +1264,18 @@ fn enumerate_top_level(state: &mut EnumState) {
     let _ = unsafe { EnumWindows(Some(enum_windows_proc), lparam) };
 }
 
-/// Re-resolve a [`RefEntry`] to a live [`IUIAutomationElement`] by walking
-/// the snapshot's target window's Control view. See `docs/uia-mapping.md` §7.
+/// Re-resolve a [`RefEntry`] to a live [`IUIAutomationElement`].
+///
+/// Resolution priority, per `docs/uia-mapping.md` §7:
+///
+/// 1. Fast path: if the entry carries an `AutomationId`, ask UIA itself for
+///    the matching subtree element. UIA evaluates the property condition in
+///    its own indexed structures, which avoids cross-process COM round-trips
+///    per node and is what makes WPF/WinUI apps with thousands of controls
+///    snappy to drive.
+/// 2. Fall back to a `(role, name, nth)` walk of the Control view, mirroring
+///    the snapshot's pre-order DFS. This is the durable path that survives
+///    UIA tree mutations like virtualization realising/unrealising rows.
 fn resolve_element(
     automation: &IUIAutomation,
     hwnd: HWND,
@@ -1161,6 +1294,16 @@ fn resolve_element(
         reason: format!("ElementFromHandle: {e}"),
     })?;
 
+    if let Some(NativeHandle::Uia {
+        automation_id: Some(aid),
+        ..
+    }) = &target.native
+    {
+        if let Some(elem) = find_by_automation_id(automation, &root, aid, &target.role) {
+            return Ok(elem);
+        }
+    }
+
     // SAFETY: `automation` is a valid COM interface.
     let walker = unsafe { automation.ControlViewWalker() }.map_err(|e| Error::Action {
         action: "resolve".into(),
@@ -1174,6 +1317,39 @@ fn resolve_element(
             target.role, target.name, target.nth
         ),
     })
+}
+
+/// Fast-path resolver: ask UIA for the subtree element with this
+/// `AutomationId`. Returns `None` if the property condition can't be
+/// constructed, the search returns nothing, or the found element's role no
+/// longer matches what we captured (a buggy app could reuse the same
+/// `AutomationId` across role changes; the role check keeps us honest).
+fn find_by_automation_id(
+    automation: &IUIAutomation,
+    root: &IUIAutomationElement,
+    automation_id: &str,
+    expected_role: &Role,
+) -> Option<IUIAutomationElement> {
+    let value: VARIANT = BSTR::from(automation_id).into();
+    // SAFETY: `automation` is a valid COM interface; `value` outlives the call.
+    let condition: IUIAutomationCondition =
+        unsafe { automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, &value) }.ok()?;
+
+    // SAFETY: `root` and `condition` are valid COM interfaces.
+    let element = unsafe { root.FindFirst(TreeScope(TreeScope_Subtree.0), &condition) }.ok()?;
+
+    // Defensive: confirm the role still matches what the snapshot recorded.
+    // SAFETY: `element` is valid; failed reads fall back to a sentinel role.
+    let ct = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+    let class = unsafe { element.CurrentClassName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    if &role_from_control_type(ct, &class) == expected_role {
+        Some(element)
+    } else {
+        None
+    }
 }
 
 /// Walk the Control view in the same pre-order DFS the snapshot used,
@@ -1350,5 +1526,24 @@ mod tests {
         assert!(parse_chord("Ctrl+").is_err());
         assert!(parse_chord("+A").is_err());
         assert!(parse_chord("Ctrl+Bogus").is_err());
+    }
+
+    /// `RuntimeId` packing must keep the i32 sequence reconstructable: a
+    /// downstream consumer (or a future runtime-id-based fast-path) needs to
+    /// be able to read the bytes back as little-endian i32s in order.
+    #[test]
+    fn runtime_id_bytes_round_trip_as_le_i32() {
+        let ids: [i32; 3] = [42, -1, 0x7FFF_FFFF];
+        let mut bytes: Vec<u8> = Vec::new();
+        for id in ids {
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        assert_eq!(bytes.len(), 12);
+
+        let reconstructed: Vec<i32> = bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(reconstructed, ids);
     }
 }

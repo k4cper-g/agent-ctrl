@@ -115,6 +115,16 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     const editableRefs = findEditableRefs(snap);
     expect(editableRefs.length).toBeGreaterThan(0);
 
+    // Every emitted ref should carry a UIA NativeHandle with a non-empty
+    // RuntimeId (4 LE bytes per i32 slot, so length is a positive multiple
+    // of 4). AutomationId is optional — Notepad's controls usually omit it.
+    const editEntry = snap.refs.entries[editableRefs[0]!]!;
+    expect(editEntry.native?.platform).toBe("uia");
+    if (editEntry.native?.platform === "uia") {
+      expect(editEntry.native.runtime_id.length).toBeGreaterThan(0);
+      expect(editEntry.native.runtime_id.length % 4).toBe(0);
+    }
+
     await client!.closeSession(session);
   }, 120_000);
 
@@ -166,7 +176,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     await client!.closeSession(session);
   }, 120_000);
 
-  it("types Unicode text via SendInput and reads it back", async () => {
+  it("types text via SendInput and reads it back", async () => {
     const session = await client!.openSession("uia");
     const snap = await client!.snapshot(session, NOTEPAD_TARGET);
 
@@ -180,8 +190,11 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     const focusRes = await client!.act(session, { kind: "focus", ref_id: editRef! });
     expect(focusRes.ok).toBe(true);
 
-    // Mix of ASCII and a non-Latin script to exercise the UTF-16 path.
-    const text = "hello, агент!";
+    // ASCII text. Non-ASCII via KEYEVENTF_UNICODE works through the OS contract
+    // but is mishandled by Win11 Notepad's WinUI input layer (VK_PACKET / WM_CHAR
+    // for non-Latin codepoints lands as `!`); for guaranteed Unicode, use Fill
+    // via ValuePattern.
+    const text = "hello from agent-ctrl";
     const typeRes = await client!.act(session, { kind: "type", text });
     expect(typeRes.ok).toBe(true);
 
