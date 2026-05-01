@@ -63,15 +63,18 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN,
-    VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK,
-    VK_PAUSE, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_SPACE,
-    VK_TAB, VK_UP,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL,
+    VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT,
+    VK_NUMLOCK, VK_PAUSE, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT,
+    VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
+    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use agent_ctrl_core::{
@@ -982,6 +985,9 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::Select { ref_id, value } => act_select(state, ref_id, value),
         Action::ScrollIntoView { ref_id } => act_scroll_into_view(state, ref_id),
         Action::SelectAll { ref_id } => act_select_all(state, ref_id.as_ref()),
+        Action::DoubleClick { ref_id } => act_double_click(state, ref_id),
+        Action::RightClick { ref_id } => act_right_click(state, ref_id),
+        Action::Hover { ref_id } => act_hover(state, ref_id),
         other => Err(Error::Unsupported {
             surface: SurfaceKind::Uia.as_str().into(),
             action: action_name(other).into(),
@@ -1303,6 +1309,147 @@ fn act_key_up(state: &WorkerState, key: &str) -> Result<ActionResult> {
     })?;
     ensure_foreground(state, "key_up")?;
     send_inputs(&[make_vk_input(vk, true)], "key_up")
+}
+
+// ---------- Mouse input via SendInput ----------
+//
+// Pointer-driven actions that UIA doesn't expose a pattern for. Each helper
+// resolves the ref to a live element, computes the element's screen-space
+// center from `CurrentBoundingRectangle` (which is in physical pixels), then
+// builds a sequence of `MOUSEINPUT` events. Cursor positioning uses the
+// virtual-desktop absolute mode so multi-monitor setups Just Work.
+//
+// All helpers go through `ensure_foreground` first, like the keyboard
+// helpers, so the events land on the snapshot's pinned HWND rather than
+// whichever window happens to be in front of the test runner.
+
+/// Double primary-button click at the element's center.
+fn act_double_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, "double_click")?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let (cx, cy) = element_center_physical(&element)?;
+    let (ax, ay) = screen_to_absolute(cx, cy);
+    ensure_foreground(state, "double_click")?;
+    send_inputs(
+        &[
+            make_mouse_move_absolute(ax, ay),
+            make_mouse_button(MouseButton::Left, true),
+            make_mouse_button(MouseButton::Left, false),
+            make_mouse_button(MouseButton::Left, true),
+            make_mouse_button(MouseButton::Left, false),
+        ],
+        "double_click",
+    )
+}
+
+/// Secondary-button (right) click at the element's center.
+fn act_right_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, "right_click")?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let (cx, cy) = element_center_physical(&element)?;
+    let (ax, ay) = screen_to_absolute(cx, cy);
+    ensure_foreground(state, "right_click")?;
+    send_inputs(
+        &[
+            make_mouse_move_absolute(ax, ay),
+            make_mouse_button(MouseButton::Right, true),
+            make_mouse_button(MouseButton::Right, false),
+        ],
+        "right_click",
+    )
+}
+
+/// Move the cursor to the element's center; no button events. Useful for
+/// triggering hover-only UI (tooltips, dropdown anchors).
+fn act_hover(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, "hover")?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let (cx, cy) = element_center_physical(&element)?;
+    let (ax, ay) = screen_to_absolute(cx, cy);
+    ensure_foreground(state, "hover")?;
+    send_inputs(&[make_mouse_move_absolute(ax, ay)], "hover")
+}
+
+#[derive(Clone, Copy)]
+enum MouseButton {
+    Left,
+    Right,
+}
+
+fn make_mouse_button(button: MouseButton, down: bool) -> INPUT {
+    let flag = match (button, down) {
+        (MouseButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
+        (MouseButton::Left, false) => MOUSEEVENTF_LEFTUP,
+        (MouseButton::Right, true) => MOUSEEVENTF_RIGHTDOWN,
+        (MouseButton::Right, false) => MOUSEEVENTF_RIGHTUP,
+    };
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flag,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+fn make_mouse_move_absolute(x: i32, y: i32) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: x,
+                dy: y,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Read the element's UIA `BoundingRectangle` and return the center point
+/// in physical screen pixels. Used to position the cursor before button
+/// events. Surfaces a clean action error when the element doesn't have a
+/// rectangle (rare — typically only when the element has been destroyed).
+fn element_center_physical(element: &IUIAutomationElement) -> Result<(i32, i32)> {
+    // SAFETY: `element` is a valid COM interface.
+    let r = unsafe { element.CurrentBoundingRectangle() }.map_err(|e| Error::Action {
+        action: "mouse".into(),
+        reason: format!("CurrentBoundingRectangle: {e}"),
+    })?;
+    Ok(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+}
+
+/// Convert a physical-pixel screen-space point to UIA's absolute-cursor
+/// coordinate space (`0..=65535` over the virtual desktop). Multi-monitor
+/// setups with negative virtual coords (secondary monitor to the left of
+/// primary) work because we anchor at `SM_X/YVIRTUALSCREEN`. Used together
+/// with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK` on the move event.
+fn screen_to_absolute(x_phys: i32, y_phys: i32) -> (i32, i32) {
+    // SAFETY: `GetSystemMetrics` is always sound. The virtual-screen metrics
+    // never return zero on a working desktop session, but we clamp to 1 to
+    // make the divisions safe in the impossible case.
+    let xv = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let yv = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let cx = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1);
+    let cy = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1);
+    let nx = (i64::from(x_phys - xv) * 65535 + i64::from(cx) / 2) / i64::from(cx);
+    let ny = (i64::from(y_phys - yv) * 65535 + i64::from(cy) / 2) / i64::from(cy);
+    let nx = nx.clamp(0, 65535);
+    let ny = ny.clamp(0, 65535);
+    // Casts are safe after clamp; the clamp ensures the values fit in i32.
+    #[allow(clippy::cast_possible_truncation)]
+    (nx as i32, ny as i32)
 }
 
 /// Bring the snapshot's pinned HWND to the foreground so subsequent
@@ -1925,6 +2072,66 @@ mod tests {
         assert!(parse_chord("Ctrl+").is_err());
         assert!(parse_chord("+A").is_err());
         assert!(parse_chord("Ctrl+Bogus").is_err());
+    }
+
+    /// Mirror of `screen_to_absolute`'s arithmetic with caller-supplied
+    /// virtual-screen metrics. Lets us unit-test the conversion without
+    /// pulling in the live `GetSystemMetrics` values, which vary by host.
+    fn screen_to_absolute_for(
+        x_phys: i32,
+        y_phys: i32,
+        xv: i32,
+        yv: i32,
+        cx: i32,
+        cy: i32,
+    ) -> (i32, i32) {
+        let cx = cx.max(1);
+        let cy = cy.max(1);
+        let nx = (i64::from(x_phys - xv) * 65535 + i64::from(cx) / 2) / i64::from(cx);
+        let ny = (i64::from(y_phys - yv) * 65535 + i64::from(cy) / 2) / i64::from(cy);
+        let nx = nx.clamp(0, 65535);
+        let ny = ny.clamp(0, 65535);
+        #[allow(clippy::cast_possible_truncation)]
+        (nx as i32, ny as i32)
+    }
+
+    #[test]
+    fn screen_to_absolute_maps_corners() {
+        // Primary 1920x1080 at origin: (0,0) → (0,0); (1919,1079) → (~65535,~65535).
+        let (x0, y0) = screen_to_absolute_for(0, 0, 0, 0, 1920, 1080);
+        assert_eq!((x0, y0), (0, 0));
+        let (xn, yn) = screen_to_absolute_for(1919, 1079, 0, 0, 1920, 1080);
+        // Last *pixel* (not last fractional point) maps to roughly (N-1)/N
+        // of the absolute range — at 1080 rows that's ~65474. The cursor
+        // lands within one pixel of the corner, which is the accuracy
+        // contract MOUSEEVENTF_ABSOLUTE provides.
+        assert!(xn >= 65400, "right edge x mapped to {xn}");
+        assert!(yn >= 65400, "bottom edge y mapped to {yn}");
+    }
+
+    #[test]
+    fn screen_to_absolute_handles_negative_virtual_origin() {
+        // Secondary monitor 1920x1080 to the LEFT of primary: virtual desktop
+        // starts at x=-1920. The point at the left edge of the secondary
+        // (physical x=-1920) should map to nx=0.
+        let virtual_w = 3840;
+        let (nx, _) = screen_to_absolute_for(-1920, 0, -1920, 0, virtual_w, 1080);
+        assert_eq!(nx, 0);
+        // The seam between the two monitors (physical x=0) should map to
+        // roughly the midpoint of the absolute range.
+        let (nmid, _) = screen_to_absolute_for(0, 0, -1920, 0, virtual_w, 1080);
+        assert!((32700..=32800).contains(&nmid), "seam mapped to {nmid}");
+    }
+
+    #[test]
+    fn screen_to_absolute_clamps_off_screen() {
+        // Pathological inputs (cursor outside the virtual desktop) clamp
+        // rather than overflow into negative or >65535 values, which
+        // `MOUSEEVENTF_ABSOLUTE` documents as undefined behavior.
+        let (nx, ny) = screen_to_absolute_for(-10_000, -10_000, 0, 0, 1920, 1080);
+        assert_eq!((nx, ny), (0, 0));
+        let (nx, ny) = screen_to_absolute_for(100_000, 100_000, 0, 0, 1920, 1080);
+        assert_eq!((nx, ny), (65535, 65535));
     }
 
     /// `RuntimeId` packing must keep the i32 sequence reconstructable: a
