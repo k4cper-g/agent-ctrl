@@ -235,6 +235,52 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     await client!.closeSession(session);
   }, 120_000);
 
+  it("focuses Notepad by window_id", async () => {
+    const session = await client!.openSession("uia");
+    const snap = await snapshotReady(session);
+
+    const windowId = snap.window?.id;
+    expect(windowId, "snapshot is missing window.id").toBeDefined();
+
+    // Steal foreground first so FocusWindow has work to do — otherwise the
+    // AttachThreadInput dance short-circuits.
+    spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 500));
+
+    const res = await client!.act(session, { kind: "focus_window", window_id: windowId! });
+    expect(res.ok).toBe(true);
+
+    // Daemon must remain responsive and still resolve Notepad.
+    const after = await client!.snapshot(session, NOTEPAD_TARGET);
+    expect(after.surface_kind).toBe("uia");
+    expect(after.app.name.toLowerCase()).toMatch(/notepad/);
+
+    await client!.closeSession(session);
+  }, 120_000);
+
+  it("switches to Notepad by app_id", async () => {
+    const session = await client!.openSession("uia");
+    const snap = await snapshotReady(session);
+
+    const appId = snap.app.id;
+    expect(appId).toBeTruthy();
+
+    // Open a competing window so the foreground actually changes.
+    spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 500));
+
+    const res = await client!.act(session, { kind: "switch_app", app_id: appId });
+    expect(res.ok).toBe(true);
+
+    // SwitchApp clears the daemon's RefMap, so the next ref-bearing action
+    // would need a fresh snapshot. Verifying the snapshot itself succeeds
+    // is enough to confirm the daemon remains responsive.
+    const after = await client!.snapshot(session, NOTEPAD_TARGET);
+    expect(after.surface_kind).toBe("uia");
+
+    await client!.closeSession(session);
+  }, 120_000);
+
   it("clears typed text with SelectAll then Delete", async () => {
     const session = await client!.openSession("uia");
     const snap = await snapshotReady(session);

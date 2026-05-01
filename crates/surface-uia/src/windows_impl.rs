@@ -59,7 +59,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_ThumbControlTypeId,
     UIA_TitleBarControlTypeId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
     UIA_ToolTipControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
-    UIA_WindowControlTypeId, UIA_WindowPatternId, UIA_CONTROLTYPE_ID,
+    UIA_WindowControlTypeId, UIA_WindowPatternId, WindowVisualState_Normal, UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -990,6 +990,8 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::Hover { ref_id } => act_hover(state, ref_id),
         Action::Scroll { ref_id, dx, dy } => act_scroll(state, ref_id.as_ref(), *dx, *dy),
         Action::Drag { from, to } => act_drag(state, from, to),
+        Action::SwitchApp { app_id } => act_switch_app(state, app_id),
+        Action::FocusWindow { window_id } => act_focus_window(state, window_id),
         other => Err(Error::Unsupported {
             surface: SurfaceKind::Uia.as_str().into(),
             action: action_name(other).into(),
@@ -1453,6 +1455,95 @@ fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResul
     )
 }
 
+// ---------- Window / process targeting ----------
+
+/// Bring the app identified by `app_id` to the foreground, and re-pin
+/// future actions on its window.
+///
+/// `app_id` is matched against the executable file stem (case-insensitive).
+/// If `app_id` looks like a path (e.g. the `app.id` we emit on Windows is
+/// the full exe path), the file stem is extracted first. This keeps the
+/// schema consistent: the agent can pass the `app.id` it received from a
+/// snapshot, or just the short name like `"Notepad"`.
+///
+/// After the switch, `state.last_hwnd` points to the new window and
+/// `state.last_refs` is cleared — refs from a previous snapshot can no
+/// longer resolve, so the agent must take a fresh snapshot before its next
+/// ref-bearing action.
+fn act_switch_app(state: &mut WorkerState, app_id: &str) -> Result<ActionResult> {
+    let process_name = process_name_from_app_id(app_id);
+    let hwnd = find_window_by_process_name(process_name).ok_or_else(|| Error::Action {
+        action: "switch_app".into(),
+        reason: format!("no visible top-level window owned by app {app_id:?}"),
+    })?;
+    bring_window_to_foreground(hwnd);
+    state.last_hwnd = Some(hwnd);
+    state.last_refs = RefMap::new();
+    Ok(ActionResult::ok())
+}
+
+/// Bring a specific top-level window forward by its `window_id` (the same
+/// hex-formatted HWND `WindowContext` carries). When the window supports
+/// `WindowPattern`, restore from minimized first via
+/// `SetWindowVisualState(Normal)`. Then run the AttachThreadInput-backed
+/// foreground bringer.
+///
+/// Like `SwitchApp`, this re-pins `state.last_hwnd` and clears `last_refs`.
+fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionResult> {
+    let hwnd = parse_window_id(window_id).ok_or_else(|| Error::Action {
+        action: "focus_window".into(),
+        reason: format!("invalid window_id {window_id:?}; expected hex like 0x10edc"),
+    })?;
+
+    // Best-effort restore. Windows whose pattern doesn't support the call,
+    // or which aren't minimized, just skip this — Set/Bring foreground does
+    // the rest.
+    // SAFETY: `automation` is a valid COM interface; `hwnd` may be invalid,
+    // in which case `ElementFromHandle` returns Err and we skip the restore.
+    if let Ok(elem) = unsafe { state.automation.ElementFromHandle(hwnd) } {
+        if let Ok(pattern) =
+            unsafe { elem.GetCurrentPatternAs::<IUIAutomationWindowPattern>(UIA_WindowPatternId) }
+        {
+            // SAFETY: `pattern` is valid.
+            let _ = unsafe { pattern.SetWindowVisualState(WindowVisualState_Normal) };
+        }
+    }
+
+    bring_window_to_foreground(hwnd);
+    state.last_hwnd = Some(hwnd);
+    state.last_refs = RefMap::new();
+    Ok(ActionResult::ok())
+}
+
+/// Reduce an `app_id` to the executable file stem `find_window_by_process_name`
+/// expects. Accepts both the full path we emit on Windows (e.g.
+/// `"C:\Path\To\Notepad.exe"`) and a bare name (e.g. `"Notepad"`).
+fn process_name_from_app_id(app_id: &str) -> &str {
+    std::path::Path::new(app_id)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(app_id)
+}
+
+/// Parse a `window_id` string back to an HWND. The schema emits these as
+/// `format!("{:#x}", hwnd.0 as usize)`, e.g. `"0x10edc"`. We accept both
+/// `0x`-prefixed and bare hex.
+fn parse_window_id(s: &str) -> Option<HWND> {
+    let trimmed = s.trim();
+    let hex = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let n = usize::from_str_radix(hex, 16).ok()?;
+    if n == 0 {
+        return None;
+    }
+    // SAFETY-equivalent: the cast preserves bits; HWND is an opaque pointer
+    // wrapper, and we don't dereference here.
+    #[allow(clippy::cast_possible_wrap)]
+    Some(HWND(n as *mut std::ffi::c_void))
+}
+
 #[derive(Clone, Copy)]
 enum WheelAxis {
     Vertical,
@@ -1581,25 +1672,40 @@ fn screen_to_absolute(x_phys: i32, y_phys: i32) -> (i32, i32) {
 }
 
 /// Bring the snapshot's pinned HWND to the foreground so subsequent
-/// `SendInput` events reach it. Uses the `AttachThreadInput` workaround for
-/// Windows' `ForegroundLockTimeout` policy, which otherwise silently rejects
-/// `SetForegroundWindow` from non-foreground processes — exactly the case we
-/// hit when the test runner / IDE is in front and we want to drive Notepad.
+/// `SendInput` events reach it.
 fn ensure_foreground(state: &WorkerState, action: &str) -> Result<()> {
     let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
         action: action.into(),
         reason: "no prior snapshot — call snapshot before keyboard input".into(),
     })?;
+    bring_window_to_foreground(hwnd);
+    Ok(())
+}
 
+/// Force `target` to the foreground using the `AttachThreadInput` workaround
+/// for Windows' `ForegroundLockTimeout` policy — without it,
+/// `SetForegroundWindow` from a non-foreground process is silently rejected,
+/// which is exactly the case we hit when the test runner / IDE is in front
+/// and we want to drive another app.
+///
+/// Best-effort: failures (target window destroyed, attach denied) are
+/// swallowed; the caller's next operation will surface the symptom (an
+/// action that lands in the wrong window, a SendInput sent count mismatch).
+/// Returning a hard error here would just turn intermittent OS quirks into
+/// loud user-facing failures without giving the caller anything to do.
+fn bring_window_to_foreground(target: HWND) {
+    if target.0.is_null() {
+        return;
+    }
     // SAFETY: `GetForegroundWindow` is always sound; null is allowed.
     let current = unsafe { GetForegroundWindow() };
-    if current.0 == hwnd.0 {
-        return Ok(());
+    if current.0 == target.0 {
+        return;
     }
 
     // SAFETY: `GetCurrentThreadId` is always sound. `GetWindowThreadProcessId`
-    // accepts any HWND (including null, in which case it returns 0). We never
-    // dereference the returned thread ids directly.
+    // accepts any HWND (null returns 0). We never dereference the returned
+    // thread ids directly.
     let me_thread = unsafe { GetCurrentThreadId() };
     let fg_thread = if current.0.is_null() {
         0
@@ -1615,20 +1721,19 @@ fn ensure_foreground(state: &WorkerState, action: &str) -> Result<()> {
         unsafe { AttachThreadInput(fg_thread, me_thread, true) }.as_bool()
     };
 
-    // SAFETY: hwnd is non-null per the snapshot path; SetForegroundWindow
+    // SAFETY: target is non-null per the early return; SetForegroundWindow
     // returns FALSE if blocked but is otherwise sound.
-    let _ = unsafe { SetForegroundWindow(hwnd) };
+    let _ = unsafe { SetForegroundWindow(target) };
 
     if attached {
         // SAFETY: paired detach for the AttachThreadInput above.
         let _ = unsafe { AttachThreadInput(fg_thread, me_thread, false) };
     }
 
-    // Give the foreground change a moment to propagate before SendInput.
-    // 50ms is enough on every Windows version we target without being a
-    // noticeable wait for an agent.
+    // Give the foreground change a moment to propagate before any
+    // immediately-following input. 50ms is enough on every Windows version
+    // we target without being a noticeable wait for an agent.
     std::thread::sleep(Duration::from_millis(50));
-    Ok(())
 }
 
 /// Build a virtual-key `INPUT` event. `key_up = false` is a press; `true` is
@@ -2276,6 +2381,42 @@ mod tests {
         assert_eq!((nx, ny), (0, 0));
         let (nx, ny) = screen_to_absolute_for(100_000, 100_000, 0, 0, 1920, 1080);
         assert_eq!((nx, ny), (65535, 65535));
+    }
+
+    #[test]
+    fn process_name_from_app_id_handles_paths_and_bare_names() {
+        use super::process_name_from_app_id;
+        // Bare name passes through.
+        assert_eq!(process_name_from_app_id("Notepad"), "Notepad");
+        // Full Windows path → file stem.
+        assert_eq!(
+            process_name_from_app_id("C:\\Program Files\\WindowsApps\\Foo\\Notepad.exe"),
+            "Notepad"
+        );
+        // Forward slashes still work (Path is platform-aware on Windows but
+        // also tolerates `/`).
+        assert_eq!(process_name_from_app_id("/usr/bin/code"), "code");
+        // Empty input passes through harmlessly.
+        assert_eq!(process_name_from_app_id(""), "");
+    }
+
+    #[test]
+    fn parse_window_id_accepts_hex_with_or_without_prefix() {
+        use super::parse_window_id;
+        // Standard form emitted by snapshot.
+        assert!(parse_window_id("0x10edc").is_some());
+        // Bare hex also works.
+        assert!(parse_window_id("10edc").is_some());
+        // Uppercase prefix.
+        assert!(parse_window_id("0X10EDC").is_some());
+        // Whitespace tolerated.
+        assert!(parse_window_id("  0x10edc  ").is_some());
+        // Zero is invalid (null HWND has no useful meaning here).
+        assert!(parse_window_id("0x0").is_none());
+        assert!(parse_window_id("0").is_none());
+        // Garbage rejected.
+        assert!(parse_window_id("not-hex").is_none());
+        assert!(parse_window_id("").is_none());
     }
 
     /// `RuntimeId` packing must keep the i32 sequence reconstructable: a
