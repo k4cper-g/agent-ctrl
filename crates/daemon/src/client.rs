@@ -3,7 +3,7 @@
 //! Used by the `agent-ctrl` CLI to issue one request per invocation:
 //! discover the session, dial the endpoint, write a JSON-RPC line, read a
 //! JSON-RPC line, hand the response back. Synchronous because each CLI
-//! command is its own short-lived process — there's nothing else for us
+//! command is its own short-lived process - there's nothing else for us
 //! to be doing while we wait.
 
 use std::io::{self, BufRead, BufReader, Write};
@@ -23,7 +23,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// `op` is the body of the request; the wire `id` is filled with a fresh
 /// UUID so the daemon can echo it back. The response is parsed and
-/// returned as-is — callers do their own destructuring of
+/// returned as-is - callers do their own destructuring of
 /// `Response::body`.
 pub fn send(info: &SessionFile, op: RequestOp) -> io::Result<Response> {
     send_with_timeout(info, op, DEFAULT_TIMEOUT)

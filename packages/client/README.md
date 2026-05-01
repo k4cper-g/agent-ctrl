@@ -51,7 +51,7 @@ new AgentCtrl({
 
 ## Status
 
-`v0.1` — paired with the daemon's mock surface for protocol validation.
+`v0.1` - paired with the daemon's mock surface for protocol validation.
 Real surfaces (UIA, AX, CDP) land in subsequent versions.
 
 The TypeScript wire types in [`src/types.ts`](src/types.ts) are hand-maintained.

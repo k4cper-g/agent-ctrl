@@ -6,7 +6,7 @@
 
 use agent_ctrl_core::{Error, MockSurface, Result, Surface, SurfaceKind};
 
-/// Static answer to "can I open this surface on this build?" — without
+/// Static answer to "can I open this surface on this build?" - without
 /// actually instantiating it. Used by `agent-ctrl info` and `agent-ctrl
 /// doctor` so an agent can disambiguate "feature missing" / "wrong OS" /
 /// "scaffold only" before it tries an action that would fail.
@@ -14,14 +14,14 @@ use agent_ctrl_core::{Error, MockSurface, Result, Surface, SurfaceKind};
 pub enum SurfaceStatus {
     /// Fully implemented and verified end-to-end on this OS.
     Ready,
-    /// Compiled in on this OS but only a stub — `open_surface` will return
+    /// Compiled in on this OS but only a stub - `open_surface` will return
     /// an error or the surface will reject every action.
     Stub,
     /// The surface is meaningful in principle but not on this OS (e.g.
     /// `Uia` on macOS, `Ax` on Windows). The crate is gated to an empty
     /// shell here.
     WrongOs,
-    /// No scaffolding for this kind yet — `open_surface` returns
+    /// No scaffolding for this kind yet - `open_surface` returns
     /// `Error::Surface` immediately.
     NotImplemented,
 }

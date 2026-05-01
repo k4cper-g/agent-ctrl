@@ -4,7 +4,7 @@
 //! Each long-running daemon writes one of these on startup announcing the
 //! TCP endpoint it's listening on, and removes it on shutdown. Short-lived
 //! CLI commands read the file to find the daemon they should talk to,
-//! using a `TcpStream` connect as the liveness probe — if the connect
+//! using a `TcpStream` connect as the liveness probe - if the connect
 //! fails the file is treated as stale and removed.
 //!
 //! This is the same shape agent-browser uses (see its
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// Default session name used when the agent doesn't pass `--session`.
 pub const DEFAULT_SESSION: &str = "default";
 
-/// Healthcheck timeout for the connect probe. Short — a live daemon on
+/// Healthcheck timeout for the connect probe. Short - a live daemon on
 /// localhost answers in well under a millisecond; anything past 200ms is
 /// almost certainly a dead file pointing at a recycled port.
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(200);
@@ -33,7 +33,7 @@ pub struct SessionFile {
     /// Session name. Matches the file stem.
     pub name: String,
     /// Daemon process id. Useful for diagnostic listings; we don't rely on
-    /// it for liveness — the TCP connect probe is the source of truth.
+    /// it for liveness - the TCP connect probe is the source of truth.
     pub pid: u32,
     /// `host:port` the daemon is listening on. Always localhost for now.
     pub endpoint: String,
@@ -43,7 +43,7 @@ pub struct SessionFile {
     pub surface: String,
     /// Wall-clock time the daemon started, seconds since the Unix epoch.
     pub started_at_unix: u64,
-    /// UUID of the open Surface session inside the daemon — written by the
+    /// UUID of the open Surface session inside the daemon - written by the
     /// daemon after it auto-opens its single session. The CLI uses this as
     /// the `session` field on every Snapshot / Act / CloseSession request,
     /// so agents never have to track session ids themselves.
@@ -81,7 +81,7 @@ pub fn write(info: &SessionFile) -> io::Result<()> {
     std::fs::write(&path, body)
 }
 
-/// Remove the session file for `session`. Missing-file is not an error —
+/// Remove the session file for `session`. Missing-file is not an error -
 /// callers are typically running this on shutdown and don't want noise.
 pub fn remove(session: &str) -> io::Result<()> {
     let path = path_for(session);
@@ -103,7 +103,7 @@ pub fn read(session: &str) -> Option<SessionFile> {
 
 /// Read a session file AND verify the daemon at its endpoint actually
 /// responds. If the connect probe fails the file is removed and `None`
-/// returned — most CLI flows want this rather than the raw [`read`].
+/// returned - most CLI flows want this rather than the raw [`read`].
 #[must_use]
 pub fn read_alive(session: &str) -> Option<SessionFile> {
     let info = read(session)?;
@@ -142,7 +142,7 @@ pub fn list_alive() -> Vec<SessionFile> {
 }
 
 /// Wait until the named session's file appears AND its endpoint responds.
-/// Used by `agent-ctrl open` after spawning the daemon child — the spawn
+/// Used by `agent-ctrl open` after spawning the daemon child - the spawn
 /// returns immediately but the bind is async, so we poll briefly.
 #[must_use]
 pub fn wait_for_alive(session: &str, timeout: Duration) -> Option<SessionFile> {

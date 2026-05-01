@@ -3,7 +3,7 @@
 //! Owns a registry of [`Surface`](agent_ctrl_core::Surface) sessions and
 //! dispatches snapshot / action requests against them. The default transport
 //! is stdio JSON-RPC (one [`Request`] per line in, one [`Response`] per line
-//! out), but the [`dispatcher`] layer is transport-agnostic — an HTTP server,
+//! out), but the [`dispatcher`] layer is transport-agnostic - an HTTP server,
 //! a Unix socket, or a Tauri command bridge could plug in directly.
 
 #![forbid(unsafe_code)]

@@ -1,4 +1,4 @@
-//! The [`Surface`] trait — the cross-platform contract every device implements.
+//! The [`Surface`] trait - the cross-platform contract every device implements.
 //!
 //! Inspired by agent-browser's `BrowserBackend` trait, but data-oriented:
 //! `snapshot()` returns the unified [`Snapshot`] schema instead of letting
@@ -11,8 +11,43 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionResult};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::snapshot::{Snapshot, SnapshotOptions};
+
+/// One row of [`Surface::list_windows`] output.
+///
+/// Mirrors agent-browser's `tab_list` shape (one entry per open tab) but
+/// generalized for native UI: the same app process can own multiple
+/// top-level windows simultaneously (main window plus dialogs and popup
+/// menus on Windows; multiple `AXWindow`s per `AXApplication` on macOS).
+///
+/// Like agent-browser's tab list, the agent is expected to inspect this
+/// and use [`Action::FocusWindow`](crate::action::Action::FocusWindow) to
+/// switch the session's pinned target before the next snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowInfo {
+    /// Stable per-platform window id, formatted for human consumption.
+    /// On Windows this is the HWND in lowercase hex (e.g. `"0x1717ca"`).
+    pub id: String,
+
+    /// Window title text. May be `None` for unnamed system windows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Owning process executable name (file stem, no extension on Windows).
+    pub process: String,
+
+    /// Owning process id.
+    pub pid: u32,
+
+    /// Whether this window currently has user focus on the host.
+    pub focused: bool,
+
+    /// Whether this window is the one the session's last `snapshot` was
+    /// pinned to. Subsequent `Action`s and `wait-for` polls target this
+    /// window until a `FocusWindow` action re-pins.
+    pub pinned: bool,
+}
 
 /// Identifier for a concrete [`Surface`] implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,14 +88,14 @@ impl SurfaceKind {
 /// Callers must check `supports(...)` before issuing optional actions.
 /// Standard feature names:
 ///
-/// - `"snapshot"` — basic tree capture (every surface)
-/// - `"screenshot"` — pixel capture
-/// - `"keyboard"` — synthetic keyboard input
-/// - `"mouse"` — synthetic pointer input
-/// - `"drag"` — pointer drag gestures
-/// - `"multi_app"` — can list and switch among multiple apps
-/// - `"network_intercept"` — CDP-only
-/// - `"trace"` — CDP-only profiling
+/// - `"snapshot"` - basic tree capture (every surface)
+/// - `"screenshot"` - pixel capture
+/// - `"keyboard"` - synthetic keyboard input
+/// - `"mouse"` - synthetic pointer input
+/// - `"drag"` - pointer drag gestures
+/// - `"multi_app"` - can list and switch among multiple apps
+/// - `"network_intercept"` - CDP-only
+/// - `"trace"` - CDP-only profiling
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitySet {
     features: HashSet<String>,
@@ -114,6 +149,24 @@ pub trait Surface: Send + Sync {
     /// in the action to a real native element. Stale refs (from snapshots that
     /// have since been discarded) must return [`Error::RefNotFound`](crate::error::Error::RefNotFound).
     async fn act(&self, action: &Action) -> Result<ActionResult>;
+
+    /// Enumerate the top-level windows the session can target.
+    ///
+    /// Implementations should return windows that share an "app" with the
+    /// session's currently pinned target - typically all windows owned by
+    /// the same OS process (UIA), all `AXWindow`s of the same
+    /// `AXApplication` (macOS), or all tabs of the same browser context
+    /// (CDP). The pinned window is included with `pinned: true`.
+    ///
+    /// The default implementation returns [`Error::Unsupported`] so
+    /// scaffold surfaces (CDP, AX, Android, iOS) compile without having
+    /// to provide a stub.
+    async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
+        Err(Error::Unsupported {
+            surface: self.kind().as_str().into(),
+            action: "list_windows".into(),
+        })
+    }
 
     /// Tear down the session. After this returns the surface must not be used.
     async fn shutdown(&mut self) -> Result<()>;

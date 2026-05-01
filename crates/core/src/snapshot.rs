@@ -9,6 +9,53 @@ use crate::node::{AppContext, NativeHandle, Node, RefId, WindowContext};
 use crate::role::Role;
 use crate::surface::SurfaceKind;
 
+/// Query used by [`Snapshot::find`] to locate refs without re-snapshotting.
+///
+/// All fields are filters; an unset filter matches anything. Multiple filters
+/// AND together. Matching always requires the node to carry a [`RefId`] -
+/// non-interactive structural nodes are not returned because they cannot be
+/// acted on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FindQuery {
+    /// Match against `node.name`. Case-insensitive substring by default;
+    /// becomes case-sensitive equality when [`Self::exact`] is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// When `true`, [`Self::name`] must equal `node.name` exactly.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exact: bool,
+
+    /// Restrict matches to a single role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+
+    /// Restrict the search to the subtree rooted at this ref. The root node
+    /// itself is included in the search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_ref: Option<RefId>,
+
+    /// Cap on the number of matches returned. `None` means unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// One row of [`Snapshot::find`] output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindMatch {
+    /// Ref the agent uses to target this node.
+    pub ref_id: RefId,
+    /// Role at the time the snapshot was taken.
+    pub role: Role,
+    /// Name at the time the snapshot was taken.
+    pub name: String,
+}
+
 /// Knobs controlling what a snapshot captures.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SnapshotOptions {
@@ -53,7 +100,7 @@ pub enum WindowTarget {
     },
     /// First top-level visible window whose title contains the given
     /// substring (case-insensitive). Useful for pinning to a known app
-    /// without first looking up its PID — but title text is locale-dependent
+    /// without first looking up its PID - but title text is locale-dependent
     /// (`"Untitled - Notepad"` in English vs `"Bez tytułu - Notatnik"` in
     /// Polish), so prefer [`Self::ProcessName`] for portable tests.
     Title {
@@ -93,13 +140,88 @@ pub struct Snapshot {
     pub refs: RefMap,
 }
 
+impl Snapshot {
+    /// Search this snapshot's tree for nodes matching `query`.
+    ///
+    /// Returns matches in tree order (pre-order DFS). Only nodes that carry a
+    /// [`RefId`] are returned, since the agent needs a ref to act on them.
+    /// When `query.in_ref` is set but no node in the tree carries that ref,
+    /// the result is empty.
+    #[must_use]
+    pub fn find(&self, query: &FindQuery) -> Vec<FindMatch> {
+        let mut out = Vec::new();
+        let limit = query.limit.unwrap_or(usize::MAX);
+        let root = if let Some(target) = &query.in_ref {
+            match find_subtree(&self.root, target) {
+                Some(node) => node,
+                None => return out,
+            }
+        } else {
+            &self.root
+        };
+        collect_matches(root, query, limit, &mut out);
+        out
+    }
+}
+
+fn find_subtree<'a>(node: &'a Node, target: &RefId) -> Option<&'a Node> {
+    if node.ref_id.as_ref() == Some(target) {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(hit) = find_subtree(child, target) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn collect_matches(node: &Node, query: &FindQuery, limit: usize, out: &mut Vec<FindMatch>) {
+    if out.len() >= limit {
+        return;
+    }
+    if let Some(ref_id) = &node.ref_id {
+        if matches_filters(node, query) {
+            out.push(FindMatch {
+                ref_id: ref_id.clone(),
+                role: node.role.clone(),
+                name: node.name.clone(),
+            });
+        }
+    }
+    for child in &node.children {
+        if out.len() >= limit {
+            return;
+        }
+        collect_matches(child, query, limit, out);
+    }
+}
+
+fn matches_filters(node: &Node, query: &FindQuery) -> bool {
+    if let Some(role) = &query.role {
+        if &node.role != role {
+            return false;
+        }
+    }
+    if let Some(needle) = &query.name {
+        if query.exact {
+            if node.name != *needle {
+                return false;
+            }
+        } else if !node.name.to_lowercase().contains(&needle.to_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Bidirectional map from agent-facing [`RefId`]s to the data needed to
 /// rediscover the underlying native element at action time.
 ///
 /// Native a11y handles are routinely invalidated by the OS (window relayouts,
 /// tree mutations, focus changes), so we never expose them to the agent.
 /// Instead the agent uses a [`RefId`] and surfaces re-walk the tree using the
-/// `(role, name, nth)` triple — durable across most tree mutations — plus an
+/// `(role, name, nth)` triple - durable across most tree mutations - plus an
 /// optional [`NativeHandle`] used as a fast-path hint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RefMap {
@@ -176,7 +298,12 @@ impl RefMap {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::time::SystemTime;
+
     use super::*;
+    use crate::node::{AppContext, Node, State};
 
     #[test]
     fn refmap_assigns_sequential_ids() {
@@ -186,5 +313,148 @@ mod tests {
         assert_eq!(a.0, "ref_0");
         assert_eq!(b.0, "ref_1");
         assert_eq!(map.len(), 2);
+    }
+
+    /// Build a small fixture tree:
+    ///
+    /// ```text
+    /// window "Editor"
+    ///   menubar
+    ///     @e0 menuitem "File"
+    ///     @e1 menuitem "Edit"
+    ///   document
+    ///     @e2 button "Save"
+    ///     @e3 button "Save As"
+    ///     @e4 button "save-lower"
+    /// ```
+    fn fixture() -> Snapshot {
+        fn leaf(role: Role, name: &str, ref_id: Option<RefId>) -> Node {
+            Node {
+                ref_id,
+                role,
+                name: name.into(),
+                description: None,
+                value: None,
+                state: State::default(),
+                bounds: None,
+                level: None,
+                children: Vec::new(),
+                opaque: false,
+                native: None,
+            }
+        }
+
+        let mut refs = RefMap::new();
+        let file_id = refs.insert(Role::MenuItem, "File".into(), 0, None);
+        let edit_id = refs.insert(Role::MenuItem, "Edit".into(), 0, None);
+        let save_id = refs.insert(Role::Button, "Save".into(), 0, None);
+        let save_as_id = refs.insert(Role::Button, "Save As".into(), 0, None);
+        let lower_id = refs.insert(Role::Button, "save-lower".into(), 0, None);
+
+        let menubar = Node {
+            children: vec![
+                leaf(Role::MenuItem, "File", Some(file_id)),
+                leaf(Role::MenuItem, "Edit", Some(edit_id)),
+            ],
+            ..leaf(Role::MenuBar, "", None)
+        };
+        let document = Node {
+            children: vec![
+                leaf(Role::Button, "Save", Some(save_id)),
+                leaf(Role::Button, "Save As", Some(save_as_id)),
+                leaf(Role::Button, "save-lower", Some(lower_id)),
+            ],
+            ..leaf(Role::Document, "", None)
+        };
+        let root = Node {
+            children: vec![menubar, document],
+            ..leaf(Role::Window, "Editor", None)
+        };
+
+        Snapshot {
+            captured_at: SystemTime::UNIX_EPOCH,
+            surface_kind: SurfaceKind::Mock,
+            app: AppContext {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+            },
+            window: None,
+            root,
+            refs,
+        }
+    }
+
+    #[test]
+    fn find_substring_is_case_insensitive() {
+        let snap = fixture();
+        let q = FindQuery {
+            name: Some("save".into()),
+            ..FindQuery::default()
+        };
+        let names: Vec<_> = snap.find(&q).into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["Save", "Save As", "save-lower"]);
+    }
+
+    #[test]
+    fn find_exact_is_case_sensitive() {
+        let snap = fixture();
+        let q = FindQuery {
+            name: Some("Save".into()),
+            exact: true,
+            ..FindQuery::default()
+        };
+        let names: Vec<_> = snap.find(&q).into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["Save"]);
+    }
+
+    #[test]
+    fn find_role_filter_excludes_other_roles() {
+        let snap = fixture();
+        let q = FindQuery {
+            role: Some(Role::MenuItem),
+            ..FindQuery::default()
+        };
+        let names: Vec<_> = snap.find(&q).into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["File", "Edit"]);
+    }
+
+    #[test]
+    fn find_in_ref_restricts_to_subtree() {
+        let snap = fixture();
+        // The "File" ref is on a leaf; in_ref pointing at a leaf returns just
+        // that leaf when no further filter excludes it.
+        let file_ref = snap
+            .refs
+            .iter()
+            .find(|(_, e)| e.name == "File")
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        let q = FindQuery {
+            in_ref: Some(file_ref),
+            ..FindQuery::default()
+        };
+        let names: Vec<_> = snap.find(&q).into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["File"]);
+    }
+
+    #[test]
+    fn find_limit_caps_results() {
+        let snap = fixture();
+        let q = FindQuery {
+            name: Some("save".into()),
+            limit: Some(2),
+            ..FindQuery::default()
+        };
+        assert_eq!(snap.find(&q).len(), 2);
+    }
+
+    #[test]
+    fn find_unknown_in_ref_returns_empty() {
+        let snap = fixture();
+        let q = FindQuery {
+            in_ref: Some(RefId::new(999)),
+            ..FindQuery::default()
+        };
+        assert!(snap.find(&q).is_empty());
     }
 }

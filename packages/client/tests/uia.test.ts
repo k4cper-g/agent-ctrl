@@ -1,6 +1,6 @@
 // End-to-end test: drives the UIA surface against a real Notepad window.
 //
-// This file is a *contract* for `surface-uia` — it captures what v0.1 of
+// This file is a *contract* for `surface-uia` - it captures what v0.1 of
 // the implementation must deliver. As we implement the surface against
 // the spec in `docs/uia-mapping.md`, these tests turn green.
 //
@@ -82,7 +82,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
   beforeEach(async () => {
     notepad = spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
     // Win11 Notepad's UIA tree (XAML) populates lazily after the window is
-    // visible — the editable Document and the tab bar arrive on a separate
+    // visible - the editable Document and the tab bar arrive on a separate
     // tick from the top-level window. Give it a moment, then poll inside the
     // test if a snapshot still misses them.
     await new Promise((r) => setTimeout(r, 750));
@@ -113,7 +113,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     }
   });
 
-  // Use process-name targeting so the test is locale-independent — the window
+  // Use process-name targeting so the test is locale-independent - the window
   // title is "Untitled - Notepad" in English but localized in other languages.
   const NOTEPAD_TARGET = { target: { by: "process-name" as const, name: "Notepad" } };
 
@@ -132,7 +132,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
     // Every emitted ref should carry a UIA NativeHandle with a non-empty
     // RuntimeId (4 LE bytes per i32 slot, so length is a positive multiple
-    // of 4). AutomationId is optional — Notepad's controls usually omit it.
+    // of 4). AutomationId is optional - Notepad's controls usually omit it.
     const editEntry = snap.refs.entries[editableRefs[0]!]!;
     expect(editEntry.native?.platform).toBe("uia");
     if (editEntry.native?.platform === "uia") {
@@ -208,11 +208,11 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     // drop, reorder, or substitute characters), and what `surface-uia`
     // actually owns is "the events were inserted into the OS input queue".
     // For guaranteed text delivery against an editable field, agents should
-    // use `Fill` — covered above and in the `clears typed text` test below.
+    // use `Fill` - covered above and in the `clears typed text` test below.
     const typeRes = await client!.act(session, { kind: "type", text: "hello" });
     expect(typeRes.ok).toBe(true);
 
-    // The daemon must stay responsive after the SendInput batch — a stuck
+    // The daemon must stay responsive after the SendInput batch - a stuck
     // worker would surface here as a snapshot timeout.
     const snap2 = await client!.snapshot(session, NOTEPAD_TARGET);
     expect(snap2.surface_kind).toBe("uia");
@@ -242,7 +242,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     const windowId = snap.window?.id;
     expect(windowId, "snapshot is missing window.id").toBeDefined();
 
-    // Steal foreground first so FocusWindow has work to do — otherwise the
+    // Steal foreground first so FocusWindow has work to do - otherwise the
     // AttachThreadInput dance short-circuits.
     spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
     await new Promise((r) => setTimeout(r, 500));
@@ -330,7 +330,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     });
     expect(fillRes.ok).toBe(true);
 
-    // Wait until the Fill is reflected before clearing — otherwise a fast
+    // Wait until the Fill is reflected before clearing - otherwise a fast
     // Press could race with Notepad's value-pattern apply.
     await waitFor(async () => {
       const s = await client!.snapshot(session, NOTEPAD_TARGET);
@@ -339,7 +339,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
     bringToForeground("Notepad");
 
-    // SelectAll(ref_id) focuses the field then sends Ctrl+A — single round
+    // SelectAll(ref_id) focuses the field then sends Ctrl+A - single round
     // trip rather than two. This also exercises the SelectAll action plumbing.
     const selectRes = await client!.act(session, { kind: "select_all", ref_id: editRef! });
     expect(selectRes.ok).toBe(true);

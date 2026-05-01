@@ -2,9 +2,9 @@
 //!
 //! Two flavors share the same line-protocol payload:
 //!
-//! - [`run_stdio`] — one daemon per child process. Used by the TS client
+//! - [`run_stdio`] - one daemon per child process. Used by the TS client
 //!   (`@agent-ctrl/client`) which spawns and owns the daemon directly.
-//! - [`run_tcp`] — long-running daemon with a TCP listener on localhost.
+//! - [`run_tcp`] - long-running daemon with a TCP listener on localhost.
 //!   Used by the `agent-ctrl` CLI: a single daemon stays alive across many
 //!   short-lived CLI invocations and is discovered through a state file.
 //!
@@ -27,7 +27,7 @@ pub async fn run_stdio(state: &DaemonState) -> std::io::Result<()> {
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
 
-    // Stdio mode never observes a `Shutdown` request specially — stdin
+    // Stdio mode never observes a `Shutdown` request specially - stdin
     // closing is the existing exit signal, and the TS client uses that.
     // Pass a Notify that nobody waits on.
     let dummy_shutdown = Arc::new(Notify::new());
@@ -48,7 +48,7 @@ pub async fn run_stdio(state: &DaemonState) -> std::io::Result<()> {
 /// Bind a TCP listener and serve JSON-RPC over it until `shutdown` fires.
 ///
 /// Returns the bound `SocketAddr` to the caller via the `bound` callback so
-/// the caller can write a state file announcing the actual port — typically
+/// the caller can write a state file announcing the actual port - typically
 /// what `--bind 127.0.0.1:0` (ephemeral port) needs.
 ///
 /// Each connection is handled on its own task so multiple CLI invocations
@@ -120,7 +120,7 @@ async fn serve_connection(
 
 /// Parse one JSON-RPC line, dispatch it, and serialize the response into
 /// the bytes the transport will frame. Pulled out so stdio and TCP share
-/// exactly the same shape — no chance of one drifting from the other.
+/// exactly the same shape - no chance of one drifting from the other.
 ///
 /// `shutdown` fires when the request was a `Shutdown` op; the TCP accept
 /// loop wakes on this and exits. Stdio passes a Notify nobody is waiting
@@ -149,7 +149,7 @@ async fn handle_line(state: &DaemonState, line: &str, shutdown: &Notify) -> Vec<
         Ok(b) => b,
         Err(e) => {
             // Build the fallback through serde_json::json! so the error
-            // message gets properly escaped — `format!()` would emit
+            // message gets properly escaped - `format!()` would emit
             // invalid JSON if `e` contains quotes, backslashes, or
             // control characters and desync the line-based reader on the
             // other end.

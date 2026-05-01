@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::node::{AppContext, Bounds, Node, State, WindowContext};
 use crate::role::Role;
 use crate::snapshot::{RefMap, Snapshot, SnapshotOptions};
-use crate::surface::{CapabilitySet, Surface, SurfaceKind};
+use crate::surface::{CapabilitySet, Surface, SurfaceKind, WindowInfo};
 
 /// Surface that returns a fixed fake tree and records actions in memory.
 pub struct MockSurface {
@@ -44,7 +44,7 @@ impl MockSurface {
 
     /// Snapshot of every action received so far (most recent last).
     ///
-    /// Recovers from a poisoned mutex by returning the inner data — losing
+    /// Recovers from a poisoned mutex by returning the inner data - losing
     /// poisoning is fine here because the data is only ever appended to.
     #[must_use]
     pub fn actions(&self) -> Vec<Action> {
@@ -140,6 +140,20 @@ impl Surface for MockSurface {
             .map_err(|_| Error::Surface("mock action log mutex poisoned".into()))?
             .push(action.clone());
         Ok(ActionResult::ok())
+    }
+
+    async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
+        // The mock surface returns a single fixed window matching the one
+        // its `snapshot` produces. Marked pinned + focused so tests that
+        // assert "exactly one window, it's the active one" pass.
+        Ok(vec![WindowInfo {
+            id: "mock-window".into(),
+            title: Some("Mock Window".into()),
+            process: "mock".into(),
+            pid: 0,
+            focused: true,
+            pinned: true,
+        }])
     }
 
     async fn shutdown(&mut self) -> Result<()> {

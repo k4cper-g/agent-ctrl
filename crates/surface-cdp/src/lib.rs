@@ -1,12 +1,12 @@
 //! Chromium surface over Chrome DevTools Protocol.
 //!
 //! Connects to a running Chrome instance via CDP and builds snapshots from
-//! `Accessibility.getFullAXTree` — the same approach as agent-browser. Works
+//! `Accessibility.getFullAXTree` - the same approach as agent-browser. Works
 //! on every platform Chrome runs on, so this is the surface to lean on for
 //! cross-platform browser automation.
 //!
 //! Status: scaffold. The real implementation will mirror the structure of
-//! `agent-browser/cli/src/native/cdp/` — a CDP client, a tree walker, and an
+//! `agent-browser/cli/src/native/cdp/` - a CDP client, a tree walker, and an
 //! action layer.
 
 #![forbid(unsafe_code)]

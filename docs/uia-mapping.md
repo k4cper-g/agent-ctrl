@@ -99,7 +99,7 @@ from the prefix) is intentionally deferred to v0.2.
 | `required` | `IsRequiredForForm` (rare, but exposed) |
 
 **Caveats:**
-- `IsOffscreen=true` does not mean invisible — it means outside the *viewport*. We map it to `visible=false` anyway because for agents the practical question is "could the user click this right now."
+- `IsOffscreen=true` does not mean invisible - it means outside the *viewport*. We map it to `visible=false` anyway because for agents the practical question is "could the user click this right now."
 - `HasKeyboardFocus` is per-thread. Reading it across processes is reliable but slightly racy.
 
 ## 3. Property mapping (UIA properties → [`Node`](../crates/core/src/node.rs) fields)
@@ -116,11 +116,11 @@ from the prefix) is intentionally deferred to v0.2.
 | `native`       | `NativeHandle::Uia { runtime_id, automation_id }` (see §7) |
 
 **Dropped fields** (intentionally not carried into `Node`):
-- `AcceleratorKey`, `AccessKey` — keyboard hints; agents rarely need them and we surface keyboard input separately.
-- `FrameworkId` — debugging only.
-- `ItemStatus` / `ItemType` — application-specific strings; surface later via a generic annotation map if needed.
-- `Orientation` — rarely matters for agents; skip until we have a concrete use case.
-- `IsContentElement` / `IsControlElement` — internal UIA tree-pruning hints; we do our own pruning per [`SnapshotOptions`](../crates/core/src/snapshot.rs).
+- `AcceleratorKey`, `AccessKey` - keyboard hints; agents rarely need them and we surface keyboard input separately.
+- `FrameworkId` - debugging only.
+- `ItemStatus` / `ItemType` - application-specific strings; surface later via a generic annotation map if needed.
+- `Orientation` - rarely matters for agents; skip until we have a concrete use case.
+- `IsContentElement` / `IsControlElement` - internal UIA tree-pruning hints; we do our own pruning per [`SnapshotOptions`](../crates/core/src/snapshot.rs).
 
 ## 4. Action mapping ([`Action`](../crates/core/src/action.rs) → UIA patterns)
 
@@ -167,9 +167,9 @@ this and the daemon won't dispatch anything unsupported.
 `SnapshotOptions::target` (a [`WindowTarget`](../crates/core/src/snapshot.rs))
 selects which window the snapshot captures. Three variants in v0.1:
 
-- `Foreground` *(default)* — `GetForegroundWindow()`. Original behavior.
-- `Pid { pid }` — first visible top-level window owned by `pid`. Found via `EnumWindows` + `GetWindowThreadProcessId`.
-- `Title { title }` — first visible top-level window whose title contains `title` (case-insensitive). Found via `EnumWindows` + `GetWindowTextW`.
+- `Foreground` *(default)* - `GetForegroundWindow()`. Original behavior.
+- `Pid { pid }` - first visible top-level window owned by `pid`. Found via `EnumWindows` + `GetWindowThreadProcessId`.
+- `Title { title }` - first visible top-level window whose title contains `title` (case-insensitive). Found via `EnumWindows` + `GetWindowTextW`.
 
 Once a snapshot resolves a target, the worker stores the HWND on `WorkerState`
 and **subsequent actions reuse the same HWND**, even if the user changes focus.
@@ -204,18 +204,18 @@ We populate both. `automation_id` is the most stable identifier UIA exposes
 is what UIA itself uses to compare elements but is unstable across runs.
 
 At action-time re-resolution we try in order:
-1. `automation_id` lookup if set — fast and durable.
-2. `runtime_id` comparison — works within the same UIA session.
-3. `(role, name, nth)` walk from the [`RefMap`](../crates/core/src/snapshot.rs) — durable across UIA invalidations.
+1. `automation_id` lookup if set - fast and durable.
+2. `runtime_id` comparison - works within the same UIA session.
+3. `(role, name, nth)` walk from the [`RefMap`](../crates/core/src/snapshot.rs) - durable across UIA invalidations.
 
 ## 8. Ref-map keying
 
 For each interactive node we emit, the `RefMap` entry stores:
 
-- `role`     — per §1
-- `name`     — `Name` after trimming
-- `nth`      — 0-based count of preceding siblings with the same `(role, name)` under the same parent
-- `native`   — `NativeHandle::Uia` (per §7)
+- `role`     - per §1
+- `name`     - `Name` after trimming
+- `nth`      - 0-based count of preceding siblings with the same `(role, name)` under the same parent
+- `native`   - `NativeHandle::Uia` (per §7)
 
 `(role, name, nth)` is the durable lookup tuple. UIA-specific identifiers
 are a fast-path hint, never the source of truth.
@@ -223,7 +223,7 @@ are a fast-path hint, never the source of truth.
 ## 9. Tree walking strategy
 
 UIA has three views: `Raw` (everything), `Control` (only control-typed), and
-`Content` (only content-bearing). We use **`Control` view as the default** —
+`Content` (only content-bearing). We use **`Control` view as the default** -
 `Raw` is too noisy for agents and `Content` drops buttons.
 
 **`Generic` nodes are emitted by default.** They carry contextual labels
@@ -254,18 +254,18 @@ UIA is a COM API. Calls into UIA from a thread that hasn't called
 `CoInitializeEx` will fail. Rules for `surface-uia`:
 
 - Initialize each UIA-using thread with `CoInitializeEx(COINIT_MULTITHREADED)`.
-- Do **not** marshal UIA elements across threads — re-resolve via the patterns above.
+- Do **not** marshal UIA elements across threads - re-resolve via the patterns above.
 - All `Surface` trait methods take `&self` so they can be called concurrently from the daemon, but each call internally pins itself to a single worker thread for COM safety.
 
 ## 11. Gaps and intentional drops
 
 Things UIA exposes that we are deliberately not surfacing in v0.1:
 
-- **Annotations / live regions** — `AnnotationPattern`, `LiveSetting`. Useful for screen readers; not for agents (yet).
-- **Text patterns** — full `TextPattern` access (text ranges, attributes, find). Massive surface, deferred to a separate text-aware iteration.
-- **Virtualization** — `VirtualizedItemPattern` realisation. We will hit this when snapshotting large list/grid controls (Outlook, Excel). Track as a known gap; for v0.1 we capture only realised items.
-- **Drag-and-drop** — `DragPattern` / `DropTargetPattern`. Deferred.
-- **Custom annotation properties** — UIA lets apps expose arbitrary string properties. Skip until a concrete use case appears.
+- **Annotations / live regions** - `AnnotationPattern`, `LiveSetting`. Useful for screen readers; not for agents (yet).
+- **Text patterns** - full `TextPattern` access (text ranges, attributes, find). Massive surface, deferred to a separate text-aware iteration.
+- **Virtualization** - `VirtualizedItemPattern` realisation. We will hit this when snapshotting large list/grid controls (Outlook, Excel). Track as a known gap; for v0.1 we capture only realised items.
+- **Drag-and-drop** - `DragPattern` / `DropTargetPattern`. Deferred.
+- **Custom annotation properties** - UIA lets apps expose arbitrary string properties. Skip until a concrete use case appears.
 - **Direct MSAA path.** Older Win32 apps with no native UIA support fall through Windows' built-in UIA→MSAA bridge, which gives reduced-fidelity trees but is "good enough" for v0.1. If a critical real app needs more, we add a parallel `IAccessible` walker; until then, we trust the bridge.
 
 ## 12. Resolved decisions (was: open questions)
@@ -274,4 +274,4 @@ These were open at draft time; recording the calls so we don't relitigate.
 
 1. **Emit `Generic` nodes?** Yes by default, stripped by `compact: true` (which the CLI defaults to). Programmatic clients pass `compact: false` for full fidelity. Rationale: structural labels disambiguate same-named controls; agents that don't need them can flip the flag.
 2. **`Custom` class-name promotion?** Yes, small whitelist (see §1.1). Caught the obvious legacy controls (`Edit`, `Static`, `Button`, list/tree views, rich-edit). `WindowsForms10.*` prefix parsing deferred.
-3. **MSAA fallback?** No for v0.1 — see §11. Rely on the UIA→MSAA bridge until a real app forces our hand.
+3. **MSAA fallback?** No for v0.1 - see §11. Rely on the UIA→MSAA bridge until a real app forces our hand.

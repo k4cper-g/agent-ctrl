@@ -1,10 +1,25 @@
 //! Transport-agnostic request / response dispatch.
 
-use agent_ctrl_core::{Action, ActionResult, Snapshot, SnapshotOptions, SurfaceKind};
+use std::time::{Duration, Instant};
+
+use agent_ctrl_core::{
+    tree_signature, Action, ActionResult, FindMatch, FindQuery, Snapshot, SnapshotOptions,
+    SurfaceKind, WaitOptions, WaitOutcome, WaitPredicate, WindowInfo,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::factory;
 use crate::state::{DaemonState, SessionId};
+
+/// Floor on `wait-for` poll cadence. Anything faster burns CPU on UIA tree
+/// walks without buying reliability - a heavy app's snapshot already takes
+/// 100-300ms.
+const MIN_POLL_MS: u64 = 50;
+
+/// Cap on `wait-for` total timeout. Prevents a buggy or malicious client
+/// from pinning the daemon in a polling loop for years. One hour is well
+/// past anything an interactive agent should ever need.
+const MAX_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 /// A request from a client to the daemon.
 ///
@@ -44,6 +59,37 @@ pub enum RequestOp {
         session: SessionId,
         /// Action to perform.
         action: Action,
+    },
+    /// Search the most recent snapshot's tree for refs matching `query`.
+    ///
+    /// Pure read against the daemon's cached snapshot - does not re-walk the
+    /// OS accessibility tree. Errors when no snapshot has been captured yet
+    /// on this session.
+    Find {
+        /// Session to query.
+        session: SessionId,
+        /// Filters describing what to match.
+        query: FindQuery,
+    },
+    /// Block until `opts.predicate` is satisfied or `opts.timeout_ms` fires.
+    ///
+    /// Polls the surface at `opts.poll_ms` (floored at 50). Each successful
+    /// poll's snapshot is cached as `last_snapshot` so a follow-up `Act` or
+    /// `Find` sees fresh refs without an extra round-trip.
+    Wait {
+        /// Session to wait on.
+        session: SessionId,
+        /// Predicate, timeout, and poll cadence.
+        opts: WaitOptions,
+    },
+    /// Enumerate top-level windows the session can target.
+    ///
+    /// Mirrors agent-browser's `tab_list`: the agent uses the result to
+    /// decide which window to switch to via `FocusWindow`. Useful when a
+    /// dialog or popup spawned outside the currently pinned window.
+    ListWindows {
+        /// Session to enumerate windows for.
+        session: SessionId,
     },
     /// Close an open session.
     CloseSession {
@@ -87,9 +133,26 @@ pub enum ResponseBody {
         /// Action result.
         outcome: ActionResult,
     },
+    /// `Find` succeeded. May be empty if no node matched.
+    FindResults {
+        /// Matched refs in tree order.
+        matches: Vec<FindMatch>,
+    },
+    /// `Wait` finished, either by satisfying its predicate or by timing out.
+    WaitDone {
+        /// What happened. `Timeout` is *not* a wire-level error - it's a
+        /// distinguishable normal outcome the CLI maps to exit code 2.
+        outcome: WaitOutcome,
+    },
+    /// `ListWindows` succeeded.
+    Windows {
+        /// Top-level windows the session can target. The pinned window is
+        /// flagged via `WindowInfo::pinned`.
+        windows: Vec<WindowInfo>,
+    },
     /// `CloseSession` succeeded.
     Closed,
-    /// `Shutdown` succeeded — the daemon will exit shortly after this
+    /// `Shutdown` succeeded - the daemon will exit shortly after this
     /// response is delivered.
     Stopped,
     /// Any error path.
@@ -128,14 +191,21 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
             let Some(cell) = state.get(session).await else {
                 return Response::error(&id, format!("unknown session: {session}"));
             };
-            let guard = cell.lock().await;
-            let Some(surface) = guard.as_ref() else {
+            let mut guard = cell.lock().await;
+            let Some(surface) = guard.surface.as_ref() else {
                 return Response::error(&id, format!("session {session} is closed"));
             };
             match surface.snapshot(&opts).await {
-                Ok(s) => ResponseBody::Snapshot {
-                    snapshot: Box::new(s),
-                },
+                Ok(s) => {
+                    // Cache both the snapshot and the options that produced
+                    // it, so the wait-for polling loop can keep targeting
+                    // the same window instead of re-resolving Foreground.
+                    guard.last_snapshot = Some(s.clone());
+                    guard.last_snapshot_options = Some(opts);
+                    ResponseBody::Snapshot {
+                        snapshot: Box::new(s),
+                    }
+                }
                 Err(e) => ResponseBody::Error {
                     message: e.to_string(),
                 },
@@ -146,11 +216,54 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
                 return Response::error(&id, format!("unknown session: {session}"));
             };
             let guard = cell.lock().await;
-            let Some(surface) = guard.as_ref() else {
+            let Some(surface) = guard.surface.as_ref() else {
                 return Response::error(&id, format!("session {session} is closed"));
             };
             match surface.act(&action).await {
                 Ok(o) => ResponseBody::ActionDone { outcome: o },
+                Err(e) => ResponseBody::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        RequestOp::Find { session, query } => {
+            let Some(cell) = state.get(session).await else {
+                return Response::error(&id, format!("unknown session: {session}"));
+            };
+            let guard = cell.lock().await;
+            let Some(snap) = guard.last_snapshot.as_ref() else {
+                // Don't leak the internal session UUID here - the caller
+                // already knows which session they targeted, and a UUID
+                // distracts from the actionable hint.
+                return Response::error(
+                    &id,
+                    "no snapshot cached for this session - run `agent-ctrl snapshot` first",
+                );
+            };
+            ResponseBody::FindResults {
+                matches: snap.find(&query),
+            }
+        }
+        RequestOp::Wait { session, opts } => {
+            let Some(cell) = state.get(session).await else {
+                return Response::error(&id, format!("unknown session: {session}"));
+            };
+            let outcome = run_wait(&cell, &opts).await;
+            match outcome {
+                Ok(o) => ResponseBody::WaitDone { outcome: o },
+                Err(e) => ResponseBody::Error { message: e },
+            }
+        }
+        RequestOp::ListWindows { session } => {
+            let Some(cell) = state.get(session).await else {
+                return Response::error(&id, format!("unknown session: {session}"));
+            };
+            let guard = cell.lock().await;
+            let Some(surface) = guard.surface.as_ref() else {
+                return Response::error(&id, format!("session {session} is closed"));
+            };
+            match surface.list_windows().await {
+                Ok(windows) => ResponseBody::Windows { windows },
                 Err(e) => ResponseBody::Error {
                     message: e.to_string(),
                 },
@@ -165,6 +278,108 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
         RequestOp::Shutdown => ResponseBody::Stopped,
     };
     Response { id, body }
+}
+
+/// Run a wait-for polling loop against `cell`.
+///
+/// Each iteration acquires the session lock briefly to take a snapshot and
+/// cache it, then releases the lock before sleeping - so other CLI
+/// invocations (a `find`, a `close`, an `act`) on the same session can
+/// interleave between polls. The minimum poll interval is clamped at
+/// [`MIN_POLL_MS`] to prevent CPU thrash on heavy a11y trees.
+///
+/// Each poll uses the same `SnapshotOptions` that produced the session's
+/// most recent snapshot - without that, `target: Foreground` would
+/// re-resolve to whatever window has focus right now (the terminal,
+/// typically) and the wait would target the wrong app entirely. A prior
+/// `Snapshot` is therefore required; if none exists this returns an error.
+///
+/// Returns `Err` only for fatal session-state problems (closed surface,
+/// snapshot error, no prior snapshot). Timeout is a normal
+/// `Ok(WaitOutcome::Timeout)` so the CLI can map it to its own exit code.
+async fn run_wait(
+    cell: &crate::state::SurfaceCell,
+    opts: &WaitOptions,
+) -> Result<WaitOutcome, String> {
+    // Both ends are clamped: poll has a floor (CPU thrash protection) and
+    // timeout has a ceiling (don't let a runaway request occupy the worker
+    // for hours). Hitting MAX_TIMEOUT_MS still produces a normal `Timeout`
+    // outcome, not an error - the agent sees "timeout after 3600000ms".
+    let timeout = Duration::from_millis(opts.timeout_ms.min(MAX_TIMEOUT_MS));
+    let poll = Duration::from_millis(opts.poll_ms.max(MIN_POLL_MS));
+    let started = Instant::now();
+
+    // Snapshot options to reuse on every poll. Captured up front so we
+    // hold the lock briefly.
+    let snap_opts: SnapshotOptions = {
+        let guard = cell.lock().await;
+        guard.last_snapshot_options.clone().ok_or_else(|| {
+            "no snapshot cached for this session - run `agent-ctrl snapshot` first so wait-for knows which window to target".to_string()
+        })?
+    };
+
+    // Stable-only state: signature seen on the previous successful poll, and
+    // when the current run of equal signatures began. Reset to None whenever
+    // the signature changes.
+    let mut last_signature: Option<u64> = None;
+    let mut stable_since: Option<Instant> = None;
+
+    loop {
+        // Take a snapshot inside a short lock window. The lock is released
+        // before we evaluate or sleep so other ops can interleave.
+        let snap = {
+            let mut guard = cell.lock().await;
+            let Some(surface) = guard.surface.as_ref() else {
+                return Err("session is closed".into());
+            };
+            let snap = surface
+                .snapshot(&snap_opts)
+                .await
+                .map_err(|e| format!("wait: snapshot failed: {e}"))?;
+            // Cache so a follow-up action sees fresh refs without an extra
+            // OS round-trip.
+            guard.last_snapshot = Some(snap.clone());
+            snap
+        };
+
+        // Evaluate the predicate against the snapshot we just took.
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &opts.predicate {
+            WaitPredicate::Appears { query } => {
+                if let Some(found) = snap.find(query).into_iter().next() {
+                    return Ok(WaitOutcome::Matched {
+                        found: Some(found),
+                        elapsed_ms,
+                    });
+                }
+            }
+            WaitPredicate::Gone { query } => {
+                if snap.find(query).is_empty() {
+                    return Ok(WaitOutcome::Gone { elapsed_ms });
+                }
+            }
+            WaitPredicate::Stable { idle_ms } => {
+                let sig = tree_signature(&snap);
+                if last_signature == Some(sig) {
+                    let since = stable_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= Duration::from_millis(*idle_ms) {
+                        return Ok(WaitOutcome::Stable { elapsed_ms });
+                    }
+                } else {
+                    last_signature = Some(sig);
+                    stable_since = None;
+                }
+            }
+        }
+
+        // Check the timeout *before* sleeping - overruns of one poll
+        // duration are tolerable, but two polls past the deadline isn't.
+        if started.elapsed() >= timeout {
+            return Ok(WaitOutcome::Timeout { elapsed_ms });
+        }
+
+        tokio::time::sleep(poll).await;
+    }
 }
 
 #[cfg(test)]

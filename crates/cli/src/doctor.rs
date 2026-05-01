@@ -1,4 +1,4 @@
-//! `agent-ctrl doctor` — diagnose an agent-ctrl install.
+//! `agent-ctrl doctor` - diagnose an agent-ctrl install.
 //!
 //! Modeled on agent-browser's [`cli/src/doctor`](../../../agent-browser/cli/src/doctor/).
 //! Each check returns `pass` / `warn` / `fail` / `info` plus a message
@@ -8,9 +8,9 @@
 //!
 //! Categories:
 //!
-//! - `environment` — OS, build, surface compile status, home dir
-//! - `daemon` — discovery dir, stale session files, active sessions
-//! - `probe` — round-trip a request through a freshly-spawned mock daemon
+//! - `environment` - OS, build, surface compile status, home dir
+//! - `daemon` - discovery dir, stale session files, active sessions
+//! - `probe` - round-trip a request through a freshly-spawned mock daemon
 //!   child; the strongest signal that the local install actually works
 //!   end-to-end. Skip with `--quick`.
 //!
@@ -148,7 +148,7 @@ fn check_environment(out: &mut Vec<Check>) {
             SurfaceStatus::Stub => (
                 Status::Warn,
                 format!(
-                    "surface {}: scaffold only — open will succeed but actions return Unsupported",
+                    "surface {}: scaffold only - open will succeed but actions return Unsupported",
                     kind.as_str()
                 ),
             ),
@@ -161,7 +161,7 @@ fn check_environment(out: &mut Vec<Check>) {
                 ),
             ),
             // NotImplemented and (the future case of) any other "neutral"
-            // status both want the same `Info` line — distinct from Stub
+            // status both want the same `Info` line - distinct from Stub
             // (warn, partial) and WrongOs (info, OS-gated).
             SurfaceStatus::NotImplemented => (
                 Status::Info,
@@ -282,7 +282,7 @@ fn list_stale(dir: &PathBuf) -> Vec<PathBuf> {
                 stale.push(path);
             }
         } else {
-            // Unparseable file — also a candidate for cleanup.
+            // Unparseable file - also a candidate for cleanup.
             stale.push(path);
         }
     }

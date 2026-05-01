@@ -11,12 +11,13 @@ Reference repo: `agent-browser/` at the workspace root is a clone of [vercel-lab
 ## Conventions
 
 - **Rust edition 2021**, MSRV 1.85.
-- Workspace lints in `Cargo.toml` are authoritative — `clippy::pedantic` and `clippy::nursery` are warnings. Do not silence with `#[allow(...)]` unless you have a concrete reason and add a one-line comment explaining why.
+- Workspace lints in `Cargo.toml` are authoritative - `clippy::pedantic` and `clippy::nursery` are warnings. Do not silence with `#[allow(...)]` unless you have a concrete reason and add a one-line comment explaining why.
 - `unsafe_code = "warn"` workspace-wide. Crates that genuinely need it (FFI surfaces) opt in per-crate with `#![allow(unsafe_code)]` at `lib.rs`.
 - All public items must have rustdoc comments (`missing_docs = "warn"`).
-- `unwrap()` / `expect()` are warnings — use `?` or pattern matching instead. Tests may use them freely.
+- `unwrap()` / `expect()` are warnings - use `?` or pattern matching instead. Tests may use them freely.
 - CLI flags use kebab-case (`--allow-file-access`, never `--allowFileAccess`).
 - No emojis in code, output, or docs. Unicode symbols (✓ ✗ → ⚠) are acceptable in CLI output.
+- No em-dashes (the U+2014 character) anywhere in the project's text - code comments, rustdoc, README, CHANGELOG, examples, CLI output. Use ASCII hyphens (`-`) or restructure the sentence.
 - Format: `cargo fmt --all`. Lint: `cargo clippy --workspace --all-targets`.
 
 ## Architecture rules
@@ -49,4 +50,4 @@ cargo fmt --all -- --check                        # format check
 
 ## License
 
-Apache-2.0. New files inherit it via the workspace `[workspace.package]` license field — no per-file headers required.
+Apache-2.0. New files inherit it via the workspace `[workspace.package]` license field - no per-file headers required.

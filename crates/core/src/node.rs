@@ -64,7 +64,7 @@ pub enum NativeHandle {
     },
     /// Windows UI Automation handle.
     Uia {
-        /// UIA `RuntimeId` — unstable across runs but useful within one session.
+        /// UIA `RuntimeId` - unstable across runs but useful within one session.
         runtime_id: Vec<u8>,
         /// UIA `AutomationId` when set; the most stable identifier UIA exposes.
         automation_id: Option<String>,

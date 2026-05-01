@@ -18,8 +18,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 # Future implementation will add:
-#   tokio-tungstenite — CDP WebSocket transport
-#   reqwest           — Chrome version discovery (/json/version)
+#   tokio-tungstenite - CDP WebSocket transport
+#   reqwest           - Chrome version discovery (/json/version)
 # See agent-browser's cli/src/native/cdp/ for the reference shape.
 
 [lints]

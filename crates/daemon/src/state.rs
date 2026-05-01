@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_ctrl_core::{Error, Result, Surface};
+use agent_ctrl_core::{Error, Result, Snapshot, SnapshotOptions, Surface};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -33,13 +33,46 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// A surface paired with the lock that serializes access to it.
+/// Per-session state held under the daemon's session lock.
+///
+/// `surface` is `Option` so we can take ownership during `shutdown` and drop
+/// it exactly once. `last_snapshot` caches the most recent successful
+/// `Surface::snapshot` result so query verbs (`find`, future `wait-for`) can
+/// run against it without forcing a fresh round-trip into the OS.
+pub struct SessionCell {
+    /// The platform surface for this session. `None` after shutdown.
+    pub surface: Option<Box<dyn Surface>>,
+    /// Most recent snapshot taken on this session. Replaced wholesale on each
+    /// successful `Surface::snapshot` so query verbs never see a mix of refs
+    /// from different captures.
+    pub last_snapshot: Option<Snapshot>,
+    /// Options that produced [`Self::last_snapshot`].
+    ///
+    /// The `wait-for` polling loop reuses these so it keeps targeting the
+    /// pinned window - passing `SnapshotOptions::default()` would re-resolve
+    /// `target: Foreground` to whichever window has focus *now*, which on a
+    /// terminal-driven flow is almost never the app the user pinned.
+    pub last_snapshot_options: Option<SnapshotOptions>,
+}
+
+impl SessionCell {
+    /// Build a fresh cell wrapping a newly-opened surface.
+    #[must_use]
+    pub fn new(surface: Box<dyn Surface>) -> Self {
+        Self {
+            surface: Some(surface),
+            last_snapshot: None,
+            last_snapshot_options: None,
+        }
+    }
+}
+
+/// A session paired with the lock that serializes access to it.
 ///
 /// Surfaces are guarded by a `Mutex` because most platform a11y APIs are
 /// single-threaded by design (Windows UIA prefers STA, macOS AX must run on
-/// the main thread). The inner `Option` lets us take ownership during
-/// `shutdown` so the surface is dropped exactly once.
-pub type SurfaceCell = Arc<Mutex<Option<Box<dyn Surface>>>>;
+/// the main thread).
+pub type SurfaceCell = Arc<Mutex<SessionCell>>;
 
 /// In-memory registry of active sessions.
 #[derive(Default)]
@@ -57,7 +90,7 @@ impl DaemonState {
     /// Register a surface and return its new session id.
     pub async fn open(&self, surface: Box<dyn Surface>) -> SessionId {
         let id = SessionId::new();
-        let cell = Arc::new(Mutex::new(Some(surface)));
+        let cell = Arc::new(Mutex::new(SessionCell::new(surface)));
         self.sessions.lock().await.insert(id, cell);
         id
     }
@@ -73,9 +106,11 @@ impl DaemonState {
             return Err(Error::Surface(format!("unknown session: {id}")));
         };
         let mut guard = cell.lock().await;
-        if let Some(mut surface) = guard.take() {
+        if let Some(mut surface) = guard.surface.take() {
             surface.shutdown().await?;
         }
+        guard.last_snapshot = None;
+        guard.last_snapshot_options = None;
         Ok(())
     }
 

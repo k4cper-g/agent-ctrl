@@ -13,7 +13,14 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent_ctrl_core::{Action, RefId, Region, SnapshotOptions, SurfaceKind, WindowTarget};
+use agent_ctrl_core::{
+    Action, FindQuery, RefId, Region, Role, SnapshotOptions, SurfaceKind, WaitOptions, WaitOutcome,
+    WaitPredicate, WindowTarget,
+};
+// `WindowInfo` is only used in the helper that renders/parses the list,
+// kept in a separate import so the wide `Action, FindQuery, ...` line stays
+// stable as more verbs land.
+use agent_ctrl_core::WindowInfo;
 use agent_ctrl_daemon::{
     client, ipc, session_file, DaemonState, RequestOp, ResponseBody, SessionFile, SessionId,
     DEFAULT_SESSION,
@@ -69,6 +76,19 @@ pub(crate) enum Command {
     /// print it as a tree of refs (or as raw JSON with `--json`). Window
     /// targeting flags pin which window subsequent actions will operate on.
     Snapshot(SnapshotArgs),
+
+    /// Look up refs in the most recent snapshot without re-walking the OS
+    /// accessibility tree. Filters by name (substring, case-insensitive by
+    /// default) and optionally by role or subtree. Run `agent-ctrl
+    /// snapshot` first to populate the cache.
+    Find(FindCliArgs),
+
+    /// Enumerate the top-level windows the session can target. Mirrors
+    /// agent-browser's `tab_list` for native UI: the agent uses this to
+    /// discover dialogs and popups that opened outside the currently
+    /// pinned window, then switches to one with `focus-window <id>`.
+    #[command(name = "window-list")]
+    WindowList(WindowListArgs),
 
     // --- Pointer / focus actions ---
     /// Click an element by ref (e.g. `@e3` or `ref_3`).
@@ -130,6 +150,17 @@ pub(crate) enum Command {
     Screenshot(ScreenshotArgs),
     /// Sleep on the daemon worker for `ms` milliseconds.
     Wait(WaitArgs),
+
+    /// Block until a UI predicate is satisfied. Three modes:
+    ///   `wait-for "Save"`           - appearance (race-window caveat: chain
+    ///                                 with `--stable` for racy follow-up)
+    ///   `wait-for "Save" --gone`    - disappearance (very reliable)
+    ///   `wait-for --stable`         - tree signature unchanged for `--idle-ms`
+    ///                                 (very reliable, dodges naming a node)
+    /// On match prints `ok matched ...`, on disappearance `ok gone ...`,
+    /// on stable `ok stable ...`. On timeout prints to stderr and exits 2.
+    #[command(name = "wait-for")]
+    WaitFor(WaitForArgs),
 }
 
 // ---------- Arg structs ----------
@@ -219,7 +250,7 @@ pub(crate) struct SnapshotArgs {
     target_pid: Option<u32>,
 
     /// Pin to the first window whose title contains this substring
-    /// (case-insensitive). Title text is locale-dependent — prefer
+    /// (case-insensitive). Title text is locale-dependent - prefer
     /// `--target-process` for portable scripts.
     #[arg(long, conflicts_with = "target_foreground")]
     target_title: Option<String>,
@@ -328,7 +359,7 @@ pub(crate) struct DragArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct AppIdArg {
-    /// Application id — full path (`C:\...\Notepad.exe`) or bare name
+    /// Application id - full path (`C:\...\Notepad.exe`) or bare name
     /// (`Notepad`).
     app_id: String,
     #[arg(long, default_value = DEFAULT_SESSION)]
@@ -352,6 +383,107 @@ pub(crate) struct ScreenshotArgs {
     /// omitted, captures the snapshot's pinned window.
     #[arg(long, value_name = "X,Y,W,H")]
     region: Option<String>,
+    #[arg(long, default_value = DEFAULT_SESSION)]
+    session: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FindCliArgs {
+    /// Substring to match against `name`. Case-insensitive by default;
+    /// pass `--exact` for case-sensitive equality. Omit to match any name.
+    #[arg(value_name = "NAME")]
+    name: Option<String>,
+
+    /// Restrict to a single role (kebab-case, e.g. `button`, `menu-item`,
+    /// `text-field`). Run `agent-ctrl snapshot` to see what roles are in
+    /// the tree.
+    #[arg(long)]
+    role: Option<String>,
+
+    /// Treat `NAME` as a case-sensitive exact match instead of a
+    /// case-insensitive substring.
+    #[arg(long)]
+    exact: bool,
+
+    /// Restrict the search to the subtree under this ref (e.g. `@e2`).
+    /// Useful for "find OK button inside the Save dialog".
+    #[arg(long, value_name = "REF")]
+    r#in: Option<String>,
+
+    /// Print only the first match and as a bare ref (`@e5`), no role/name
+    /// suffix. Designed for shell substitution: `agent-ctrl click
+    /// "$(agent-ctrl find Save --first)"`. Exits 1 if there is no match.
+    #[arg(long)]
+    first: bool,
+
+    /// Cap the number of results. Ignored when `--first` is set.
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+
+    #[arg(long, default_value = DEFAULT_SESSION)]
+    session: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WindowListArgs {
+    /// Print only the bare hex id of the first window that is *not* the
+    /// session's currently pinned window. Designed for shell substitution
+    /// into `focus-window` when a dialog just spawned:
+    ///
+    ///     agent-ctrl focus-window "$(agent-ctrl window-list --first-other)"
+    ///
+    /// Exits 1 with `no other windows` on stderr when only the pinned
+    /// window exists.
+    #[arg(long)]
+    first_other: bool,
+
+    #[arg(long, default_value = DEFAULT_SESSION)]
+    session: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WaitForArgs {
+    /// Name to match (substring, case-insensitive by default). Required
+    /// unless `--stable` is set.
+    #[arg(value_name = "NAME")]
+    name: Option<String>,
+
+    /// Wait for the tree's structural signature to be unchanged for
+    /// `--idle-ms` consecutive milliseconds. Mutually exclusive with NAME
+    /// and the per-node filters.
+    #[arg(long)]
+    stable: bool,
+
+    /// Quiet period (ms) that counts as "stable". Only meaningful with
+    /// `--stable`.
+    #[arg(long, default_value_t = 500)]
+    idle_ms: u64,
+
+    /// Wait for the match to disappear instead of appear.
+    #[arg(long)]
+    gone: bool,
+
+    /// Restrict to a single role (kebab-case, e.g. `button`, `dialog`).
+    #[arg(long)]
+    role: Option<String>,
+
+    /// Treat NAME as a case-sensitive exact match.
+    #[arg(long)]
+    exact: bool,
+
+    /// Restrict the search to the subtree under this ref (e.g. `@e2`).
+    #[arg(long, value_name = "REF")]
+    r#in: Option<String>,
+
+    /// Maximum total wait, milliseconds.
+    #[arg(long, default_value_t = 10_000)]
+    timeout: u64,
+
+    /// Polling interval, milliseconds. Floored at 50 by the daemon - finer
+    /// polling burns CPU on UIA tree walks without buying reliability.
+    #[arg(long, default_value_t = 250)]
+    poll: u64,
+
     #[arg(long, default_value = DEFAULT_SESSION)]
     session: String,
 }
@@ -384,6 +516,8 @@ impl Command {
             }),
             Self::Launch(a) => run_launch(&a),
             Self::Snapshot(args) => run_snapshot(args),
+            Self::Find(args) => run_find(args),
+            Self::WindowList(args) => run_window_list(&args),
             Self::Click(a) => run_simple_ref_action(&a, |r| Action::Click { ref_id: r }),
             Self::DoubleClick(a) => {
                 run_simple_ref_action(&a, |r| Action::DoubleClick { ref_id: r })
@@ -443,6 +577,7 @@ impl Command {
             ),
             Self::Screenshot(a) => run_screenshot(a),
             Self::Wait(a) => run_act(&a.session, Action::Wait { ms: a.ms }),
+            Self::WaitFor(a) => run_wait_for(&a),
         }
     }
 }
@@ -552,7 +687,7 @@ fn run_open(args: &OpenArgs) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — the daemon survives
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP - the daemon survives
         // when the spawning shell exits, and Ctrl-C in the shell doesn't
         // kill it.
         cmd.creation_flags(0x0000_0008 | 0x0000_0200);
@@ -582,7 +717,7 @@ fn run_close(session: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("no live daemon for session {session:?}"))?;
 
     // Ask the daemon to close its surface session, then to shut down. We
-    // ignore the CloseSession response on error — the surface might fail
+    // ignore the CloseSession response on error - the surface might fail
     // to clean up, but we still want the daemon to exit and the state
     // file to be removed.
     let session_id = parse_session_id(&info.daemon_session_id)?;
@@ -615,7 +750,7 @@ fn run_close(session: &str) -> Result<()> {
     Ok(())
 }
 
-/// Spawn a process detached from this shell. Doesn't touch any daemon —
+/// Spawn a process detached from this shell. Doesn't touch any daemon -
 /// it's an orthogonal primitive an agent can compose with `snapshot
 /// --target-pid <n>` next, since `agent-ctrl` itself didn't have a way
 /// to start an app from inside its own verb vocabulary before this.
@@ -714,9 +849,268 @@ fn run_snapshot(args: SnapshotArgs) -> Result<()> {
     Ok(())
 }
 
+// ---------- Find ----------
+
+fn run_find(args: FindCliArgs) -> Result<()> {
+    let info = require_session(&args.session)?;
+    let session_id = parse_session_id(&info.daemon_session_id)?;
+
+    let role = match args.role.as_deref() {
+        Some(s) => Some(parse_role(s)?),
+        None => None,
+    };
+    let in_ref = match args.r#in.as_deref() {
+        Some(s) => Some(parse_ref(s)?),
+        None => None,
+    };
+    // `--first` always wins: cap at 1 result so the daemon stops walking early.
+    let limit = if args.first {
+        Some(1)
+    } else {
+        Some(args.limit)
+    };
+
+    let query = FindQuery {
+        name: args.name,
+        exact: args.exact,
+        role,
+        in_ref,
+        limit,
+    };
+
+    let resp = client::send(
+        &info,
+        RequestOp::Find {
+            session: session_id,
+            query,
+        },
+    )
+    .context("sending find request")?;
+
+    let matches = match resp.body {
+        ResponseBody::FindResults { matches } => matches,
+        ResponseBody::Error { message } => bail!("find failed: {message}"),
+        other => bail!("unexpected response: {other:?}"),
+    };
+
+    if matches.is_empty() {
+        // "no match" is a query result, not a runtime error - print it
+        // plainly without anyhow's `Error:` prefix, but still exit non-zero
+        // so shell pipelines can branch on it.
+        eprintln!("no match");
+        std::process::exit(1);
+    }
+
+    if args.first {
+        // Bare ref so `agent-ctrl click "$(agent-ctrl find Save --first)"`
+        // works without trimming.
+        println!("{}", display_ref(&matches[0].ref_id.0));
+    } else {
+        for m in &matches {
+            let ref_label = display_ref(&m.ref_id.0);
+            let role = role_label(&m.role);
+            // Human-first: aligned columns, quoted name. Roles longer than
+            // 12 chars (e.g. `menu-item-checkbox`) just push the name over
+            // - readability over rigid alignment.
+            println!("{ref_label:<5} {role:<12} {:?}", m.name);
+        }
+    }
+    Ok(())
+}
+
+fn parse_role(s: &str) -> Result<Role> {
+    serde_json::from_value(serde_json::Value::String(s.to_string())).with_context(|| {
+        format!(
+            "unknown role {s:?} (expected kebab-case, e.g. `button`, `menu-item`, `text-field`)"
+        )
+    })
+}
+
+// ---------- Window list ----------
+
+fn run_window_list(args: &WindowListArgs) -> Result<()> {
+    let info = require_session(&args.session)?;
+    let session_id = parse_session_id(&info.daemon_session_id)?;
+
+    let resp = client::send(
+        &info,
+        RequestOp::ListWindows {
+            session: session_id,
+        },
+    )
+    .context("sending window-list request")?;
+
+    let windows = match resp.body {
+        ResponseBody::Windows { windows } => windows,
+        ResponseBody::Error { message } => bail!("window-list failed: {message}"),
+        other => bail!("unexpected response: {other:?}"),
+    };
+
+    if args.first_other {
+        let other = windows.iter().find(|w| !w.pinned);
+        if let Some(w) = other {
+            // Bare id for shell substitution into `focus-window`.
+            println!("{}", w.id);
+            Ok(())
+        } else {
+            eprintln!("no other windows");
+            std::process::exit(1);
+        }
+    } else {
+        print_window_table(&windows);
+        Ok(())
+    }
+}
+
+fn print_window_table(windows: &[WindowInfo]) {
+    if windows.is_empty() {
+        println!("(no windows)");
+        return;
+    }
+    // Match the column style used by the existing `list` verb: uppercase
+    // headers, padded columns, two-space separators.
+    println!("{:<12}  {:<8}  {:<14}  TITLE", "ID", "PID", "PROCESS");
+    for w in windows {
+        let title = w.title.as_deref().unwrap_or("");
+        let mut tags = Vec::new();
+        if w.pinned {
+            tags.push("pinned");
+        }
+        if w.focused {
+            tags.push("focused");
+        }
+        let tag_suffix = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", tags.join(" "))
+        };
+        println!(
+            "{:<12}  {:<8}  {:<14}  {title}{tag_suffix}",
+            w.id, w.pid, w.process,
+        );
+    }
+}
+
+// ---------- Wait-for ----------
+
+fn run_wait_for(args: &WaitForArgs) -> Result<()> {
+    // Mode validation up front. Could be done with clap's `conflicts_with`
+    // but post-parse checks read more clearly than the attribute soup.
+    let predicate = if args.stable {
+        if args.name.is_some()
+            || args.gone
+            || args.role.is_some()
+            || args.exact
+            || args.r#in.is_some()
+        {
+            bail!("--stable cannot be combined with NAME, --gone, --role, --exact, or --in");
+        }
+        WaitPredicate::Stable {
+            idle_ms: args.idle_ms,
+        }
+    } else {
+        // At least one *selector* (name or role) must be present, otherwise
+        // we're either matching nothing (impossible) or every node (which
+        // includes the window root itself, so `--gone` would never fire and
+        // `Appears` would match on snapshot 1 - useless either way).
+        // `--exact` and `--in` are modifiers, not selectors.
+        if args.name.is_none() && args.role.is_none() {
+            bail!(
+                "provide NAME, `--role`, or `--stable` - wait-for needs something to match against"
+            );
+        }
+        let role = match args.role.as_deref() {
+            Some(s) => Some(parse_role(s)?),
+            None => None,
+        };
+        let in_ref = match args.r#in.as_deref() {
+            Some(s) => Some(parse_ref(s)?),
+            None => None,
+        };
+        let query = FindQuery {
+            name: args.name.clone(),
+            exact: args.exact,
+            role,
+            in_ref,
+            // The wait predicate fires on the *first* match, so no point
+            // walking the whole tree once one is found.
+            limit: Some(1),
+        };
+        if args.gone {
+            WaitPredicate::Gone { query }
+        } else {
+            WaitPredicate::Appears { query }
+        }
+    };
+
+    let info = require_session(&args.session)?;
+    let session_id = parse_session_id(&info.daemon_session_id)?;
+    let opts = WaitOptions {
+        predicate,
+        timeout_ms: args.timeout,
+        poll_ms: args.poll,
+    };
+
+    // Allow the wait to run up to its full timeout plus a little headroom
+    // for the final snapshot. Without this, the daemon read timeout (30s)
+    // would race a long user-supplied --timeout.
+    //
+    // Saturating add: a user passing `--timeout u64::MAX` (or anything
+    // close) shouldn't wrap to a tiny millis value and produce a confusing
+    // TCP timeout instead of the daemon-side timeout outcome.
+    let transport_timeout = Duration::from_millis(args.timeout.saturating_add(5_000));
+    let resp = client::send_with_timeout(
+        &info,
+        RequestOp::Wait {
+            session: session_id,
+            opts,
+        },
+        transport_timeout,
+    )
+    .context("sending wait-for request")?;
+
+    let outcome = match resp.body {
+        ResponseBody::WaitDone { outcome } => outcome,
+        ResponseBody::Error { message } => bail!("wait-for failed: {message}"),
+        other => bail!("unexpected response: {other:?}"),
+    };
+
+    match outcome {
+        WaitOutcome::Matched { found, elapsed_ms } => {
+            if let Some(m) = found {
+                println!(
+                    "ok matched {} {} {:?} after {}ms",
+                    display_ref(&m.ref_id.0),
+                    role_label(&m.role),
+                    m.name,
+                    elapsed_ms
+                );
+            } else {
+                println!("ok matched after {elapsed_ms}ms");
+            }
+            Ok(())
+        }
+        WaitOutcome::Gone { elapsed_ms } => {
+            println!("ok gone after {elapsed_ms}ms");
+            Ok(())
+        }
+        WaitOutcome::Stable { elapsed_ms } => {
+            println!("ok stable after {elapsed_ms}ms");
+            Ok(())
+        }
+        WaitOutcome::Timeout { elapsed_ms } => {
+            // Timeout is its own thing - not a runtime error in the anyhow
+            // sense. Use exit 2 so shell pipelines can branch on
+            // "satisfied / timeout / other-error" without parsing strings.
+            eprintln!("timeout after {elapsed_ms}ms");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn print_snapshot_tree(snap: &agent_ctrl_core::Snapshot) {
     println!(
-        "# {} ({}) — {} refs",
+        "# {} ({}) - {} refs",
         snap.app.name,
         snap.surface_kind.as_str(),
         snap.refs.len(),
@@ -727,7 +1121,7 @@ fn print_snapshot_tree(snap: &agent_ctrl_core::Snapshot) {
             w.id,
             w.title
                 .as_deref()
-                .map(|t| format!(" — {t}"))
+                .map(|t| format!(" - {t}"))
                 .unwrap_or_default()
         );
     }

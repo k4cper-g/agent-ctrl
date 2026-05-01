@@ -29,6 +29,7 @@ pub mod node;
 pub mod role;
 pub mod snapshot;
 pub mod surface;
+pub mod wait;
 
 #[cfg(feature = "mock")]
 pub mod mock;
@@ -37,8 +38,11 @@ pub use action::{Action, ActionResult, Region};
 pub use error::{Error, Result};
 pub use node::{AppContext, Bounds, Checked, NativeHandle, Node, RefId, State, WindowContext};
 pub use role::Role;
-pub use snapshot::{RefEntry, RefMap, Snapshot, SnapshotOptions, WindowTarget};
-pub use surface::{CapabilitySet, Surface, SurfaceKind};
+pub use snapshot::{
+    FindMatch, FindQuery, RefEntry, RefMap, Snapshot, SnapshotOptions, WindowTarget,
+};
+pub use surface::{CapabilitySet, Surface, SurfaceKind, WindowInfo};
+pub use wait::{tree_signature, WaitOptions, WaitOutcome, WaitPredicate};
 
 #[cfg(feature = "mock")]
 pub use mock::MockSurface;

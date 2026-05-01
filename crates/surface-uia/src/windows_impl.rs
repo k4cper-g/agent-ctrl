@@ -85,7 +85,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use agent_ctrl_core::{
     Action, ActionResult, AppContext, Bounds, Checked, Error, NativeHandle, Node, RefEntry, RefId,
     RefMap, Region, Result, Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext,
-    WindowTarget,
+    WindowInfo, WindowTarget,
 };
 
 // ---------- Worker thread ----------
@@ -99,7 +99,7 @@ type WorkerJob = Box<dyn FnOnce(&mut WorkerState) + Send>;
 enum WorkerCmd {
     /// Run an arbitrary closure with access to [`WorkerState`].
     Run(WorkerJob),
-    /// Cooperative shutdown — drop COM objects and exit the loop.
+    /// Cooperative shutdown - drop COM objects and exit the loop.
     Shutdown,
 }
 
@@ -242,6 +242,12 @@ impl UiaInner {
     /// Execute an action against the most recent snapshot's refs.
     pub(crate) async fn act(&self, action: Action) -> Result<ActionResult> {
         self.run(move |state| act_dispatch(state, &action)).await
+    }
+
+    /// Enumerate all visible top-level windows owned by the same process as
+    /// the session's pinned window. Mirrors agent-browser's tab_list shape.
+    pub(crate) async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
+        self.run(list_windows_inner).await
     }
 }
 
@@ -397,7 +403,7 @@ fn walk_children(
         node.children = walk_children(walker, &child, refs, nth_seen, depth + 1, opts, dpi_scale)?;
 
         if opts.compact && is_compactable(&node) {
-            // Hoist the children into our caller's list — the empty Generic
+            // Hoist the children into our caller's list - the empty Generic
             // wrapper is dropped, but its descendants survive.
             result.extend(std::mem::take(&mut node.children));
         } else {
@@ -412,7 +418,7 @@ fn walk_children(
 }
 
 /// Roles that may carry an editable value via UIA's `ValuePattern`. We only
-/// query the pattern for these to keep snapshot cost bounded — querying every
+/// query the pattern for these to keep snapshot cost bounded - querying every
 /// node would add a COM round-trip per element on trees of thousands.
 fn role_might_have_value(role: &Role) -> bool {
     matches!(
@@ -586,7 +592,7 @@ fn role_might_be_selectable(role: &Role) -> bool {
 }
 
 /// Roles plausibly carrying `IsRequiredForForm`. Limited to form input
-/// controls — most other elements never set it.
+/// controls - most other elements never set it.
 fn role_might_be_required(role: &Role) -> bool {
     matches!(
         role,
@@ -608,7 +614,7 @@ fn read_toggle_state(element: &IUIAutomationElement) -> Option<Checked> {
     } else if state == ToggleState_Off {
         Checked::False
     } else {
-        // Unknown future state — bias toward "off" rather than dropping the
+        // Unknown future state - bias toward "off" rather than dropping the
         // signal entirely. A new ToggleState variant is unlikely but safer
         // to handle than to crash the snapshot.
         Checked::False
@@ -623,7 +629,7 @@ fn read_expand_state(element: &IUIAutomationElement) -> Option<bool> {
     let pattern: IUIAutomationExpandCollapsePattern =
         unsafe { element.GetCurrentPatternAs(UIA_ExpandCollapsePatternId) }.ok()?;
     let state = unsafe { pattern.CurrentExpandCollapseState() }.ok()?;
-    // Collapsed, LeafNode, and any future variant all map to `false` — we
+    // Collapsed, LeafNode, and any future variant all map to `false` - we
     // only care whether children are currently showing. Reference the
     // remaining constants explicitly so an upstream rename surfaces here.
     let _ = (ExpandCollapseState_Collapsed, ExpandCollapseState_LeafNode);
@@ -645,7 +651,7 @@ fn read_selection_state(element: &IUIAutomationElement) -> Option<bool> {
 fn read_required_for_form(element: &IUIAutomationElement) -> Option<bool> {
     // SAFETY: `element` is a valid COM interface.
     let required = unsafe { element.CurrentIsRequiredForForm() }.ok()?;
-    // Most apps never set this — only emit `Some(true)` to avoid littering
+    // Most apps never set this - only emit `Some(true)` to avoid littering
     // every form field with `required: false`.
     if required.as_bool() {
         Some(true)
@@ -660,7 +666,7 @@ fn read_required_for_form(element: &IUIAutomationElement) -> Option<bool> {
 /// rather than walking the full subtree.
 ///
 /// Returns `None` only when both `RuntimeId` extraction and `AutomationId`
-/// reads fail — the element is then so degenerate that there's nothing
+/// reads fail - the element is then so degenerate that there's nothing
 /// useful to record.
 fn build_native_handle(element: &IUIAutomationElement) -> Option<NativeHandle> {
     let runtime_id = extract_runtime_id(element).unwrap_or_default();
@@ -714,7 +720,7 @@ fn extract_automation_id(element: &IUIAutomationElement) -> Option<String> {
 
 /// Read a one-dimensional SAFEARRAY of `i32` (the only shape `GetRuntimeId`
 /// returns) into a `Vec<i32>`. Always destroys the SAFEARRAY before returning,
-/// even on read failure — leaking would slowly bloat the UIA process's heap
+/// even on read failure - leaking would slowly bloat the UIA process's heap
 /// across thousands of nodes.
 fn read_i32_safearray(array: *mut SAFEARRAY) -> Vec<i32> {
     if array.is_null() {
@@ -843,7 +849,7 @@ fn role_from_control_type(ct: UIA_CONTROLTYPE_ID, class_name: &str) -> Role {
 ///
 /// The promotions:
 /// - `MenuItem` + `TogglePattern` → `MenuItemCheckbox`. UIA doesn't expose a
-///   reliable "is radio" hint, so we don't distinguish radio menu items —
+///   reliable "is radio" hint, so we don't distinguish radio menu items -
 ///   anything checkable becomes `MenuItemCheckbox`.
 /// - `Window` + `WindowPattern.IsModal=true` → `Dialog`. Top-level frames
 ///   stay as `Window`; modal popups become `Dialog`.
@@ -868,7 +874,7 @@ fn promoted_role(
     }
 }
 
-/// Returns `true` when the element exposes `TogglePattern`. Cheap to check —
+/// Returns `true` when the element exposes `TogglePattern`. Cheap to check -
 /// one COM call. Used both for role promotion (MenuItem→MenuItemCheckbox)
 /// and could feed into `state.checked` extraction, though the existing
 /// `read_toggle_state` does its own pattern probe.
@@ -880,7 +886,7 @@ fn has_toggle_pattern(element: &IUIAutomationElement) -> bool {
 
 /// Returns `true` when the element is a modal window per `WindowPattern`.
 /// Non-window elements and windows that don't support the pattern return
-/// `false` — those stay as `Role::Window`.
+/// `false` - those stay as `Role::Window`.
 fn is_modal_window(element: &IUIAutomationElement) -> bool {
     // SAFETY: `element` is a valid COM interface.
     let Ok(pattern) =
@@ -892,7 +898,7 @@ fn is_modal_window(element: &IUIAutomationElement) -> bool {
     unsafe { pattern.CurrentIsModal() }.is_ok_and(BOOL::as_bool)
 }
 
-/// Returns `true` when the parent element exposes `SelectionPattern` —
+/// Returns `true` when the parent element exposes `SelectionPattern` -
 /// i.e. a selection container like a list box or tab list.
 fn parent_has_selection_pattern(parent: &IUIAutomationElement) -> bool {
     // SAFETY: `parent` is a valid COM interface.
@@ -1004,7 +1010,7 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
 
 /// Sleep on the worker thread for `ms` milliseconds. Note: this blocks the
 /// worker, so concurrent snapshots and actions are queued behind the wait.
-/// That matches our single-worker-per-session model — agents that need
+/// That matches our single-worker-per-session model - agents that need
 /// independent timelines should open separate sessions.
 //
 // Returns `Result` to match `act_dispatch`'s arm type even though it's
@@ -1019,7 +1025,7 @@ fn act_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
         action: "resolve".into(),
-        reason: "no prior snapshot — call snapshot before act".into(),
+        reason: "no prior snapshot - call snapshot before act".into(),
     })?;
     let element = resolve_element(&state.automation, hwnd, &entry)?;
 
@@ -1044,7 +1050,7 @@ fn act_focus(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
         action: "resolve".into(),
-        reason: "no prior snapshot — call snapshot before act".into(),
+        reason: "no prior snapshot - call snapshot before act".into(),
     })?;
     let element = resolve_element(&state.automation, hwnd, &entry)?;
 
@@ -1061,7 +1067,7 @@ fn act_fill(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<ActionRe
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
         action: "resolve".into(),
-        reason: "no prior snapshot — call snapshot before act".into(),
+        reason: "no prior snapshot - call snapshot before act".into(),
     })?;
     let element = resolve_element(&state.automation, hwnd, &entry)?;
 
@@ -1119,7 +1125,7 @@ fn act_select(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<Action
         return Ok(ActionResult::ok());
     }
 
-    // Treat as container — walk for a named SelectionItem descendant.
+    // Treat as container - walk for a named SelectionItem descendant.
     // SAFETY: `automation` is valid; ControlViewWalker returns Err if the
     // automation singleton can't allocate a walker (essentially OOM).
     let walker = unsafe { state.automation.ControlViewWalker() }.map_err(|e| Error::Action {
@@ -1151,7 +1157,7 @@ fn act_select(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<Action
 }
 
 /// Scroll the element into view via `ScrollItemPattern.ScrollIntoView()`.
-/// Doesn't move focus or change selection — just makes the element visible
+/// Doesn't move focus or change selection - just makes the element visible
 /// in its scroll container.
 fn act_scroll_into_view(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
@@ -1191,7 +1197,7 @@ fn act_select_all(state: &WorkerState, ref_id: Option<&RefId>) -> Result<ActionR
 fn require_hwnd(state: &WorkerState, action: &str) -> Result<HWND> {
     state.last_hwnd.ok_or_else(|| Error::Action {
         action: action.into(),
-        reason: "no prior snapshot — call snapshot before act".into(),
+        reason: "no prior snapshot - call snapshot before act".into(),
     })
 }
 
@@ -1263,11 +1269,11 @@ fn find_named_selection_item(
 // `SendInput` injects events into the system input queue; they are routed to
 // whichever window currently has keyboard focus. Each helper first calls
 // `ensure_foreground` to bring the snapshot's pinned HWND forward, so that
-// keystrokes land in the same window the agent took its snapshot of —
+// keystrokes land in the same window the agent took its snapshot of -
 // matching the design promise that "actions reuse the pinned HWND".
 
 /// Type a literal string at the current focus. Each UTF-16 code unit becomes
-/// a `KEYEVENTF_UNICODE` keystroke pair (down + up) — this bypasses keyboard
+/// a `KEYEVENTF_UNICODE` keystroke pair (down + up) - this bypasses keyboard
 /// layout translation entirely, so emoji and non-Latin scripts work without
 /// any per-locale handling. Surrogate pairs are sent as two events as the OS
 /// expects.
@@ -1293,7 +1299,7 @@ fn act_type(state: &WorkerState, text: &str) -> Result<ActionResult> {
 
 /// Press a chord like `"Enter"`, `"Ctrl+A"`, or `"Ctrl+Shift+T"`. Modifiers
 /// are pressed in declaration order, the main key is tapped, then modifiers
-/// are released in reverse order — matching how a human keyboard handles it.
+/// are released in reverse order - matching how a human keyboard handles it.
 fn act_press(state: &WorkerState, keys: &str) -> Result<ActionResult> {
     let parsed = parse_chord(keys).map_err(|reason| Error::Action {
         action: "press".into(),
@@ -1401,7 +1407,7 @@ fn act_hover(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
 ///
 /// Sign convention follows CSS / DOM: positive `dy` = scroll content
 /// downward (which is wheel-toward-the-user, a *negative* `WHEEL_DELTA`).
-/// Pixel-to-wheel conversion is approximate — we round `dy` to the nearest
+/// Pixel-to-wheel conversion is approximate - we round `dy` to the nearest
 /// integer wheel delta. One traditional notch is 120 units; modern smooth-
 /// scrolling apps accept any integer.
 fn act_scroll(
@@ -1483,7 +1489,7 @@ fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResul
 /// snapshot, or just the short name like `"Notepad"`.
 ///
 /// After the switch, `state.last_hwnd` points to the new window and
-/// `state.last_refs` is cleared — refs from a previous snapshot can no
+/// `state.last_refs` is cleared - refs from a previous snapshot can no
 /// longer resolve, so the agent must take a fresh snapshot before its next
 /// ref-bearing action.
 fn act_switch_app(state: &mut WorkerState, app_id: &str) -> Result<ActionResult> {
@@ -1512,7 +1518,7 @@ fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionRe
     })?;
 
     // Best-effort restore. Windows whose pattern doesn't support the call,
-    // or which aren't minimized, just skip this — Set/Bring foreground does
+    // or which aren't minimized, just skip this - Set/Bring foreground does
     // the rest.
     // SAFETY: `automation` is a valid COM interface; `hwnd` may be invalid,
     // in which case `ElementFromHandle` returns Err and we skip the restore.
@@ -1578,7 +1584,7 @@ struct CapturedImage {
 }
 
 /// Capture a window's client area. We intentionally use `GetWindowDC` +
-/// `BitBlt` rather than `PrintWindow` — BitBlt always produces a current
+/// `BitBlt` rather than `PrintWindow` - BitBlt always produces a current
 /// pixel snapshot, while PrintWindow defers to the app's WM_PRINT handler
 /// and some apps return blank or partial frames. The trade-off is that the
 /// captured window must be visible (not occluded), which is consistent with
@@ -1693,7 +1699,7 @@ fn blit_to_rgba(
         });
     }
 
-    // Top-down 32bpp RGB — `biHeight = -h` flips Windows' default
+    // Top-down 32bpp RGB - `biHeight = -h` flips Windows' default
     // bottom-up DIB ordering so we can write the rows directly without
     // an extra reversal pass.
     let mut info = BITMAPINFO {
@@ -1843,7 +1849,7 @@ fn make_mouse_wheel(axis: WheelAxis, delta: i32) -> INPUT {
 
 /// Map a pixel-space scroll amount to an integer `WHEEL_DELTA`. We treat
 /// 1 pixel ≈ 1 wheel-delta unit, which gives ~120 pixels per traditional
-/// notch — a reasonable agent-facing default. Sub-pixel inputs round to
+/// notch - a reasonable agent-facing default. Sub-pixel inputs round to
 /// the nearest integer; values whose absolute magnitude is below 0.5 round
 /// to zero and short-circuit the wheel event.
 fn scroll_delta_from_pixels(px: f64) -> i32 {
@@ -1905,7 +1911,7 @@ fn make_mouse_move_absolute(x: i32, y: i32) -> INPUT {
 /// Read the element's UIA `BoundingRectangle` and return the center point
 /// in physical screen pixels. Used to position the cursor before button
 /// events. Surfaces a clean action error when the element doesn't have a
-/// rectangle (rare — typically only when the element has been destroyed).
+/// rectangle (rare - typically only when the element has been destroyed).
 fn element_center_physical(element: &IUIAutomationElement) -> Result<(i32, i32)> {
     // SAFETY: `element` is a valid COM interface.
     let r = unsafe { element.CurrentBoundingRectangle() }.map_err(|e| Error::Action {
@@ -1942,14 +1948,14 @@ fn screen_to_absolute(x_phys: i32, y_phys: i32) -> (i32, i32) {
 fn ensure_foreground(state: &WorkerState, action: &str) -> Result<()> {
     let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
         action: action.into(),
-        reason: "no prior snapshot — call snapshot before keyboard input".into(),
+        reason: "no prior snapshot - call snapshot before keyboard input".into(),
     })?;
     bring_window_to_foreground(hwnd);
     Ok(())
 }
 
 /// Force `target` to the foreground using the `AttachThreadInput` workaround
-/// for Windows' `ForegroundLockTimeout` policy — without it,
+/// for Windows' `ForegroundLockTimeout` policy - without it,
 /// `SetForegroundWindow` from a non-foreground process is silently rejected,
 /// which is exactly the case we hit when the test runner / IDE is in front
 /// and we want to drive another app.
@@ -2003,7 +2009,7 @@ fn bring_window_to_foreground(target: HWND) {
 }
 
 /// Build a virtual-key `INPUT` event. `key_up = false` is a press; `true` is
-/// a release. Extended-key handling is delegated to the OS — when `wVk` is
+/// a release. Extended-key handling is delegated to the OS - when `wVk` is
 /// set and `wScan = 0` Windows sets the EXTENDED flag itself for navigation
 /// keys, so we don't need to special-case arrow / Home / End / etc.
 fn make_vk_input(vk: VIRTUAL_KEY, key_up: bool) -> INPUT {
@@ -2293,6 +2299,120 @@ fn enumerate_top_level(state: &mut EnumState) {
     let _ = unsafe { EnumWindows(Some(enum_windows_proc), lparam) };
 }
 
+/// Collector state for [`collect_windows_for_pid`]. Separate from `EnumState`
+/// because that one stops at the first match; this one walks the whole list.
+struct CollectState {
+    target_pid: u32,
+    out: Vec<HWND>,
+}
+
+extern "system" fn collect_windows_proc(
+    hwnd: HWND,
+    lparam: LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    // SAFETY: `lparam` was set by the caller to a `*mut CollectState` valid
+    // for the duration of `EnumWindows` (the calling fn blocks until done).
+    let state = unsafe { &mut *(lparam.0 as *mut CollectState) };
+    // SAFETY: `IsWindowVisible` accepts any HWND, including dangling.
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return windows::Win32::Foundation::BOOL(1);
+    }
+    let mut pid: u32 = 0;
+    // SAFETY: `hwnd` is valid (provided by EnumWindows); writing to a local u32 via raw ptr is sound.
+    let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
+    if pid == state.target_pid {
+        state.out.push(hwnd);
+    }
+    windows::Win32::Foundation::BOOL(1) // continue enumeration
+}
+
+fn collect_windows_for_pid(target_pid: u32) -> Vec<HWND> {
+    let mut state = CollectState {
+        target_pid,
+        out: Vec::new(),
+    };
+    let lparam = LPARAM(std::ptr::from_mut::<CollectState>(&mut state) as isize);
+    // SAFETY: callback is `extern "system"`; `lparam` points to `state` whose
+    // lifetime exceeds the EnumWindows call (this fn blocks until done).
+    let _ = unsafe { EnumWindows(Some(collect_windows_proc), lparam) };
+    state.out
+}
+
+/// Read a window's title text. Returns `None` for windows with no title or
+/// when reading fails (a routine occurrence for system tooltip windows).
+fn read_window_title(hwnd: HWND) -> Option<String> {
+    // SAFETY: `GetWindowTextLengthW` accepts any HWND; returns 0 on failure.
+    let len = unsafe { GetWindowTextLengthW(hwnd) };
+    let len = usize::try_from(len).ok()?;
+    if len == 0 {
+        return None;
+    }
+    // +1 for the null terminator GetWindowTextW writes.
+    let mut buf = vec![0u16; len + 1];
+    // SAFETY: buffer sized for `len + 1` u16s.
+    let written = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    let written = usize::try_from(written).ok()?;
+    if written == 0 {
+        None
+    } else {
+        Some(String::from_utf16_lossy(&buf[..written]))
+    }
+}
+
+/// Enumerate every visible top-level window owned by the same process as
+/// the session's pinned window, returning a `WindowInfo` per match.
+///
+/// The pinned target's PID is derived from `state.last_hwnd` - this method
+/// errors if no snapshot has been captured yet, since without a pinning
+/// reference we wouldn't know which app to enumerate.
+fn list_windows_inner(state: &mut WorkerState) -> Result<Vec<WindowInfo>> {
+    let pinned_hwnd = state.last_hwnd.ok_or_else(|| {
+        Error::Surface(
+            "no snapshot cached for this session - run `agent-ctrl snapshot` first so window-list knows which app to enumerate".into(),
+        )
+    })?;
+
+    let mut pid: u32 = 0;
+    // SAFETY: `pinned_hwnd` was a valid HWND when last_hwnd was set; the
+    // window may have closed since (`IsWindow` would catch that), but
+    // `GetWindowThreadProcessId` returns 0 in that case which we handle.
+    let _ = unsafe { GetWindowThreadProcessId(pinned_hwnd, Some(&raw mut pid)) };
+    if pid == 0 {
+        return Err(Error::Surface(
+            "pinned window is no longer valid - re-run `agent-ctrl snapshot`".into(),
+        ));
+    }
+
+    // Process name lookup once - every window in the result shares it.
+    let process_name =
+        process_info(pid).map_or_else(|_| format!("pid_{pid}"), |(_path, name)| name);
+
+    // SAFETY: `GetForegroundWindow` is always sound; null is allowed.
+    let foreground = unsafe { GetForegroundWindow() };
+
+    let mut hwnds = collect_windows_for_pid(pid);
+    // Always include the pinned window even if it's currently invisible
+    // (minimized, hidden, etc.) - otherwise the user sees an empty list
+    // (or only siblings) and can't tell why their session is in a strange
+    // state. The visibility check in `collect_windows_proc` would have
+    // dropped it.
+    if !hwnds.iter().any(|h| h.0 == pinned_hwnd.0) {
+        hwnds.push(pinned_hwnd);
+    }
+    let mut out = Vec::with_capacity(hwnds.len());
+    for hwnd in hwnds {
+        out.push(WindowInfo {
+            id: format!("0x{:x}", hwnd.0 as usize),
+            title: read_window_title(hwnd),
+            process: process_name.clone(),
+            pid,
+            focused: hwnd.0 == foreground.0,
+            pinned: hwnd.0 == pinned_hwnd.0,
+        });
+    }
+    Ok(out)
+}
+
 /// Re-resolve a [`RefEntry`] to a live [`IUIAutomationElement`].
 ///
 /// Resolution priority, per `docs/uia-mapping.md` §7:
@@ -2392,7 +2512,7 @@ fn find_by_automation_id(
 /// `nth` is global across the snapshot, mirroring the snapshot-time scheme.
 /// Crucially, the predicate that decides whether an element "counts" toward
 /// `nth` must match snapshot's ref-emission predicate exactly (interactive
-/// role OR editable `ValuePattern`) — otherwise an element matching role+name
+/// role OR editable `ValuePattern`) - otherwise an element matching role+name
 /// that didn't get a ref in the snapshot would still bump the counter here,
 /// causing action-time resolution to land on the wrong element.
 fn find_in_tree(
@@ -2577,7 +2697,7 @@ mod tests {
         assert_eq!((x0, y0), (0, 0));
         let (xn, yn) = screen_to_absolute_for(1919, 1079, 0, 0, 1920, 1080);
         // Last *pixel* (not last fractional point) maps to roughly (N-1)/N
-        // of the absolute range — at 1080 rows that's ~65474. The cursor
+        // of the absolute range - at 1080 rows that's ~65474. The cursor
         // lands within one pixel of the corner, which is the accuracy
         // contract MOUSEEVENTF_ABSOLUTE provides.
         assert!(xn >= 65400, "right edge x mapped to {xn}");

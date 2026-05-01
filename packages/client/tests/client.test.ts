@@ -66,4 +66,69 @@ describe("AgentCtrl driving the mock surface", () => {
       client.snapshot("00000000-0000-0000-0000-000000000000"),
     ).rejects.toThrow(/unknown session/);
   }, 120_000);
+
+  it("find returns matching refs from the cached snapshot", async () => {
+    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    const session = await client.openSession("mock");
+    await client.snapshot(session);
+
+    const all = await client.find(session, {});
+    // Mock surface returns two button refs.
+    expect(all).toHaveLength(2);
+
+    const okOnly = await client.find(session, { name: "OK", exact: true });
+    expect(okOnly).toHaveLength(1);
+    expect(okOnly[0]?.name).toBe("OK");
+
+    const limited = await client.find(session, { limit: 1 });
+    expect(limited).toHaveLength(1);
+  }, 120_000);
+
+  it("find errors before any snapshot has been taken", async () => {
+    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    const session = await client.openSession("mock");
+    await expect(client.find(session, { name: "OK" })).rejects.toThrow(
+      /no snapshot cached/,
+    );
+  }, 120_000);
+
+  it("waitFor matches an existing element on the first poll", async () => {
+    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    const session = await client.openSession("mock");
+    await client.snapshot(session);
+
+    const outcome = await client.waitFor(session, {
+      predicate: { kind: "appears", query: { name: "OK" } },
+      timeout_ms: 2000,
+      poll_ms: 100,
+    });
+    expect(outcome.outcome).toBe("matched");
+    if (outcome.outcome === "matched") {
+      expect(outcome.found?.name).toBe("OK");
+    }
+  }, 120_000);
+
+  it("waitFor reports timeout for a never-matching predicate", async () => {
+    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    const session = await client.openSession("mock");
+    await client.snapshot(session);
+
+    const outcome = await client.waitFor(session, {
+      predicate: { kind: "appears", query: { name: "NeverThere" } },
+      timeout_ms: 500,
+      poll_ms: 100,
+    });
+    expect(outcome.outcome).toBe("timeout");
+  }, 120_000);
+
+  it("listWindows returns the mock surface's single window marked pinned", async () => {
+    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    const session = await client.openSession("mock");
+    await client.snapshot(session);
+
+    const windows = await client.listWindows(session);
+    expect(windows).toHaveLength(1);
+    expect(windows[0]?.pinned).toBe(true);
+    expect(windows[0]?.title).toBe("Mock Window");
+  }, 120_000);
 });

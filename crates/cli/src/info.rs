@@ -1,4 +1,4 @@
-//! `agent-ctrl info` — cheap, side-effect-free "what does this binary
+//! `agent-ctrl info` - cheap, side-effect-free "what does this binary
 //! know about itself?" probe. Designed for an agent to run as the first
 //! command in a fresh session: it answers OS, build version, which
 //! surfaces are usable, where the home directory is, and whether any
@@ -101,7 +101,7 @@ fn print_text(r: &InfoReport) {
     for s in &r.surfaces {
         let marker = match s.status {
             "ready" => "✓",
-            "wrong-os" => "—",
+            "wrong-os" => "-",
             // stub / not-implemented / any future neutral status: same dim marker.
             _ => "·",
         };

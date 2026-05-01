@@ -11,6 +11,8 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import type {
   Action,
   ActionResult,
+  FindMatch,
+  FindQuery,
   Request,
   RequestOp,
   Response,
@@ -18,6 +20,9 @@ import type {
   Snapshot,
   SnapshotOptions,
   SurfaceKind,
+  WaitOptions,
+  WaitOutcome,
+  WindowInfo,
 } from "./types.js";
 
 /** Configuration for an [`AgentCtrl`] instance. */
@@ -42,7 +47,7 @@ interface PendingRequest {
  * Client for one running agent-ctrl daemon.
  *
  * Construction spawns the daemon eagerly; call `close()` to terminate it.
- * Every public method is safe to call concurrently — requests are correlated
+ * Every public method is safe to call concurrently - requests are correlated
  * by id under the hood.
  */
 export class AgentCtrl {
@@ -87,7 +92,7 @@ export class AgentCtrl {
     });
 
     this.proc.on("error", (err) => {
-      // Spawn failure (e.g., binary not found) — flag the client as closed
+      // Spawn failure (e.g., binary not found) - flag the client as closed
       // so subsequent `send()` short-circuits and `close()` doesn't hang
       // waiting for an `exit` event that will never fire.
       this.closed = true;
@@ -120,6 +125,51 @@ export class AgentCtrl {
     throw asError("act", r);
   }
 
+  /**
+   * Look up refs in the session's most recent snapshot.
+   *
+   * Pure read against the daemon's cached snapshot - does not re-walk the
+   * OS accessibility tree. Throws if no snapshot has been captured yet on
+   * this session; call `snapshot` first.
+   */
+  async find(session: SessionId, query: FindQuery = {}): Promise<FindMatch[]> {
+    const r = await this.send({ op: "find", session, query });
+    if (r.result === "find_results") return r.matches;
+    throw asError("find", r);
+  }
+
+  /**
+   * Block until a UI predicate is satisfied or the timeout fires.
+   *
+   * The daemon polls the surface at `opts.poll_ms` (floored at 50ms) and
+   * caches each successful snapshot, so a follow-up `find` or `act` after
+   * a successful wait sees fresh refs without an extra round-trip.
+   *
+   * Requires a prior `snapshot` so the polling loop knows which window to
+   * target. The returned outcome distinguishes `matched` / `gone` /
+   * `stable` / `timeout` - `timeout` is *not* an exception, callers
+   * branch on `outcome.outcome` directly.
+   */
+  async waitFor(session: SessionId, opts: WaitOptions): Promise<WaitOutcome> {
+    const r = await this.send({ op: "wait", session, opts });
+    if (r.result === "wait_done") return r.outcome;
+    throw asError("wait", r);
+  }
+
+  /**
+   * Enumerate the top-level windows the session can target.
+   *
+   * Mirrors agent-browser's `tab_list`: when a dialog or popup spawns
+   * outside the currently pinned window, this returns it as a sibling.
+   * Switch to a different window with `act(session, { kind: "focus_window",
+   * window_id })` and then re-snapshot.
+   */
+  async listWindows(session: SessionId): Promise<WindowInfo[]> {
+    const r = await this.send({ op: "list_windows", session });
+    if (r.result === "windows") return r.windows;
+    throw asError("list_windows", r);
+  }
+
   /** Close one session without shutting down the daemon. */
   async closeSession(session: SessionId): Promise<void> {
     const r = await this.send({ op: "close_session", session });
@@ -140,7 +190,7 @@ export class AgentCtrl {
       this.proc.stdin?.end();
     }
 
-    // Reject any pending requests up front — we don't want their promises
+    // Reject any pending requests up front - we don't want their promises
     // hanging on the daemon's eventual exit.
     if (this.pending.size > 0) {
       const closeError = new Error("AgentCtrl: client closed before response arrived");
@@ -154,7 +204,7 @@ export class AgentCtrl {
 
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
-        // Daemon didn't exit gracefully — escalate.
+        // Daemon didn't exit gracefully - escalate.
         this.proc.kill("SIGKILL");
       }, gracePeriodMs);
       this.proc.once("exit", () => {

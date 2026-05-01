@@ -2,7 +2,7 @@
 //!
 //! Mirrors the platform-agnostic subset of agent-browser's action dispatcher.
 //! Browser-specific verbs (`tab_*`, `waitforurl`, `route`, `har_*`, cookie
-//! storage) are intentionally absent — they have no native analog. New
+//! storage) are intentionally absent - they have no native analog. New
 //! cross-platform verbs that the browser doesn't need (`switch_app`,
 //! `focus_window`) are added at the bottom.
 

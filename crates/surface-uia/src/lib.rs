@@ -19,6 +19,7 @@
 use agent_ctrl_core::Error;
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Result, Snapshot, SnapshotOptions, Surface, SurfaceKind,
+    WindowInfo,
 };
 use async_trait::async_trait;
 
@@ -99,6 +100,20 @@ impl Surface for UiaSurface {
             Err(Error::Unsupported {
                 surface: SurfaceKind::Uia.as_str().into(),
                 action: "act".into(),
+            })
+        }
+    }
+
+    async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
+        #[cfg(target_os = "windows")]
+        {
+            self.inner.list_windows().await
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Uia.as_str().into(),
+                action: "list_windows".into(),
             })
         }
     }

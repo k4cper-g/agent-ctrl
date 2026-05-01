@@ -156,12 +156,106 @@ export interface ActionResult {
   data?: unknown;
 }
 
+// ---------- Find ----------
+
+/**
+ * Filter set for `find` / `wait-for` queries against a snapshot's tree.
+ *
+ * All fields are filters; an unset filter matches anything. Multiple filters
+ * AND together. Matching always requires the node to carry a `RefId` -
+ * non-interactive structural nodes are never returned because they cannot
+ * be acted on.
+ */
+export interface FindQuery {
+  /**
+   * Match against `node.name`. Case-insensitive substring by default;
+   * becomes case-sensitive equality when `exact` is set.
+   */
+  name?: string;
+  /** When `true`, `name` must equal `node.name` exactly. */
+  exact?: boolean;
+  /** Restrict matches to a single role. */
+  role?: Role;
+  /**
+   * Restrict the search to the subtree rooted at this ref. The root node
+   * itself is included in the search.
+   */
+  in_ref?: RefId;
+  /** Cap on the number of matches returned. Omit for unlimited. */
+  limit?: number;
+}
+
+/** One row of `AgentCtrl.find` output. */
+export interface FindMatch {
+  /** Ref the agent uses to target this node. */
+  ref_id: RefId;
+  /** Role at the time the snapshot was taken. */
+  role: Role;
+  /** Name at the time the snapshot was taken. */
+  name: string;
+}
+
+// ---------- Wait-for ----------
+
+/**
+ * Predicate evaluated against a fresh snapshot on every poll iteration.
+ *
+ * - `appears`: at least one node matching `query` is present. Has a real
+ *   race window - a node can appear before its children/state are fully
+ *   populated. For racy follow-up actions, chain a `stable` wait afterward.
+ * - `gone`: no node matches `query`. More reliable than `appears`.
+ * - `stable`: the tree's structural signature has been unchanged for
+ *   `idle_ms` consecutive milliseconds. The honest "let the UI settle"
+ *   primitive.
+ */
+export type WaitPredicate =
+  | { kind: "appears"; query: FindQuery }
+  | { kind: "gone"; query: FindQuery }
+  | { kind: "stable"; idle_ms: number };
+
+/** Options for one `wait-for` invocation. */
+export interface WaitOptions {
+  predicate: WaitPredicate;
+  /** Maximum total wait, in milliseconds. Daemon-side cap is one hour. */
+  timeout_ms: number;
+  /** Poll interval in milliseconds. Floored at 50 by the daemon. */
+  poll_ms: number;
+}
+
+/** Outcome of a `wait-for` invocation. */
+export type WaitOutcome =
+  | { outcome: "matched"; found?: FindMatch; elapsed_ms: number }
+  | { outcome: "gone"; elapsed_ms: number }
+  | { outcome: "stable"; elapsed_ms: number }
+  | { outcome: "timeout"; elapsed_ms: number };
+
+// ---------- Window list ----------
+
+/** One row of `AgentCtrl.listWindows` output. */
+export interface WindowInfo {
+  /** Stable per-platform window id. On Windows this is the HWND in lowercase hex (e.g. `"0x1717ca"`). */
+  id: string;
+  /** Window title text. May be missing for unnamed system windows. */
+  title?: string;
+  /** Owning process executable name (file stem, no extension on Windows). */
+  process: string;
+  /** Owning process id. */
+  pid: number;
+  /** Whether this window currently has user focus on the host. */
+  focused: boolean;
+  /** Whether this window is the session's currently pinned target. */
+  pinned: boolean;
+}
+
 // ---------- Wire envelope ----------
 
 export type RequestOp =
   | { op: "open_session"; surface: SurfaceKind }
   | { op: "snapshot"; session: SessionId; opts?: SnapshotOptions }
   | { op: "act"; session: SessionId; action: Action }
+  | { op: "find"; session: SessionId; query: FindQuery }
+  | { op: "wait"; session: SessionId; opts: WaitOptions }
+  | { op: "list_windows"; session: SessionId }
   | { op: "close_session"; session: SessionId };
 
 export type Request = { id: string } & RequestOp;
@@ -170,6 +264,9 @@ export type Response = { id: string } & (
   | { result: "session_opened"; session: SessionId }
   | { result: "snapshot"; snapshot: Snapshot }
   | { result: "action_done"; outcome: ActionResult }
+  | { result: "find_results"; matches: FindMatch[] }
+  | { result: "wait_done"; outcome: WaitOutcome }
+  | { result: "windows"; windows: WindowInfo[] }
   | { result: "closed" }
   | { result: "error"; message: string }
 );
