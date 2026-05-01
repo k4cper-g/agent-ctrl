@@ -64,12 +64,12 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL,
-    VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT,
-    VK_NUMLOCK, VK_PAUSE, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT,
-    VK_SPACE, VK_TAB, VK_UP,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY,
+    VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
+    VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PAUSE, VK_PRIOR, VK_RETURN,
+    VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW,
@@ -988,6 +988,8 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::DoubleClick { ref_id } => act_double_click(state, ref_id),
         Action::RightClick { ref_id } => act_right_click(state, ref_id),
         Action::Hover { ref_id } => act_hover(state, ref_id),
+        Action::Scroll { ref_id, dx, dy } => act_scroll(state, ref_id.as_ref(), *dx, *dy),
+        Action::Drag { from, to } => act_drag(state, from, to),
         other => Err(Error::Unsupported {
             surface: SurfaceKind::Uia.as_str().into(),
             action: action_name(other).into(),
@@ -1371,6 +1373,132 @@ fn act_hover(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let (ax, ay) = screen_to_absolute(cx, cy);
     ensure_foreground(state, "hover")?;
     send_inputs(&[make_mouse_move_absolute(ax, ay)], "hover")
+}
+
+/// Scroll by `(dx, dy)` logical pixels. When `ref_id` is `Some`, the cursor
+/// is positioned over the element's center first so the wheel events go to
+/// the right scroll container (most apps route mouse wheel to whatever's
+/// under the cursor). When `None`, the wheel events fire at the current
+/// cursor position.
+///
+/// Sign convention follows CSS / DOM: positive `dy` = scroll content
+/// downward (which is wheel-toward-the-user, a *negative* `WHEEL_DELTA`).
+/// Pixel-to-wheel conversion is approximate — we round `dy` to the nearest
+/// integer wheel delta. One traditional notch is 120 units; modern smooth-
+/// scrolling apps accept any integer.
+fn act_scroll(
+    state: &WorkerState,
+    ref_id: Option<&RefId>,
+    dx: f64,
+    dy: f64,
+) -> Result<ActionResult> {
+    let hwnd = require_hwnd(state, "scroll")?;
+    let mut inputs: Vec<INPUT> = Vec::new();
+
+    if let Some(rid) = ref_id {
+        let entry = lookup_ref(state, rid)?;
+        let element = resolve_element(&state.automation, hwnd, &entry)?;
+        let (cx, cy) = element_center_physical(&element)?;
+        let (ax, ay) = screen_to_absolute(cx, cy);
+        inputs.push(make_mouse_move_absolute(ax, ay));
+    }
+
+    let vertical = scroll_delta_from_pixels(dy);
+    if vertical != 0 {
+        // Negate: positive dy (scroll content down) → wheel toward user → negative delta.
+        inputs.push(make_mouse_wheel(WheelAxis::Vertical, -vertical));
+    }
+    let horizontal = scroll_delta_from_pixels(dx);
+    if horizontal != 0 {
+        // HWHEEL: positive delta = scroll right (content moves left).
+        inputs.push(make_mouse_wheel(WheelAxis::Horizontal, horizontal));
+    }
+
+    if inputs.is_empty() {
+        return Ok(ActionResult::ok());
+    }
+
+    ensure_foreground(state, "scroll")?;
+    send_inputs(&inputs, "scroll")
+}
+
+/// Drag from one element to another. Sends a left-button press at the
+/// source's center, an absolute move to the destination's center, and a
+/// release. Some drag-and-drop UIs require intermediate movement to
+/// recognize the gesture; if a real app turns out to need that, we'll
+/// interpolate here. For v0.2 the two-point drag is enough for the common
+/// pattern (drag a tab, drag a list item).
+fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResult> {
+    let hwnd = require_hwnd(state, "drag")?;
+    let from_entry = lookup_ref(state, from)?;
+    let to_entry = lookup_ref(state, to)?;
+
+    let from_element = resolve_element(&state.automation, hwnd, &from_entry)?;
+    let to_element = resolve_element(&state.automation, hwnd, &to_entry)?;
+
+    let (fx, fy) = element_center_physical(&from_element)?;
+    let (tx, ty) = element_center_physical(&to_element)?;
+    let (fax, fay) = screen_to_absolute(fx, fy);
+    let (tax, tay) = screen_to_absolute(tx, ty);
+
+    ensure_foreground(state, "drag")?;
+    send_inputs(
+        &[
+            make_mouse_move_absolute(fax, fay),
+            make_mouse_button(MouseButton::Left, true),
+            make_mouse_move_absolute(tax, tay),
+            make_mouse_button(MouseButton::Left, false),
+        ],
+        "drag",
+    )
+}
+
+#[derive(Clone, Copy)]
+enum WheelAxis {
+    Vertical,
+    Horizontal,
+}
+
+fn make_mouse_wheel(axis: WheelAxis, delta: i32) -> INPUT {
+    let flag = match axis {
+        WheelAxis::Vertical => MOUSEEVENTF_WHEEL,
+        WheelAxis::Horizontal => MOUSEEVENTF_HWHEEL,
+    };
+    // `mouseData` is documented as "signed" but typed `u32` in the Win32
+    // headers; cast preserves the bit pattern so the receiver reads the
+    // correct signed delta.
+    #[allow(clippy::cast_sign_loss)]
+    let mouse_data = delta as u32;
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: mouse_data,
+                dwFlags: flag,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Map a pixel-space scroll amount to an integer `WHEEL_DELTA`. We treat
+/// 1 pixel ≈ 1 wheel-delta unit, which gives ~120 pixels per traditional
+/// notch — a reasonable agent-facing default. Sub-pixel inputs round to
+/// the nearest integer; values whose absolute magnitude is below 0.5 round
+/// to zero and short-circuit the wheel event.
+fn scroll_delta_from_pixels(px: f64) -> i32 {
+    let rounded = px.round();
+    if rounded.abs() < 0.5 {
+        return 0;
+    }
+    // Clamp to i32 range. Inputs above ~2.1B pixels are pathological; we
+    // saturate rather than UB on the cast.
+    #[allow(clippy::cast_possible_truncation)]
+    let v = rounded.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    v
 }
 
 #[derive(Clone, Copy)]
@@ -2121,6 +2249,22 @@ mod tests {
         // roughly the midpoint of the absolute range.
         let (nmid, _) = screen_to_absolute_for(0, 0, -1920, 0, virtual_w, 1080);
         assert!((32700..=32800).contains(&nmid), "seam mapped to {nmid}");
+    }
+
+    #[test]
+    fn scroll_delta_rounds_and_clamps() {
+        use super::scroll_delta_from_pixels;
+        // Ordinary cases round to the nearest integer.
+        assert_eq!(scroll_delta_from_pixels(0.0), 0);
+        assert_eq!(scroll_delta_from_pixels(120.0), 120);
+        assert_eq!(scroll_delta_from_pixels(-120.0), -120);
+        assert_eq!(scroll_delta_from_pixels(119.6), 120);
+        // Sub-pixel values short-circuit so we don't emit no-op wheel events.
+        assert_eq!(scroll_delta_from_pixels(0.4), 0);
+        assert_eq!(scroll_delta_from_pixels(-0.4), 0);
+        // Pathological inputs saturate rather than UB on the cast.
+        assert_eq!(scroll_delta_from_pixels(1e15), i32::MAX);
+        assert_eq!(scroll_delta_from_pixels(-1e15), i32::MIN);
     }
 
     #[test]
