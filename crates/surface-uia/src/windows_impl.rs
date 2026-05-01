@@ -40,24 +40,25 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded,
     ExpandCollapseState_LeafNode, ExpandCollapseState_PartiallyExpanded, IUIAutomation,
     IUIAutomationCondition, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
-    IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
-    IUIAutomationTreeWalker, IUIAutomationValuePattern, ToggleState_Indeterminate, ToggleState_Off,
-    ToggleState_On, TreeScope, TreeScope_Subtree, UIA_AutomationIdPropertyId,
-    UIA_ButtonControlTypeId, UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId,
-    UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
-    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId, UIA_HeaderControlTypeId,
-    UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
-    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
-    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
-    UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
-    UIA_ScrollBarControlTypeId, UIA_SelectionItemPatternId, UIA_SemanticZoomControlTypeId,
-    UIA_SeparatorControlTypeId, UIA_SliderControlTypeId, UIA_SpinnerControlTypeId,
-    UIA_SplitButtonControlTypeId, UIA_StatusBarControlTypeId, UIA_TabControlTypeId,
-    UIA_TabItemControlTypeId, UIA_TableControlTypeId, UIA_TextControlTypeId,
-    UIA_ThumbControlTypeId, UIA_TitleBarControlTypeId, UIA_TogglePatternId,
-    UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId, UIA_TreeControlTypeId,
-    UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId, UIA_CONTROLTYPE_ID,
+    IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationSelectionPattern,
+    IUIAutomationTogglePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern,
+    IUIAutomationWindowPattern, ToggleState_Indeterminate, ToggleState_Off, ToggleState_On,
+    TreeScope, TreeScope_Subtree, UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId,
+    UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
+    UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ExpandCollapsePatternId,
+    UIA_GroupControlTypeId, UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId,
+    UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId,
+    UIA_ListItemControlTypeId, UIA_MenuBarControlTypeId, UIA_MenuControlTypeId,
+    UIA_MenuItemControlTypeId, UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId,
+    UIA_RadioButtonControlTypeId, UIA_ScrollBarControlTypeId, UIA_SelectionItemPatternId,
+    UIA_SelectionPatternId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
+    UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
+    UIA_StatusBarControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+    UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_ThumbControlTypeId,
+    UIA_TitleBarControlTypeId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
+    UIA_ToolTipControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+    UIA_WindowControlTypeId, UIA_WindowPatternId, UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -283,7 +284,7 @@ fn capture_with_options(
     // so it can rediscover any element the agent references.
     let mut nth_seen: HashMap<(Role, String), usize> = HashMap::new();
 
-    let (mut root, root_editable) = build_node(&root_element, dpi_scale);
+    let (mut root, root_editable) = build_node(&root_element, None, dpi_scale);
     if root.role.is_interactive() || root_editable {
         let key = (root.role.clone(), root.name.clone());
         let counter = nth_seen.entry(key).or_insert(0);
@@ -363,7 +364,7 @@ fn walk_children(
     // (which we treat as "no more children") when there are no more siblings.
     let mut maybe_child = unsafe { walker.GetFirstChildElement(parent) }.ok();
     while let Some(child) = maybe_child {
-        let (mut node, has_editable_value) = build_node(&child, dpi_scale);
+        let (mut node, has_editable_value) = build_node(&child, Some(parent), dpi_scale);
 
         // Allocate ref BEFORE recursing so `nth` follows pre-order DFS.
         // `find_in_tree` mirrors this exact ordering at action time.
@@ -441,7 +442,11 @@ fn read_value_pattern(element: &IUIAutomationElement) -> Option<(String, bool)> 
 /// non-read-only `ValuePattern`; the caller uses it to decide whether to
 /// allocate a `RefId` even when the role isn't ARIA-interactive (the typical
 /// case for Win11 Notepad's `Document`-typed edit area).
-fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
+fn build_node(
+    element: &IUIAutomationElement,
+    parent: Option<&IUIAutomationElement>,
+    dpi_scale: f64,
+) -> (Node, bool) {
     // SAFETY: each Current* getter dereferences only the COM `this` pointer
     // (the receiver), which is valid for the lifetime of `element`.
     let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
@@ -449,7 +454,7 @@ fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
         .ok()
         .map(|b| b.to_string())
         .unwrap_or_default();
-    let role = role_from_control_type(control_type, &class_name);
+    let role = promoted_role(element, control_type, &class_name, parent);
 
     let name = unsafe { element.CurrentName() }
         .ok()
@@ -822,6 +827,68 @@ fn role_from_control_type(ct: UIA_CONTROLTYPE_ID, class_name: &str) -> Role {
     } else {
         Role::Unknown(format!("uia_ct_{}", ct.0))
     }
+}
+
+/// Apply the pattern-based role promotions from `docs/uia-mapping.md` §1 on
+/// top of the raw `ControlType → Role` mapping.
+///
+/// The promotions:
+/// - `MenuItem` + `TogglePattern` → `MenuItemCheckbox`. UIA doesn't expose a
+///   reliable "is radio" hint, so we don't distinguish radio menu items —
+///   anything checkable becomes `MenuItemCheckbox`.
+/// - `Window` + `WindowPattern.IsModal=true` → `Dialog`. Top-level frames
+///   stay as `Window`; modal popups become `Dialog`.
+/// - `ListItem` whose `parent` exposes `SelectionPattern` → `Option`. List
+///   items inside a selection container act like `<option>`s in a select.
+///
+/// Both the snapshot path (`build_node`) and the action-time qualifies-as-
+/// ref check use this so the `(role, name, nth)` lookup tuple stays
+/// consistent across snapshot and resolution.
+fn promoted_role(
+    element: &IUIAutomationElement,
+    ct: UIA_CONTROLTYPE_ID,
+    class_name: &str,
+    parent: Option<&IUIAutomationElement>,
+) -> Role {
+    let base = role_from_control_type(ct, class_name);
+    match base {
+        Role::MenuItem if has_toggle_pattern(element) => Role::MenuItemCheckbox,
+        Role::Window if is_modal_window(element) => Role::Dialog,
+        Role::ListItem if parent.is_some_and(parent_has_selection_pattern) => Role::Option,
+        other => other,
+    }
+}
+
+/// Returns `true` when the element exposes `TogglePattern`. Cheap to check —
+/// one COM call. Used both for role promotion (MenuItem→MenuItemCheckbox)
+/// and could feed into `state.checked` extraction, though the existing
+/// `read_toggle_state` does its own pattern probe.
+fn has_toggle_pattern(element: &IUIAutomationElement) -> bool {
+    // SAFETY: `element` is a valid COM interface; UIA pattern IDs are well-known.
+    unsafe { element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }
+        .is_ok()
+}
+
+/// Returns `true` when the element is a modal window per `WindowPattern`.
+/// Non-window elements and windows that don't support the pattern return
+/// `false` — those stay as `Role::Window`.
+fn is_modal_window(element: &IUIAutomationElement) -> bool {
+    // SAFETY: `element` is a valid COM interface.
+    let Ok(pattern) =
+        (unsafe { element.GetCurrentPatternAs::<IUIAutomationWindowPattern>(UIA_WindowPatternId) })
+    else {
+        return false;
+    };
+    // SAFETY: `pattern` is a valid `IUIAutomationWindowPattern`.
+    unsafe { pattern.CurrentIsModal() }.is_ok_and(BOOL::as_bool)
+}
+
+/// Returns `true` when the parent element exposes `SelectionPattern` —
+/// i.e. a selection container like a list box or tab list.
+fn parent_has_selection_pattern(parent: &IUIAutomationElement) -> bool {
+    // SAFETY: `parent` is a valid COM interface.
+    unsafe { parent.GetCurrentPatternAs::<IUIAutomationSelectionPattern>(UIA_SelectionPatternId) }
+        .is_ok()
 }
 
 /// Promotion table for legacy Win32 class names. Per `docs/uia-mapping.md` §1.1.
@@ -1489,7 +1556,12 @@ fn find_by_automation_id(
         .ok()
         .map(|b| b.to_string())
         .unwrap_or_default();
-    if &role_from_control_type(ct, &class) == expected_role {
+    // We don't have the parent on this fast path (FindFirst returned the
+    // element directly, not a path). Per-element promotions still apply;
+    // the parent-aware ListItem→Option promotion does not, so a ref whose
+    // recorded role is `Option` will deliberately miss the fast path here
+    // and fall through to `find_in_tree`, which threads parent context.
+    if &promoted_role(&element, ct, &class, None) == expected_role {
         Some(element)
     } else {
         None
@@ -1513,7 +1585,9 @@ fn find_in_tree(
     let mut counter: usize = 0;
 
     // Check the root itself first to mirror the snapshot's root handling.
-    if element_qualifies_as_ref(root, &target.role, &target.name) {
+    // The root has no parent; promotion rules that depend on parent context
+    // (ListItem→Option) trivially don't apply.
+    if element_qualifies_as_ref(root, None, &target.role, &target.name) {
         if counter == target.nth {
             return Some(root.clone());
         }
@@ -1532,8 +1606,9 @@ fn descend(
     // returns Err for "no more children".
     let mut maybe_child = unsafe { walker.GetFirstChildElement(parent) }.ok();
     while let Some(child) = maybe_child {
-        // Pre-order: check this element first.
-        if element_qualifies_as_ref(&child, &target.role, &target.name) {
+        // Pre-order: check this element first. Pass `parent` so the qualifies
+        // check applies the same parent-aware promotions the snapshot used.
+        if element_qualifies_as_ref(&child, Some(parent), &target.role, &target.name) {
             if *counter == target.nth {
                 return Some(child);
             }
@@ -1551,15 +1626,23 @@ fn descend(
 
 /// Mirrors snapshot's ref-emission predicate: returns `true` iff the element
 /// matches `(role, name)` AND would have been allocated a `RefId` during
-/// snapshot (interactive role, or editable `ValuePattern`).
-fn element_qualifies_as_ref(element: &IUIAutomationElement, role: &Role, name: &str) -> bool {
+/// snapshot (interactive role, or editable `ValuePattern`). Uses the same
+/// `promoted_role` the snapshot did, so refs that captured a promoted role
+/// (e.g. `MenuItemCheckbox` from a `MenuItem` with `TogglePattern`) still
+/// resolve correctly.
+fn element_qualifies_as_ref(
+    element: &IUIAutomationElement,
+    parent: Option<&IUIAutomationElement>,
+    role: &Role,
+    name: &str,
+) -> bool {
     // SAFETY: `element` is valid; failed reads fall back to defaults.
     let ct = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let class = unsafe { element.CurrentClassName() }
         .ok()
         .map(|b| b.to_string())
         .unwrap_or_default();
-    let r = role_from_control_type(ct, &class);
+    let r = promoted_role(element, ct, &class, parent);
     if &r != role {
         return false;
     }
