@@ -235,7 +235,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     await client!.closeSession(session);
   }, 120_000);
 
-  it("clears typed text with Ctrl+A then Delete", async () => {
+  it("clears typed text with SelectAll then Delete", async () => {
     const session = await client!.openSession("uia");
     const snap = await snapshotReady(session);
 
@@ -260,9 +260,10 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     });
 
     bringToForeground("Notepad");
-    await client!.act(session, { kind: "focus", ref_id: editRef! });
 
-    const selectRes = await client!.act(session, { kind: "press", keys: "Ctrl+A" });
+    // SelectAll(ref_id) focuses the field then sends Ctrl+A — single round
+    // trip rather than two. This also exercises the SelectAll action plumbing.
+    const selectRes = await client!.act(session, { kind: "select_all", ref_id: editRef! });
     expect(selectRes.ok).toBe(true);
     const deleteRes = await client!.act(session, { kind: "press", keys: "Delete" });
     expect(deleteRes.ok).toBe(true);

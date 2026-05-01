@@ -40,18 +40,19 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded,
     ExpandCollapseState_LeafNode, ExpandCollapseState_PartiallyExpanded, IUIAutomation,
     IUIAutomationCondition, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
-    IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationSelectionPattern,
-    IUIAutomationTogglePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern,
-    IUIAutomationWindowPattern, ToggleState_Indeterminate, ToggleState_Off, ToggleState_On,
-    TreeScope, TreeScope_Subtree, UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId,
-    UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
-    UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ExpandCollapsePatternId,
-    UIA_GroupControlTypeId, UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId,
-    UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId,
-    UIA_ListItemControlTypeId, UIA_MenuBarControlTypeId, UIA_MenuControlTypeId,
-    UIA_MenuItemControlTypeId, UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId,
-    UIA_RadioButtonControlTypeId, UIA_ScrollBarControlTypeId, UIA_SelectionItemPatternId,
+    IUIAutomationInvokePattern, IUIAutomationScrollItemPattern, IUIAutomationSelectionItemPattern,
+    IUIAutomationSelectionPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+    IUIAutomationValuePattern, IUIAutomationWindowPattern, ToggleState_Indeterminate,
+    ToggleState_Off, ToggleState_On, TreeScope, TreeScope_Subtree, UIA_AutomationIdPropertyId,
+    UIA_ButtonControlTypeId, UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId,
+    UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
+    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId, UIA_HeaderControlTypeId,
+    UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
+    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+    UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
+    UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_SelectionItemPatternId,
     UIA_SelectionPatternId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
     UIA_StatusBarControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
@@ -978,6 +979,9 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::Press { keys } => act_press(state, keys),
         Action::KeyDown { key } => act_key_down(state, key),
         Action::KeyUp { key } => act_key_up(state, key),
+        Action::Select { ref_id, value } => act_select(state, ref_id, value),
+        Action::ScrollIntoView { ref_id } => act_scroll_into_view(state, ref_id),
+        Action::SelectAll { ref_id } => act_select_all(state, ref_id.as_ref()),
         other => Err(Error::Unsupported {
             surface: SurfaceKind::Uia.as_str().into(),
             action: action_name(other).into(),
@@ -1058,6 +1062,174 @@ fn lookup_ref(state: &WorkerState, ref_id: &RefId) -> Result<RefEntry> {
         .get(ref_id)
         .cloned()
         .ok_or_else(|| Error::RefNotFound(ref_id.0.clone()))
+}
+
+// ---------- Pattern-based actions ----------
+
+/// Choose an option in a select / combo box / list box.
+///
+/// Resolution rules, in order:
+///
+/// 1. If the resolved element itself supports `SelectionItemPattern` and its
+///    `Name` matches `value` (or `value` is empty), call `Select` on it.
+/// 2. Otherwise treat the resolved element as a container and walk its
+///    Control-view subtree for the first descendant whose `Name == value`
+///    AND that supports `SelectionItemPattern`.
+///
+/// This covers both the "agent already has a ref to the option" case
+/// (Tab, ListItem, etc.) and the "agent has the container, names the
+/// option" case (ComboBox + dropdown options).
+fn act_select(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, "select")?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+
+    if let Some(pattern) = selection_item_pattern_if_named(&element, value) {
+        // SAFETY: `pattern` is a valid IUIAutomationSelectionItemPattern.
+        unsafe { pattern.Select() }.map_err(|e| Error::Action {
+            action: "select".into(),
+            reason: format!("SelectionItemPattern.Select: {e}"),
+        })?;
+        return Ok(ActionResult::ok());
+    }
+
+    // Treat as container — walk for a named SelectionItem descendant.
+    // SAFETY: `automation` is valid; ControlViewWalker returns Err if the
+    // automation singleton can't allocate a walker (essentially OOM).
+    let walker = unsafe { state.automation.ControlViewWalker() }.map_err(|e| Error::Action {
+        action: "select".into(),
+        reason: format!("ControlViewWalker: {e}"),
+    })?;
+    let option =
+        find_named_selection_item(&walker, &element, value).ok_or_else(|| Error::Action {
+            action: "select".into(),
+            reason: format!(
+                "no descendant named {value:?} supporting SelectionItemPattern under ref {}",
+                ref_id.0
+            ),
+        })?;
+    let pattern: IUIAutomationSelectionItemPattern =
+        // SAFETY: `option` is valid; pattern probe returns Err if unsupported.
+        unsafe { option.GetCurrentPatternAs(UIA_SelectionItemPatternId) }.map_err(|e| {
+            Error::Action {
+                action: "select".into(),
+                reason: format!("SelectionItemPattern unavailable on matched option: {e}"),
+            }
+        })?;
+    // SAFETY: `pattern` is valid.
+    unsafe { pattern.Select() }.map_err(|e| Error::Action {
+        action: "select".into(),
+        reason: format!("SelectionItemPattern.Select: {e}"),
+    })?;
+    Ok(ActionResult::ok())
+}
+
+/// Scroll the element into view via `ScrollItemPattern.ScrollIntoView()`.
+/// Doesn't move focus or change selection — just makes the element visible
+/// in its scroll container.
+fn act_scroll_into_view(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, "scroll_into_view")?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+
+    // SAFETY: `element` is valid; pattern probe returns Err if unsupported.
+    let pattern: IUIAutomationScrollItemPattern = unsafe {
+        element.GetCurrentPatternAs(UIA_ScrollItemPatternId)
+    }
+    .map_err(|e| Error::Action {
+        action: "scroll_into_view".into(),
+        reason: format!("element does not support ScrollItemPattern: {e}"),
+    })?;
+    // SAFETY: `pattern` is valid.
+    unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Action {
+        action: "scroll_into_view".into(),
+        reason: format!("ScrollIntoView: {e}"),
+    })?;
+    Ok(ActionResult::ok())
+}
+
+/// Select all content in the focused field, or in the referenced field.
+/// When `ref_id` is `Some`, focus the element first via UIA `SetFocus`.
+/// Then send `Ctrl+A` via the existing `act_press` plumbing.
+fn act_select_all(state: &WorkerState, ref_id: Option<&RefId>) -> Result<ActionResult> {
+    if let Some(rid) = ref_id {
+        // Reuse Focus's resolution + SetFocus path.
+        act_focus(state, rid)?;
+    }
+    act_press(state, "Ctrl+A")
+}
+
+/// Look up the snapshot's pinned HWND, mapping the missing-snapshot case to a
+/// uniform action error. Most action helpers need this; pulling it out
+/// removes the boilerplate duplication.
+fn require_hwnd(state: &WorkerState, action: &str) -> Result<HWND> {
+    state.last_hwnd.ok_or_else(|| Error::Action {
+        action: action.into(),
+        reason: "no prior snapshot — call snapshot before act".into(),
+    })
+}
+
+/// Return the element's `SelectionItemPattern` when it both supports the
+/// pattern AND its Name matches `expected_name` (or `expected_name` is
+/// empty, meaning "any selectable option"). Used by `act_select` to decide
+/// whether the resolved ref is itself the option to select.
+fn selection_item_pattern_if_named(
+    element: &IUIAutomationElement,
+    expected_name: &str,
+) -> Option<IUIAutomationSelectionItemPattern> {
+    // SAFETY: `element` is valid.
+    let pattern: IUIAutomationSelectionItemPattern =
+        unsafe { element.GetCurrentPatternAs(UIA_SelectionItemPatternId) }.ok()?;
+    if expected_name.is_empty() {
+        return Some(pattern);
+    }
+    // SAFETY: `element` is valid; failed Name read falls back to empty.
+    let name = unsafe { element.CurrentName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    if name == expected_name {
+        Some(pattern)
+    } else {
+        None
+    }
+}
+
+/// Pre-order DFS for the first descendant whose `Name == value` AND that
+/// supports `SelectionItemPattern`. Mirrors how snapshot walks the tree, so
+/// the search order is predictable from the snapshot output.
+fn find_named_selection_item(
+    walker: &IUIAutomationTreeWalker,
+    parent: &IUIAutomationElement,
+    value: &str,
+) -> Option<IUIAutomationElement> {
+    // SAFETY: `parent` is valid; walker.Get*ChildElement returns Err for
+    // "no more children" which we treat as the end of iteration.
+    let mut maybe_child = unsafe { walker.GetFirstChildElement(parent) }.ok();
+    while let Some(child) = maybe_child {
+        // SAFETY: `child` is valid.
+        let name = unsafe { child.CurrentName() }
+            .ok()
+            .map(|b| b.to_string())
+            .unwrap_or_default();
+        if name == value
+            && unsafe {
+                child
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                    .is_ok()
+            }
+        {
+            return Some(child);
+        }
+        if let Some(found) = find_named_selection_item(walker, &child, value) {
+            return Some(found);
+        }
+        // SAFETY: `child` is valid.
+        maybe_child = unsafe { walker.GetNextSiblingElement(&child) }.ok();
+    }
+    None
 }
 
 // ---------- Keyboard input via SendInput ----------
