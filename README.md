@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="agent-ctrl" height="160">
+  <img src="docs/logo.png" alt="agent-ctrl" height="120">
 </p>
 
 <p align="center">
