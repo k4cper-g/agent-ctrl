@@ -16,7 +16,7 @@ pub mod session_file;
 pub mod state;
 
 pub use dispatcher::{dispatch, Request, RequestOp, Response, ResponseBody};
-pub use factory::open_surface;
+pub use factory::{open_surface, surface_status, SurfaceStatus};
 pub use session_file::{
     discovery_dir, list_alive, path_for, read_alive, remove, wait_for_alive, write, SessionFile,
     DEFAULT_SESSION,

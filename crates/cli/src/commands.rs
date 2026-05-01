@@ -46,6 +46,19 @@ pub(crate) enum Command {
     /// pruned as a side effect.
     List,
 
+    /// Print static facts about this binary: OS, build version, which
+    /// surfaces are usable, recommended surface, home directory, and
+    /// active session count. Cheap and side-effect-free; designed to be
+    /// the first command an agent runs in a fresh session.
+    Info(InfoArgs),
+
+    /// Diagnose the install: environment, surface compile status, daemon
+    /// state, and a live mock-daemon round-trip probe. Reports each
+    /// check as pass/warn/fail/info with optional fix hints. `--fix`
+    /// applies the safe automatic repairs (e.g. removing stale session
+    /// files).
+    Doctor(DoctorArgs),
+
     /// Capture the current snapshot of the named session's surface and
     /// print it as a tree of refs (or as raw JSON with `--json`). Window
     /// targeting flags pin which window subsequent actions will operate on.
@@ -114,6 +127,26 @@ pub(crate) enum Command {
 }
 
 // ---------- Arg structs ----------
+
+#[derive(Debug, Args)]
+pub(crate) struct InfoArgs {
+    /// Emit a parseable JSON payload instead of the human-readable form.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DoctorArgs {
+    /// Emit JSON with the same shape as the human form.
+    #[arg(long)]
+    json: bool,
+    /// Apply safe automatic repairs (currently: prune stale session files).
+    #[arg(long)]
+    fix: bool,
+    /// Skip the live mock-daemon probe. Faster but less coverage.
+    #[arg(long)]
+    quick: bool,
+}
 
 #[derive(Debug, Args)]
 pub(crate) struct DaemonArgs {
@@ -322,6 +355,12 @@ impl Command {
                 run_list();
                 Ok(())
             }
+            Self::Info(a) => crate::info::run_info(a.json),
+            Self::Doctor(a) => crate::doctor::run_doctor(crate::doctor::DoctorOptions {
+                json: a.json,
+                fix: a.fix,
+                quick: a.quick,
+            }),
             Self::Snapshot(args) => run_snapshot(args),
             Self::Click(a) => run_simple_ref_action(&a, |r| Action::Click { ref_id: r }),
             Self::DoubleClick(a) => {

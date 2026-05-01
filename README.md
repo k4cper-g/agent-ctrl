@@ -12,6 +12,7 @@ Computer-use CLI for AI agents. Same shape as [agent-browser](https://github.com
 cargo build --release -p agent-ctrl-cli
 # put target/release/agent-ctrl on your PATH
 
+agent-ctrl info                                       # what OS am I on, which surfaces are usable
 agent-ctrl open uia                                   # spawn a daemon (background)
 agent-ctrl snapshot --target-process Notepad          # show Notepad's a11y tree with @eN refs
 agent-ctrl fill @e0 "hello from agent-ctrl"           # set the document text
@@ -20,6 +21,19 @@ agent-ctrl click @e4                                  # click the File menu
 agent-ctrl screenshot result.png                      # save a PNG of the window
 agent-ctrl close                                      # stop the daemon
 ```
+
+### Discovering what works on this machine
+
+Two commands help an agent figure out the environment without running anything destructive:
+
+```bash
+agent-ctrl info                  # static facts (OS, recommended surface, active sessions)
+agent-ctrl info --json           # parseable for an agent's planner
+agent-ctrl doctor                # environment + daemon + live mock-daemon probe
+agent-ctrl doctor --json --fix   # JSON-out, prune any stale session files
+```
+
+`info` is cheap and side-effect-free — designed to be the first command an agent runs in a fresh session. `doctor` adds a real round-trip probe (spawns a mock daemon, takes a snapshot, shuts it down) to verify the local install works end-to-end. `--quick` skips the probe; `--fix` runs the safe automatic repairs.
 
 The daemon lives at `~/.agent-ctrl/<session>.json` while running. `agent-ctrl list` shows active sessions; `agent-ctrl --session <name> ...` targets a specific one. Default session name is `default`, so most commands need no flag.
 
@@ -44,6 +58,8 @@ Use `agent-ctrl --help` for the full list. Highlights:
 | `switch-app <app_id>` / `focus-window <hex_id>` | foreground a window |
 | `screenshot [PATH] [--region X,Y,W,H]` | PNG of the pinned window or a region |
 | `wait MS` | sleep on the daemon worker |
+| `info [--json]` | OS / recommended surface / active sessions (no probes) |
+| `doctor [--json] [--fix] [--quick]` | environment + daemon + live mock probe |
 
 ## Workspace layout
 

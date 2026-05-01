@@ -10,14 +10,14 @@ Stack: **Rust workspace** (engine + daemon + per-platform surfaces) + **npm work
 
 ## Current state
 
-✅ Windows UIA surface is **feature-complete**. Every `Action` in `agent_ctrl_core::action::Action` has a real implementation. The agent-facing CLI is **live** and verified against live Notepad — `open uia` → `snapshot` → `fill @e0 "..."` → `screenshot` → `close` works end-to-end as separate shell invocations.
+✅ Windows UIA surface is **feature-complete**. Every `Action` in `agent_ctrl_core::action::Action` has a real implementation. The agent-facing CLI is **live** and verified against live Notepad. `info` and `doctor` give an agent a side-effect-free way to figure out what surfaces are usable on the host.
 
 Verified in the last session:
 
-- `cargo test --workspace` — 20 tests pass
+- `cargo test --workspace` — 26 tests pass (now includes info + doctor unit tests)
 - `npm run test --workspace=@agent-ctrl/client` — 3 mock tests pass
-- `RUN_UIA_TESTS=1 npm run test ...` — 9 live UIA tests pass against Notepad in ~10s (stdio transport, used by the TS client)
-- **Live CLI smoke** — full agent flow against Notepad: `open` spawns detached daemon, `snapshot --target-process Notepad` prints a 23-ref tree with `@eN` refs, `fill @e0 "..."` updates the document, `screenshot` writes a 52KB PNG, `close` cleanly removes the state file
+- `RUN_UIA_TESTS=1 npm run test ...` — 9 live UIA tests pass against Notepad in ~10s (stdio transport)
+- **Live CLI smoke** — full agent flow against Notepad: `open` → `snapshot --target-process Notepad` prints a 23-ref tree, `fill @e0 "..."` updates the document, `screenshot` writes a 52KB PNG, `close` cleanly removes the state file. `doctor` spawns a mock daemon, round-trips a snapshot, shuts it down — all in one go.
 - `cargo clippy --workspace --all-targets -- -D warnings` ✓
 - `cargo fmt --all -- --check` ✓
 - `tsc --noEmit` ✓
@@ -86,8 +86,10 @@ These are invariants that will silently break things if you violate them. Read b
 `agent-ctrl --help` lists everything. The interesting ones:
 
 ```bash
-agent-ctrl open <surface> [--session NAME]    # spawn detached daemon
-agent-ctrl close [--session NAME]             # stop daemon
+agent-ctrl info [--json]                       # OS / surfaces / active sessions (cheap)
+agent-ctrl doctor [--json] [--fix] [--quick]   # diagnostic incl. mock probe
+agent-ctrl open <surface> [--session NAME]     # spawn detached daemon
+agent-ctrl close [--session NAME]              # stop daemon
 agent-ctrl list                                # active sessions
 
 agent-ctrl snapshot [--target-process X|--target-pid N|--target-title T] [--json]
@@ -101,6 +103,8 @@ agent-ctrl switch-app <app_id> | focus-window <hex_id>
 agent-ctrl screenshot [PATH] [--region X,Y,W,H]
 agent-ctrl wait MS
 ```
+
+`info` and `doctor` are the agent's "what can I do here?" probes. `info` is static (OS, build, surface compile status, recommended surface, active sessions). `doctor` adds a live mock-daemon round-trip probe and per-check `pass/warn/fail/info` status with optional fix hints — same shape as agent-browser's `doctor`. Add new check categories alongside new surfaces (CDP wants a Chrome check; AX wants `AXIsProcessTrusted`).
 
 Default session name is `default` so most commands don't need `--session`. Snapshot output is a tree with `@eN` refs, role, name, value (truncated to 60 chars), and state annotations like `[focused]` / `[checked=true]` / `[selected]`. `--json` dumps the raw structure.
 

@@ -7,6 +7,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 mod commands;
+mod doctor;
+mod info;
 
 /// Cross-platform computer-use framework for AI agents.
 #[derive(Debug, Parser)]
