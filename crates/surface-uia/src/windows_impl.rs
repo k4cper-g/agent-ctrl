@@ -37,23 +37,27 @@ use windows::Win32::System::Threading::{
     PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    IUIAutomationInvokePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern, TreeScope,
-    TreeScope_Subtree, UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId,
-    UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
-    UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
-    UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId,
-    UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    CUIAutomation, ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded,
+    ExpandCollapseState_LeafNode, ExpandCollapseState_PartiallyExpanded, IUIAutomation,
+    IUIAutomationCondition, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
+    IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
+    IUIAutomationTreeWalker, IUIAutomationValuePattern, ToggleState_Indeterminate, ToggleState_Off,
+    ToggleState_On, TreeScope, TreeScope_Subtree, UIA_AutomationIdPropertyId,
+    UIA_ButtonControlTypeId, UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId,
+    UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
+    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId, UIA_HeaderControlTypeId,
+    UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
+    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
     UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
     UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
-    UIA_ScrollBarControlTypeId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
-    UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
-    UIA_StatusBarControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
-    UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_ThumbControlTypeId,
-    UIA_TitleBarControlTypeId, UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId,
-    UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId,
-    UIA_CONTROLTYPE_ID,
+    UIA_ScrollBarControlTypeId, UIA_SelectionItemPatternId, UIA_SemanticZoomControlTypeId,
+    UIA_SeparatorControlTypeId, UIA_SliderControlTypeId, UIA_SpinnerControlTypeId,
+    UIA_SplitButtonControlTypeId, UIA_StatusBarControlTypeId, UIA_TabControlTypeId,
+    UIA_TabItemControlTypeId, UIA_TableControlTypeId, UIA_TextControlTypeId,
+    UIA_ThumbControlTypeId, UIA_TitleBarControlTypeId, UIA_TogglePatternId,
+    UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId, UIA_TreeControlTypeId,
+    UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId, UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -69,8 +73,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use agent_ctrl_core::{
-    Action, ActionResult, AppContext, Bounds, Error, NativeHandle, Node, RefEntry, RefId, RefMap,
-    Result, Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext, WindowTarget,
+    Action, ActionResult, AppContext, Bounds, Checked, Error, NativeHandle, Node, RefEntry, RefId,
+    RefMap, Result, Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext,
+    WindowTarget,
 };
 
 // ---------- Worker thread ----------
@@ -473,6 +478,27 @@ fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
         (None, false)
     };
 
+    let checked = if role_might_be_toggleable(&role) {
+        read_toggle_state(element)
+    } else {
+        None
+    };
+    let expanded = if role_might_expand(&role) {
+        read_expand_state(element)
+    } else {
+        None
+    };
+    let selected = if role_might_be_selectable(&role) {
+        read_selection_state(element)
+    } else {
+        None
+    };
+    let required = if role_might_be_required(&role) {
+        read_required_for_form(element)
+    } else {
+        None
+    };
+
     let native = build_native_handle(element);
 
     let node = Node {
@@ -485,7 +511,10 @@ fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
             visible: !is_offscreen,
             enabled: is_enabled,
             focused: has_focus,
-            ..State::default()
+            selected,
+            checked,
+            expanded,
+            required,
         },
         bounds,
         level: None,
@@ -494,6 +523,121 @@ fn build_node(element: &IUIAutomationElement, dpi_scale: f64) -> (Node, bool) {
         native,
     };
     (node, has_editable_value)
+}
+
+/// Roles plausibly hosting `TogglePattern`. Cheap pre-filter so we don't
+/// add a COM round-trip per element on trees of thousands.
+fn role_might_be_toggleable(role: &Role) -> bool {
+    matches!(
+        role,
+        Role::Checkbox
+            | Role::Switch
+            | Role::MenuItem
+            | Role::MenuItemCheckbox
+            | Role::Button
+            | Role::Unknown(_)
+    )
+}
+
+/// Roles plausibly hosting `ExpandCollapsePattern`. Includes ComboBox (the
+/// drop-down expands), TreeItem (subtree disclosure), MenuItem (sub-menus),
+/// and Group (collapsibles).
+fn role_might_expand(role: &Role) -> bool {
+    matches!(
+        role,
+        Role::ComboBox
+            | Role::TreeItem
+            | Role::MenuItem
+            | Role::Group
+            | Role::ListItem
+            | Role::Unknown(_)
+    )
+}
+
+/// Roles plausibly hosting `SelectionItemPattern`. Tabs, list options, and
+/// tree items all expose `IsSelected`.
+fn role_might_be_selectable(role: &Role) -> bool {
+    matches!(
+        role,
+        Role::Tab
+            | Role::ListItem
+            | Role::TreeItem
+            | Role::Radio
+            | Role::Option
+            | Role::MenuItemRadio
+            | Role::Cell
+            | Role::Row
+            | Role::Unknown(_)
+    )
+}
+
+/// Roles plausibly carrying `IsRequiredForForm`. Limited to form input
+/// controls — most other elements never set it.
+fn role_might_be_required(role: &Role) -> bool {
+    matches!(
+        role,
+        Role::TextField | Role::ComboBox | Role::SearchBox | Role::SpinButton | Role::Unknown(_)
+    )
+}
+
+/// Read `TogglePattern.ToggleState` if supported. Maps UIA's tristate
+/// (`Off` / `On` / `Indeterminate`) to our [`Checked`] enum.
+fn read_toggle_state(element: &IUIAutomationElement) -> Option<Checked> {
+    // SAFETY: `element` is a valid COM interface; UIA pattern IDs are well-known.
+    let pattern: IUIAutomationTogglePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_TogglePatternId) }.ok()?;
+    let state = unsafe { pattern.CurrentToggleState() }.ok()?;
+    Some(if state == ToggleState_On {
+        Checked::True
+    } else if state == ToggleState_Indeterminate {
+        Checked::Mixed
+    } else if state == ToggleState_Off {
+        Checked::False
+    } else {
+        // Unknown future state — bias toward "off" rather than dropping the
+        // signal entirely. A new ToggleState variant is unlikely but safer
+        // to handle than to crash the snapshot.
+        Checked::False
+    })
+}
+
+/// Read `ExpandCollapsePattern.ExpandCollapseState` if supported. Per
+/// `docs/uia-mapping.md` §2: `Expanded` and `PartiallyExpanded` map to
+/// `true`; `Collapsed` and `LeafNode` map to `false`.
+fn read_expand_state(element: &IUIAutomationElement) -> Option<bool> {
+    // SAFETY: `element` is a valid COM interface.
+    let pattern: IUIAutomationExpandCollapsePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_ExpandCollapsePatternId) }.ok()?;
+    let state = unsafe { pattern.CurrentExpandCollapseState() }.ok()?;
+    // Collapsed, LeafNode, and any future variant all map to `false` — we
+    // only care whether children are currently showing. Reference the
+    // remaining constants explicitly so an upstream rename surfaces here.
+    let _ = (ExpandCollapseState_Collapsed, ExpandCollapseState_LeafNode);
+    Some(state == ExpandCollapseState_Expanded || state == ExpandCollapseState_PartiallyExpanded)
+}
+
+/// Read `SelectionItemPattern.IsSelected` if supported.
+fn read_selection_state(element: &IUIAutomationElement) -> Option<bool> {
+    // SAFETY: `element` is a valid COM interface.
+    let pattern: IUIAutomationSelectionItemPattern =
+        unsafe { element.GetCurrentPatternAs(UIA_SelectionItemPatternId) }.ok()?;
+    let is_selected = unsafe { pattern.CurrentIsSelected() }.ok()?;
+    Some(is_selected.as_bool())
+}
+
+/// Read `IsRequiredForForm`. Always available as an element property; the
+/// role gate keeps us from paying for it on elements that are never
+/// form-required (panels, separators, etc.).
+fn read_required_for_form(element: &IUIAutomationElement) -> Option<bool> {
+    // SAFETY: `element` is a valid COM interface.
+    let required = unsafe { element.CurrentIsRequiredForForm() }.ok()?;
+    // Most apps never set this — only emit `Some(true)` to avoid littering
+    // every form field with `required: false`.
+    if required.as_bool() {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// Build the platform handle stored on every emitted [`Node`]. The handle is

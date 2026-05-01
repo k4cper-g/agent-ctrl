@@ -81,11 +81,26 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
   beforeEach(async () => {
     notepad = spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
-    // Give the window time to appear. We no longer need it foreground because
-    // the snapshot is targeted by title, not by foreground.
+    // Win11 Notepad's UIA tree (XAML) populates lazily after the window is
+    // visible — the editable Document and the tab bar arrive on a separate
+    // tick from the top-level window. Give it a moment, then poll inside the
+    // test if a snapshot still misses them.
     await new Promise((r) => setTimeout(r, 750));
     client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
   });
+
+  /**
+   * Snapshot Notepad, retrying until the editable Document ref shows up.
+   * Win11 Notepad emits the document into its UIA tree a beat after the
+   * window appears; without this, fast snapshots intermittently catch a
+   * window-only tree.
+   */
+  async function snapshotReady(session: SessionId): Promise<Snapshot> {
+    return waitFor(async () => {
+      const s = await client!.snapshot(session, NOTEPAD_TARGET);
+      return findEditableRefs(s).length > 0 ? s : null;
+    });
+  }
 
   afterEach(async () => {
     if (client) {
@@ -104,7 +119,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
   it("captures Notepad and exposes its edit area", async () => {
     const session = await client!.openSession("uia");
-    const snap: Snapshot = await client!.snapshot(session, NOTEPAD_TARGET);
+    const snap: Snapshot = await snapshotReady(session);
 
     expect(snap.surface_kind).toBe("uia");
     expect(snap.app.name.toLowerCase()).toMatch(/notepad/);
@@ -130,7 +145,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
   it("fills the edit area and reads the value back", async () => {
     const session = await client!.openSession("uia");
-    const snap = await client!.snapshot(session, NOTEPAD_TARGET);
+    const snap = await snapshotReady(session);
 
     const editableRefs = findEditableRefs(snap);
     const editRef = editableRefs[0];
@@ -159,7 +174,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
   it("clicks an invoke-able menu item", async () => {
     const session = await client!.openSession("uia");
-    const snap = await client!.snapshot(session, NOTEPAD_TARGET);
+    const snap = await snapshotReady(session);
 
     // Pick any menu-item ref. We can't hardcode "File" because the menu text
     // is localized (Polish: "Plik", German: "Datei", etc.). The contract is
@@ -178,7 +193,7 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
 
   it("types text via SendInput and reads it back", async () => {
     const session = await client!.openSession("uia");
-    const snap = await client!.snapshot(session, NOTEPAD_TARGET);
+    const snap = await snapshotReady(session);
 
     const editRef = findEditableRefs(snap)[0];
     expect(editRef).toBeDefined();
@@ -210,9 +225,24 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     await client!.closeSession(session);
   }, 120_000);
 
+  it("reads selection state from the active Notepad tab", async () => {
+    const session = await client!.openSession("uia");
+    const snap = await snapshotReady(session);
+
+    // Win11 Notepad's tab bar contains a selectable TabItem per open file.
+    // With a fresh Notepad there's exactly one tab, and it's the active one,
+    // so its SelectionItemPattern.IsSelected must surface as true.
+    const tabs = collectNodesByRole(snap, "tab");
+    expect(tabs.length, "no tab elements found in Notepad's tree").toBeGreaterThan(0);
+    const selectedTabs = tabs.filter((t) => t.state.selected === true);
+    expect(selectedTabs.length, "expected at least one tab with selected: true").toBeGreaterThan(0);
+
+    await client!.closeSession(session);
+  }, 120_000);
+
   it("clears typed text with Ctrl+A then Delete", async () => {
     const session = await client!.openSession("uia");
-    const snap = await client!.snapshot(session, NOTEPAD_TARGET);
+    const snap = await snapshotReady(session);
 
     const editRef = findEditableRefs(snap)[0];
     expect(editRef).toBeDefined();
@@ -286,4 +316,25 @@ function findNodeByRef(snap: Snapshot, refId: string): { value?: string } | null
     }
   }
   return null;
+}
+
+interface NodeWithState {
+  role: string | { unknown: string };
+  state: { selected?: boolean; checked?: string; expanded?: boolean; required?: boolean };
+  children?: unknown[];
+}
+
+function collectNodesByRole(snap: Snapshot, role: string): NodeWithState[] {
+  const found: NodeWithState[] = [];
+  const stack: NodeWithState[] = [snap.root as unknown as NodeWithState];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (node.role === role) found.push(node);
+    if (Array.isArray(node.children)) {
+      for (const c of node.children) {
+        stack.push(c as NodeWithState);
+      }
+    }
+  }
+  return found;
 }
