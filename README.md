@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  OS automation CLI for AI agents. Fast native Rust CLI, accessibility-tree based, agent-browser-inspired schema.
+  OS automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
 > **Status (v0.1.0):** **Windows is the supported platform today.** The Windows UI Automation surface is feature-complete and validated end-to-end against real apps. macOS Accessibility (AX), Linux AT-SPI, Chromium DevTools Protocol (CDP), Android, and iOS surfaces are scaffolded - they implement the `Surface` trait and compile cleanly, but their methods return `Unsupported`. Filling them in is the v0.x roadmap.
