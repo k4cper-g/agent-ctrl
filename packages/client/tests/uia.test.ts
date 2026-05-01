@@ -281,6 +281,38 @@ describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", 
     await client!.closeSession(session);
   }, 120_000);
 
+  it("captures a PNG screenshot of the pinned Notepad window", async () => {
+    const session = await client!.openSession("uia");
+    await snapshotReady(session);
+
+    const res = await client!.act(session, { kind: "screenshot" });
+    expect(res.ok).toBe(true);
+
+    // ActionResult.data carries { format, encoding, width, height, data }.
+    const data = res.data as
+      | { format?: string; encoding?: string; width?: number; height?: number; data?: string }
+      | undefined;
+    expect(data?.format).toBe("png");
+    expect(data?.encoding).toBe("base64");
+    expect(typeof data?.width).toBe("number");
+    expect(typeof data?.height).toBe("number");
+    expect(data!.width!).toBeGreaterThan(0);
+    expect(data!.height!).toBeGreaterThan(0);
+    expect(typeof data?.data).toBe("string");
+    expect(data!.data!.length).toBeGreaterThan(100);
+
+    // Verify the payload is actually a PNG by checking the magic bytes.
+    const png = Buffer.from(data!.data!, "base64");
+    expect(png.length).toBeGreaterThan(8);
+    // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+    expect(png[0]).toBe(0x89);
+    expect(png[1]).toBe(0x50);
+    expect(png[2]).toBe(0x4e);
+    expect(png[3]).toBe(0x47);
+
+    await client!.closeSession(session);
+  }, 120_000);
+
   it("clears typed text with SelectAll then Delete", async () => {
     const session = await client!.openSession("uia");
     const snap = await snapshotReady(session);

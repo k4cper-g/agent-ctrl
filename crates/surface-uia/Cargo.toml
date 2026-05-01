@@ -21,11 +21,15 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Threading",
 ] }
+png = "0.17"
+base64 = "0.22"
+serde_json.workspace = true
 
 [lints]
 workspace = true

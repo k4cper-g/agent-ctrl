@@ -18,16 +18,16 @@ Stack: **Rust workspace** (engine + daemon + per-platform surfaces) +
 target is the agent-browser / Playwright pattern: ship a Rust binary inside
 an npm package.
 
-## Current state — v0.1 milestone reached; keyboard, native handles, pattern state, role promotion landed
+## Current state — UIA surface action vocabulary complete
 
-✅ End-to-end TS → Rust → live Windows app loop **works**, including SendInput-based keyboard, populated UIA native handles, pattern-derived state, and pattern-based role promotion.
+✅ Every `Action` variant in `agent_ctrl_core::action::Action` now has a real implementation in `surface-uia`. End-to-end TS → Rust → live Windows app loop covers Click / Focus / Fill / Type / Press / KeyDown / KeyUp / Select / SelectAll / ScrollIntoView / DoubleClick / RightClick / Hover / Scroll / Drag / SwitchApp / FocusWindow / Screenshot / Wait, with native handles, pattern-derived state, and pattern-based role promotion.
 
 Verified in the last session:
 
-- `cargo test --workspace` — 14 tests pass (core, daemon, surface-uia keyboard helpers + runtime-id packing)
+- `cargo test --workspace` — 20 tests pass (core, daemon, surface-uia keyboard helpers + runtime-id packing + screen-coord conversion + scroll-delta rounding + app-id / window-id parsers)
 - `npm run test --workspace=@agent-ctrl/client` — 3 mock tests pass
-- `RUN_UIA_TESTS=1 npm run test ...` — **6 UIA tests pass against live Notepad in ~7s** (twice in a row, deterministic):
-  snapshot Notepad (asserts `NativeHandle::Uia` populated with `RuntimeId`) → fill via ValuePattern → click an Invoke menu item → SendInput Type completes → assert active tab reports `state.selected: true` → clear with `Ctrl+A` + `Delete`.
+- `RUN_UIA_TESTS=1 npm run test ...` — **9 UIA tests pass against live Notepad in ~10s**:
+  snapshot Notepad (asserts `NativeHandle::Uia` populated with `RuntimeId`) → fill via ValuePattern → click an Invoke menu item → SendInput Type completes → assert active tab reports `state.selected: true` → focus by window_id → switch by app_id → capture a PNG screenshot (asserts magic bytes) → clear with SelectAll + Delete.
 - `cargo clippy --workspace --all-targets -- -D warnings` ✓
 - `cargo fmt --all -- --check` ✓
 - `tsc --noEmit` ✓
@@ -90,9 +90,15 @@ These are invariants that will silently break things if you violate them. Read b
 
 ## What's NOT yet built (in priority order)
 
-1. **Remaining actions** per `docs/uia-mapping.md` §4: DoubleClick, RightClick, Hover, Scroll, ScrollIntoView, Select, SelectAll, Drag, SwitchApp, FocusWindow, Screenshot.
-2. **CDP surface implementation** — cross-platform browser surface. Use agent-browser's `cli/src/native/cdp/` as the reference. After UIA, this is the next biggest demo unlock.
-3. **macOS AX surface** — once UIA shape is stable.
+1. **CDP surface implementation** — cross-platform browser surface. Use agent-browser's `cli/src/native/cdp/` as the reference. After UIA, this is the next biggest demo unlock.
+2. **macOS AX surface** — once UIA shape is stable.
+
+## Known UIA edges to revisit when motivated
+
+- **Drag interpolation** — current `act_drag` sends `(move src, ldown, move dst, lup)` with no intermediate moves. Some drag-and-drop UIs require multiple intermediate `MOUSEEVENTF_MOVE` events to recognize the gesture; if a real app forces our hand, interpolate inside `act_drag`.
+- **Screenshot of occluded windows** — we use `GetWindowDC` + `BitBlt`, which always returns the current pixel state but requires the captured window to be visible. `PrintWindow` is the alternative for occluded windows but defers to the app's WM_PRINT handler and some apps return blank or partial frames; the current pick favors correctness over coverage.
+- **`act_wait` blocks the worker** — sleeping on the UIA worker queues every other action / snapshot behind the wait. That matches the single-worker-per-session model but it's a foot-gun if an agent expects parallel timelines. Document or fix when an agent hits it.
+- **`Type` round-trip vs WinUI 3** — Win11 Notepad's WinUI input layer drops/reorders/substitutes injected `KEYEVENTF_UNICODE` keystrokes under load. The OS contract is honored ("events were inserted into the input queue"); the receiver mishandles them. Agents needing reliable text content should use `Fill`. The integration test reflects this — it asserts the SendInput call completes and the daemon stays responsive, not value round-trip equality.
 
 ## Known pitfalls (you will hit these)
 

@@ -23,7 +23,12 @@ use std::time::{Duration, SystemTime};
 use windows::core::Result as WinResult;
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::LPARAM;
-use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, RECT};
+use windows::Win32::Graphics::Gdi::{
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+    GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    HGDIOBJ, RGBQUAD, SRCCOPY,
+};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     SAFEARRAY,
@@ -72,14 +77,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use agent_ctrl_core::{
     Action, ActionResult, AppContext, Bounds, Checked, Error, NativeHandle, Node, RefEntry, RefId,
-    RefMap, Result, Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext,
+    RefMap, Region, Result, Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext,
     WindowTarget,
 };
 
@@ -992,11 +997,22 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::Drag { from, to } => act_drag(state, from, to),
         Action::SwitchApp { app_id } => act_switch_app(state, app_id),
         Action::FocusWindow { window_id } => act_focus_window(state, window_id),
-        other => Err(Error::Unsupported {
-            surface: SurfaceKind::Uia.as_str().into(),
-            action: action_name(other).into(),
-        }),
+        Action::Screenshot { region } => act_screenshot(state, region.as_ref()),
+        Action::Wait { ms } => act_wait(*ms),
     }
+}
+
+/// Sleep on the worker thread for `ms` milliseconds. Note: this blocks the
+/// worker, so concurrent snapshots and actions are queued behind the wait.
+/// That matches our single-worker-per-session model — agents that need
+/// independent timelines should open separate sessions.
+//
+// Returns `Result` to match `act_dispatch`'s arm type even though it's
+// infallible; flagged by `clippy::unnecessary_wraps` as a result.
+#[allow(clippy::unnecessary_wraps)]
+fn act_wait(ms: u64) -> Result<ActionResult> {
+    std::thread::sleep(Duration::from_millis(ms));
+    Ok(ActionResult::ok())
 }
 
 fn act_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
@@ -1513,6 +1529,256 @@ fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionRe
     state.last_hwnd = Some(hwnd);
     state.last_refs = RefMap::new();
     Ok(ActionResult::ok())
+}
+
+// ---------- Screenshot ----------
+
+/// Capture a screenshot. When `region` is `None`, captures the snapshot's
+/// pinned HWND (the same window subsequent ref-bearing actions target).
+/// When `region` is `Some`, captures that screen-space rectangle of the
+/// virtual desktop.
+///
+/// Returned via `ActionResult::data` as a JSON object:
+/// ```json
+/// {"format":"png","encoding":"base64","width":W,"height":H,"data":"<base64>"}
+/// ```
+/// PNG is the only format we emit; clients should decode the base64 and
+/// pass the bytes to any standard PNG decoder.
+fn act_screenshot(state: &WorkerState, region: Option<&Region>) -> Result<ActionResult> {
+    use base64::Engine;
+    let image = if let Some(r) = region {
+        capture_screen_region(r)?
+    } else {
+        let hwnd = require_hwnd(state, "screenshot")?;
+        capture_window(hwnd)?
+    };
+    let png = encode_png(&image)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+    Ok(ActionResult {
+        ok: true,
+        message: None,
+        data: Some(serde_json::json!({
+            "format": "png",
+            "encoding": "base64",
+            "width": image.width,
+            "height": image.height,
+            "data": encoded,
+        })),
+    })
+}
+
+/// Logical RGBA bitmap. Top-down (row 0 is the top); 4 bytes per pixel
+/// in R, G, B, A order. Used as the common shape between the GDI capture
+/// and the PNG encoder.
+struct CapturedImage {
+    width: u32,
+    height: u32,
+    /// `width * height * 4` bytes. Row-major, top-down.
+    pixels: Vec<u8>,
+}
+
+/// Capture a window's client area. We intentionally use `GetWindowDC` +
+/// `BitBlt` rather than `PrintWindow` — BitBlt always produces a current
+/// pixel snapshot, while PrintWindow defers to the app's WM_PRINT handler
+/// and some apps return blank or partial frames. The trade-off is that the
+/// captured window must be visible (not occluded), which is consistent with
+/// the rest of the surface's expectations.
+fn capture_window(hwnd: HWND) -> Result<CapturedImage> {
+    if hwnd.0.is_null() {
+        return Err(Error::Action {
+            action: "screenshot".into(),
+            reason: "no pinned window to capture".into(),
+        });
+    }
+
+    // SAFETY: `hwnd` is non-null per the check above. `GetClientRect`
+    // accepts any HWND and writes to a local RECT; we propagate any error
+    // (e.g. window destroyed) as a clean action error.
+    let mut rect = RECT::default();
+    unsafe { GetClientRect(hwnd, &raw mut rect) }.map_err(|e| Error::Action {
+        action: "screenshot".into(),
+        reason: format!("GetClientRect: {e}"),
+    })?;
+    let width = (rect.right - rect.left).max(1);
+    let height = (rect.bottom - rect.top).max(1);
+
+    // SAFETY: `GetWindowDC` accepts any HWND; failure returns a null HDC.
+    // We pair every successful Get/CreateDC with a matching Release/Delete.
+    let window_dc = unsafe { GetWindowDC(hwnd) };
+    if window_dc.is_invalid() {
+        return Err(Error::Action {
+            action: "screenshot".into(),
+            reason: "GetWindowDC returned null".into(),
+        });
+    }
+
+    let result = blit_to_rgba(window_dc, 0, 0, width, height);
+
+    // SAFETY: `window_dc` was obtained via `GetWindowDC` and matches the hwnd.
+    unsafe { ReleaseDC(hwnd, window_dc) };
+    result
+}
+
+/// Capture an arbitrary region of the virtual desktop. Coordinates are in
+/// the same physical-pixel screen space as `Region` documents; negative
+/// origins (multi-monitor with secondary to the left) are honored.
+fn capture_screen_region(region: &Region) -> Result<CapturedImage> {
+    let width = i32::try_from(region.w.max(1)).unwrap_or(i32::MAX);
+    let height = i32::try_from(region.h.max(1)).unwrap_or(i32::MAX);
+
+    // SAFETY: `GetDC(None)` returns the desktop DC.
+    let screen_dc = unsafe { GetWindowDC(HWND(std::ptr::null_mut())) };
+    if screen_dc.is_invalid() {
+        return Err(Error::Action {
+            action: "screenshot".into(),
+            reason: "GetWindowDC(NULL) returned null".into(),
+        });
+    }
+
+    let result = blit_to_rgba(screen_dc, region.x, region.y, width, height);
+
+    // SAFETY: `screen_dc` was obtained via `GetWindowDC(NULL)`; release with
+    // the same NULL hwnd to match.
+    unsafe { ReleaseDC(HWND(std::ptr::null_mut()), screen_dc) };
+    result
+}
+
+/// Shared GDI capture: BitBlt the rectangle `(src_x, src_y, w, h)` from
+/// `src_dc` into a compatible bitmap, then read it back as DIB pixels and
+/// translate Windows' BGRA to PNG-ready RGBA.
+fn blit_to_rgba(
+    src_dc: windows::Win32::Graphics::Gdi::HDC,
+    src_x: i32,
+    src_y: i32,
+    w: i32,
+    h: i32,
+) -> Result<CapturedImage> {
+    // SAFETY: every GDI handle below is paired with a Delete/Release on
+    // every exit path. Failures map to clean action errors.
+    let mem_dc = unsafe { CreateCompatibleDC(src_dc) };
+    if mem_dc.is_invalid() {
+        return Err(Error::Action {
+            action: "screenshot".into(),
+            reason: "CreateCompatibleDC returned null".into(),
+        });
+    }
+
+    let bitmap = unsafe { CreateCompatibleBitmap(src_dc, w, h) };
+    if bitmap.is_invalid() {
+        // SAFETY: mem_dc was just created; clean up.
+        unsafe {
+            let _ = DeleteDC(mem_dc);
+        }
+        return Err(Error::Action {
+            action: "screenshot".into(),
+            reason: "CreateCompatibleBitmap returned null".into(),
+        });
+    }
+
+    // SAFETY: `bitmap` is a valid HBITMAP; `mem_dc` is a valid memory DC.
+    let prev = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
+
+    // SAFETY: BitBlt copies from src_dc into the selected bitmap on mem_dc.
+    let blit_ok = unsafe { BitBlt(mem_dc, 0, 0, w, h, src_dc, src_x, src_y, SRCCOPY) }.is_ok();
+    if !blit_ok {
+        // SAFETY: cleanup paired with the creation calls above.
+        unsafe {
+            SelectObject(mem_dc, prev);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(mem_dc);
+        }
+        return Err(Error::Action {
+            action: "screenshot".into(),
+            reason: "BitBlt failed".into(),
+        });
+    }
+
+    // Top-down 32bpp RGB — `biHeight = -h` flips Windows' default
+    // bottom-up DIB ordering so we can write the rows directly without
+    // an extra reversal pass.
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: u32::try_from(std::mem::size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: [RGBQUAD::default()],
+    };
+
+    let pixel_count = usize::try_from(w).unwrap_or(0) * usize::try_from(h).unwrap_or(0) * 4;
+    let mut pixels = vec![0u8; pixel_count];
+    // SAFETY: `pixels` is sized for `w*h*4` bytes; `info` is populated; the
+    // bitmap was just rendered on `mem_dc`.
+    let lines_read = unsafe {
+        GetDIBits(
+            mem_dc,
+            bitmap,
+            0,
+            u32::try_from(h).unwrap_or(0),
+            Some(pixels.as_mut_ptr().cast()),
+            &raw mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+
+    // SAFETY: cleanup paired with creations above.
+    unsafe {
+        SelectObject(mem_dc, prev);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(mem_dc);
+    }
+
+    if lines_read == 0 {
+        return Err(Error::Action {
+            action: "screenshot".into(),
+            reason: "GetDIBits returned 0 lines".into(),
+        });
+    }
+
+    // GDI returns BGRA in 32bpp BI_RGB mode; PNG and the rest of the world
+    // want RGBA. Swap bytes 0 and 2 in each pixel.
+    for chunk in pixels.chunks_exact_mut(4) {
+        chunk.swap(0, 2);
+        // GDI also leaves the alpha byte zero in 32bpp BI_RGB; we set it to
+        // 0xFF so the PNG encodes as fully opaque.
+        chunk[3] = 0xFF;
+    }
+
+    Ok(CapturedImage {
+        width: u32::try_from(w).unwrap_or(0),
+        height: u32::try_from(h).unwrap_or(0),
+        pixels,
+    })
+}
+
+/// PNG-encode a top-down RGBA bitmap. The `png` crate handles compression
+/// and chunk emission; we just hand it the pixels and dimensions.
+fn encode_png(image: &CapturedImage) -> Result<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, image.width, image.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| Error::Action {
+            action: "screenshot".into(),
+            reason: format!("png header: {e}"),
+        })?;
+        writer
+            .write_image_data(&image.pixels)
+            .map_err(|e| Error::Action {
+                action: "screenshot".into(),
+                reason: format!("png write: {e}"),
+            })?;
+    }
+    Ok(buf)
 }
 
 /// Reduce an `app_id` to the executable file stem `find_window_by_process_name`
@@ -2221,30 +2487,6 @@ fn element_qualifies_as_ref(
         }
     }
     false
-}
-
-fn action_name(a: &Action) -> &'static str {
-    match a {
-        Action::Click { .. } => "click",
-        Action::DoubleClick { .. } => "double_click",
-        Action::RightClick { .. } => "right_click",
-        Action::Hover { .. } => "hover",
-        Action::Focus { .. } => "focus",
-        Action::Type { .. } => "type",
-        Action::Fill { .. } => "fill",
-        Action::Press { .. } => "press",
-        Action::KeyDown { .. } => "key_down",
-        Action::KeyUp { .. } => "key_up",
-        Action::Scroll { .. } => "scroll",
-        Action::Drag { .. } => "drag",
-        Action::Select { .. } => "select",
-        Action::SelectAll { .. } => "select_all",
-        Action::ScrollIntoView { .. } => "scroll_into_view",
-        Action::Wait { .. } => "wait",
-        Action::SwitchApp { .. } => "switch_app",
-        Action::FocusWindow { .. } => "focus_window",
-        Action::Screenshot { .. } => "screenshot",
-    }
 }
 
 #[cfg(test)]
