@@ -52,7 +52,7 @@ Use `agent-ctrl --help` for the full list. Highlights:
 | `click @eN` / `double-click` / `right-click` / `hover` / `focus` | pointer + focus on a ref |
 | `fill @eN "text"` | replace value via UIA `ValuePattern` (best for Unicode) |
 | `type "text"` / `press "Ctrl+A"` / `key-down`/`key-up` | keyboard via SendInput |
-| `select @eN "Option"` / `select-all [--ref @eN]` | selection containers |
+| `select @eN "Option"` / `select-all [@eN]` | selection containers |
 | `scroll DX DY [--ref @eN]` / `scroll-into-view @eN` | wheel + UIA scroll-item |
 | `drag @e1 @e2` | source-to-destination drag |
 | `switch-app <app_id>` / `focus-window <hex_id>` | foreground a window |
