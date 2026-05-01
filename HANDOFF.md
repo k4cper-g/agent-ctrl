@@ -88,6 +88,7 @@ These are invariants that will silently break things if you violate them. Read b
 ```bash
 agent-ctrl info [--json]                       # OS / surfaces / active sessions (cheap)
 agent-ctrl doctor [--json] [--fix] [--quick]   # diagnostic incl. mock probe
+agent-ctrl launch <path> [args...] [--wait MS] # spawn an app detached
 agent-ctrl open <surface> [--session NAME]     # spawn detached daemon
 agent-ctrl close [--session NAME]              # stop daemon
 agent-ctrl list                                # active sessions

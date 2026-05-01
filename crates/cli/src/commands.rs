@@ -59,6 +59,12 @@ pub(crate) enum Command {
     /// files).
     Doctor(DoctorArgs),
 
+    /// Launch a process detached from this shell. Prints `ok pid=<n>` so
+    /// the agent's next command can `snapshot --target-pid <n>`. Use
+    /// `--wait MS` to sleep before returning so the spawned app has time
+    /// to create its window before the agent acts on it.
+    Launch(LaunchArgs),
+
     /// Capture the current snapshot of the named session's surface and
     /// print it as a tree of refs (or as raw JSON with `--json`). Window
     /// targeting flags pin which window subsequent actions will operate on.
@@ -133,6 +139,21 @@ pub(crate) struct InfoArgs {
     /// Emit a parseable JSON payload instead of the human-readable form.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LaunchArgs {
+    /// Absolute path to an executable, or a name resolvable on PATH.
+    path: String,
+    /// Arguments forwarded to the launched process. Anything after the
+    /// path is collected verbatim, including hyphenated flags.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+    /// Sleep this many milliseconds after spawn before returning. Useful
+    /// so a snapshot run immediately afterwards finds the spawned app's
+    /// window already drawn. Defaults to 0 (fire-and-forget).
+    #[arg(long, default_value_t = 0)]
+    wait: u64,
 }
 
 #[derive(Debug, Args)]
@@ -361,6 +382,7 @@ impl Command {
                 fix: a.fix,
                 quick: a.quick,
             }),
+            Self::Launch(a) => run_launch(&a),
             Self::Snapshot(args) => run_snapshot(args),
             Self::Click(a) => run_simple_ref_action(&a, |r| Action::Click { ref_id: r }),
             Self::DoubleClick(a) => {
@@ -590,6 +612,44 @@ fn run_close(session: &str) -> Result<()> {
     let _ = session_file::remove(session);
 
     println!("ok session={session} stopped");
+    Ok(())
+}
+
+/// Spawn a process detached from this shell. Doesn't touch any daemon —
+/// it's an orthogonal primitive an agent can compose with `snapshot
+/// --target-pid <n>` next, since `agent-ctrl` itself didn't have a way
+/// to start an app from inside its own verb vocabulary before this.
+///
+/// Detachment matters: agents typically run `agent-ctrl launch ...`
+/// from a short-lived shell and expect the spawned app to outlive that
+/// shell. On Windows we set `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
+/// so the child's stdout/stderr aren't tied to ours and Ctrl-C in the
+/// parent shell doesn't take it down.
+fn run_launch(args: &LaunchArgs) -> Result<()> {
+    let mut cmd = std::process::Command::new(&args.path);
+    cmd.args(&args.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Same flags `open` uses for the daemon child: outlive the
+        // spawning shell and ignore its Ctrl-C.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("launching {:?}", args.path))?;
+    let pid = child.id();
+
+    if args.wait > 0 {
+        std::thread::sleep(Duration::from_millis(args.wait));
+    }
+
+    println!("ok pid={pid}");
     Ok(())
 }
 

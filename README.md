@@ -22,6 +22,24 @@ agent-ctrl screenshot result.png                      # save a PNG of the window
 agent-ctrl close                                      # stop the daemon
 ```
 
+### Driving an app you don't have running yet
+
+`launch` spawns a process detached from the calling shell — useful when the
+agent needs to start an app before driving it:
+
+```bash
+agent-ctrl launch 'C:\Users\me\AppData\Local\Programs\Obsidian\Obsidian.exe' --wait 4000
+agent-ctrl open uia
+agent-ctrl snapshot --target-process Obsidian        # tree (or 0 refs for Electron apps)
+agent-ctrl press Ctrl+N                              # new note
+agent-ctrl type "# Hello from agent-ctrl"
+agent-ctrl press Ctrl+S                              # save
+agent-ctrl close
+```
+
+`--wait` is a small grace period so the app's window is drawn before the next
+command. Use it for GUI apps; omit it for headless tools.
+
 ### Discovering what works on this machine
 
 Two commands help an agent figure out the environment without running anything destructive:
@@ -58,6 +76,7 @@ Use `agent-ctrl --help` for the full list. Highlights:
 | `switch-app <app_id>` / `focus-window <hex_id>` | foreground a window |
 | `screenshot [PATH] [--region X,Y,W,H]` | PNG of the pinned window or a region |
 | `wait MS` | sleep on the daemon worker |
+| `launch <path> [args...] [--wait MS]` | spawn an app detached; print pid |
 | `info [--json]` | OS / recommended surface / active sessions (no probes) |
 | `doctor [--json] [--fix] [--quick]` | environment + daemon + live mock probe |
 
