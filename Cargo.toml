@@ -26,7 +26,7 @@ agent-ctrl-surface-cdp = { path = "crates/surface-cdp", version = "0.1.0" }
 agent-ctrl-surface-uia = { path = "crates/surface-uia", version = "0.1.0" }
 agent-ctrl-surface-ax = { path = "crates/surface-ax", version = "0.1.0" }
 
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "process", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "process", "signal", "net"] }
 async-trait = "0.1"
 futures = "0.3"
 
@@ -41,6 +41,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 clap = { version = "4", features = ["derive", "env"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "5"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

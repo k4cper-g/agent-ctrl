@@ -1,10 +1,49 @@
 # agent-ctrl
 
-Cross-platform computer-use framework for AI agents.
+Computer-use CLI for AI agents. Same shape as [agent-browser](https://github.com/vercel-labs/agent-browser) — but for any OS, not just the browser.
 
-`agent-ctrl` exposes a unified, accessibility-tree based schema across operating systems, so an AI agent can drive Windows, macOS, Android, iOS, and the browser through a single consistent interface. The schema is modeled on [agent-browser](https://github.com/vercel-labs/agent-browser) and extended with the cross-platform concepts (apps, windows, native handles) that desktop and mobile require.
+`agent-ctrl` exposes a unified, accessibility-tree based schema across operating systems, so an AI agent can drive Windows, macOS, Android, iOS, and the browser through one consistent set of shell commands. The agent issues `snapshot`, `click @e3`, `fill @e5 "text"` like a human at a terminal; a long-running daemon holds the platform-specific session state across invocations.
 
-> **Status:** early scaffolding. The mock surface and protocol are wired up end-to-end (Rust daemon ↔ TypeScript client). Real surfaces (UIA, AX, CDP) are stubbed and land surface-by-surface.
+> **Status:** Windows UI Automation surface is feature-complete and CLI-driven end-to-end. CDP, macOS AX, Android, and iOS surfaces are scaffolded.
+
+## Quick start (Windows)
+
+```bash
+cargo build --release -p agent-ctrl-cli
+# put target/release/agent-ctrl on your PATH
+
+agent-ctrl open uia                                   # spawn a daemon (background)
+agent-ctrl snapshot --target-process Notepad          # show Notepad's a11y tree with @eN refs
+agent-ctrl fill @e0 "hello from agent-ctrl"           # set the document text
+agent-ctrl press "Ctrl+End"                           # move cursor to end
+agent-ctrl click @e4                                  # click the File menu
+agent-ctrl screenshot result.png                      # save a PNG of the window
+agent-ctrl close                                      # stop the daemon
+```
+
+The daemon lives at `~/.agent-ctrl/<session>.json` while running. `agent-ctrl list` shows active sessions; `agent-ctrl --session <name> ...` targets a specific one. Default session name is `default`, so most commands need no flag.
+
+Every action follows the same pattern: an agent runs `snapshot` once to learn what's on screen, then issues `click` / `fill` / `type` / `press` / `select` / etc. by ref. Refs are valid only for the snapshot that produced them — re-snapshot before acting on a tree that has changed.
+
+## CLI reference
+
+Use `agent-ctrl --help` for the full list. Highlights:
+
+| Command | Purpose |
+|---|---|
+| `open <surface> [--session NAME]` | spawn a daemon for the given surface (`uia`, `cdp`, `ax`, `mock`, …) |
+| `close [--session NAME]` | stop the daemon and clean up the state file |
+| `list` | active sessions across the home directory |
+| `snapshot [--target-process X | --target-pid N | --target-title T] [--json]` | capture and print the a11y tree |
+| `click @eN` / `double-click` / `right-click` / `hover` / `focus` | pointer + focus on a ref |
+| `fill @eN "text"` | replace value via UIA `ValuePattern` (best for Unicode) |
+| `type "text"` / `press "Ctrl+A"` / `key-down`/`key-up` | keyboard via SendInput |
+| `select @eN "Option"` / `select-all [--ref @eN]` | selection containers |
+| `scroll DX DY [--ref @eN]` / `scroll-into-view @eN` | wheel + UIA scroll-item |
+| `drag @e1 @e2` | source-to-destination drag |
+| `switch-app <app_id>` / `focus-window <hex_id>` | foreground a window |
+| `screenshot [PATH] [--region X,Y,W,H]` | PNG of the pinned window or a region |
+| `wait MS` | sleep on the daemon worker |
 
 ## Workspace layout
 
@@ -62,17 +101,22 @@ npm run test  --workspace=@agent-ctrl/client
 
 The TS test suite spawns the Rust daemon under `cargo run` and exercises the full protocol against the mock surface.
 
-## Try it
+## Mock surface (works on every OS, no permissions needed)
 
-The mock surface returns a fake two-button window — useful for exercising the protocol end-to-end without any platform-specific code:
+The mock surface returns a fixed two-button window — handy for exercising the protocol without touching platform a11y APIs:
 
 ```bash
-# From Rust:
-cargo run -p agent-ctrl-cli -- snapshot --surface mock
+agent-ctrl open mock
+agent-ctrl snapshot
+agent-ctrl click @e0
+agent-ctrl close
 ```
 
+## TypeScript client
+
+For agents that prefer a programmatic API, [`@agent-ctrl/client`](packages/client) wraps the daemon over stdio JSON-RPC:
+
 ```typescript
-// From TypeScript:
 import { AgentCtrl } from "@agent-ctrl/client";
 
 const ctrl = new AgentCtrl();
@@ -81,6 +125,8 @@ const snap = await ctrl.snapshot(session);
 console.log(snap.refs.entries);
 await ctrl.close();
 ```
+
+Both transports talk the same wire protocol; agents can mix and match.
 
 ## License
 

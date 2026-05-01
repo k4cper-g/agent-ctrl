@@ -19,6 +19,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+dirs.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 agent-ctrl-surface-uia.workspace = true

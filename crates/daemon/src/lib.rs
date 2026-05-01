@@ -8,11 +8,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client;
 pub mod dispatcher;
 pub mod factory;
 pub mod ipc;
+pub mod session_file;
 pub mod state;
 
 pub use dispatcher::{dispatch, Request, RequestOp, Response, ResponseBody};
 pub use factory::open_surface;
+pub use session_file::{
+    discovery_dir, list_alive, path_for, read_alive, remove, wait_for_alive, write, SessionFile,
+    DEFAULT_SESSION,
+};
 pub use state::{DaemonState, SessionId};

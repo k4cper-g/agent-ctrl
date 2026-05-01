@@ -50,6 +50,11 @@ pub enum RequestOp {
         /// Session to close.
         session: SessionId,
     },
+    /// Shut the daemon down. Used by the `agent-ctrl close` CLI command to
+    /// terminate a long-running TCP daemon. The daemon answers `Stopped`
+    /// and then drops its accept loop; the transport layer is responsible
+    /// for actually triggering the shutdown after seeing this op.
+    Shutdown,
 }
 
 /// A response from the daemon.
@@ -84,6 +89,9 @@ pub enum ResponseBody {
     },
     /// `CloseSession` succeeded.
     Closed,
+    /// `Shutdown` succeeded — the daemon will exit shortly after this
+    /// response is delivered.
+    Stopped,
     /// Any error path.
     Error {
         /// Human-readable error message.
@@ -154,6 +162,7 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
                 message: e.to_string(),
             },
         },
+        RequestOp::Shutdown => ResponseBody::Stopped,
     };
     Response { id, body }
 }
