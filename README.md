@@ -6,7 +6,9 @@
   OS automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
-> **Status (v0.1.0):** **Windows is the supported platform today.** The Windows UI Automation surface is feature-complete and validated end-to-end against real apps. macOS Accessibility (AX), Linux AT-SPI, Chromium DevTools Protocol (CDP), Android, and iOS surfaces are scaffolded - they implement the `Surface` trait and compile cleanly, but their methods return `Unsupported`. Filling them in is the v0.x roadmap.
+> **Status (v0.1.0):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against real apps. macOS Accessibility (AX) is scaffolded - it compiles, but its methods return `Unsupported`. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
+>
+> **Browser automation is out of scope.** agent-ctrl drives native UI; for Chromium-via-CDP use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project. The two are designed to compose in the same agent loop.
 
 ## Installation
 
@@ -19,6 +21,10 @@ cargo build --release -p agent-ctrl-cli
 # put target/release/agent-ctrl on your PATH
 ```
 
+The Rust workspace crates are not published to crates.io in v0.1. The public
+distribution path is source builds or GitHub release binaries for `agent-ctrl`,
+plus the npm package for TypeScript consumers.
+
 ### TypeScript client
 
 ```bash
@@ -28,7 +34,7 @@ npm install @agent-ctrl/client
 
 ### Requirements
 
-- **Windows 10/11** for UIA. Other OSes build cleanly but their surfaces return `Unsupported`.
+- **Windows 10/11** for UIA. Other OSes build cleanly; AX is scaffolded on macOS, while Linux / Android / iOS are not implemented yet.
 - **Rust 1.85+** (workspace MSRV; rustup will install it from `rust-toolchain.toml`).
 - **Node.js 20+** only when using the TypeScript client.
 
@@ -37,8 +43,10 @@ npm install @agent-ctrl/client
 ```bash
 agent-ctrl info                                  # OS, available surfaces, active sessions
 agent-ctrl open uia                              # spawn a daemon (background)
-agent-ctrl snapshot --target-process Notepad     # tree of refs (@e0, @e1, ...)
+agent-ctrl snapshot --target-process <name>      # tree of refs (@e0, @e1, ...)
 agent-ctrl click @e4                             # click by ref
+agent-ctrl get name @e4                          # inspect cached snapshot fields
+agent-ctrl is enabled @e4                        # boolean state checks
 agent-ctrl fill @e0 "hello from agent-ctrl"      # set value via UIA ValuePattern
 agent-ctrl press "Ctrl+S"                        # key chord via SendInput
 agent-ctrl screenshot result.png                 # PNG of the pinned window
@@ -54,10 +62,10 @@ Every action follows the same pattern: `snapshot` once to learn what's on screen
 ```bash
 agent-ctrl open <surface>                # spawn a daemon (uia, mock, ...)
 agent-ctrl close                         # stop the daemon
-agent-ctrl list                          # active sessions
+agent-ctrl list [--json]                 # active sessions
 agent-ctrl info [--json]                 # static facts about this binary
 agent-ctrl doctor [--json] [--fix] [--quick]  # diagnose the install + live probe
-agent-ctrl launch <path> [--wait MS]     # spawn an app detached from this shell
+agent-ctrl launch [--json] <path> [--wait MS]  # spawn an app detached from this shell
 ```
 
 ### Snapshot
@@ -81,6 +89,7 @@ agent-ctrl double-click @eN              # double-click
 agent-ctrl right-click @eN               # secondary-button click
 agent-ctrl hover @eN                     # cursor over element, no buttons
 agent-ctrl focus @eN                     # UIA SetFocus
+agent-ctrl highlight @eN                 # move cursor to element for human debugging
 ```
 
 ### Keyboard
@@ -88,9 +97,14 @@ agent-ctrl focus @eN                     # UIA SetFocus
 ```bash
 agent-ctrl type "hello"                  # synthetic Unicode keystrokes (ASCII reliable; no IME)
 agent-ctrl fill @eN "value"              # UIA ValuePattern.SetValue (best for non-ASCII / form fields)
+agent-ctrl clear @eN                     # clear an editable field
 agent-ctrl press "Ctrl+S"                # key chord - Enter, Tab, Ctrl+A, Ctrl+Shift+T, etc.
 agent-ctrl key-down "Shift"              # hold a modifier
 agent-ctrl key-up "Shift"                # release it
+agent-ctrl clipboard read                # read clipboard text
+agent-ctrl clipboard write "text"        # replace clipboard text
+agent-ctrl clipboard copy                # send Ctrl+C
+agent-ctrl clipboard paste               # send Ctrl+V
 ```
 
 ### Selection / scroll
@@ -98,9 +112,16 @@ agent-ctrl key-up "Shift"                # release it
 ```bash
 agent-ctrl select @eN "Option name"      # pick an item in a select / combo / list
 agent-ctrl select-all [@eN]              # select all in field; without ref, sends Ctrl+A to focus
+agent-ctrl check @eN                     # set a TogglePattern control on
+agent-ctrl uncheck @eN                   # set a TogglePattern control off
+agent-ctrl toggle @eN                    # toggle a TogglePattern control
 agent-ctrl scroll <DX> <DY> [--ref @eN]  # wheel scroll (positive DY = down)
 agent-ctrl scroll-into-view @eN          # UIA ScrollItemPattern
 agent-ctrl drag @eFROM @eTO              # source-to-destination drag
+agent-ctrl mouse move X Y                # raw mouse move
+agent-ctrl mouse down X Y --button left  # raw button down
+agent-ctrl mouse up X Y --button left    # raw button up
+agent-ctrl mouse wheel X Y --dy -120     # raw wheel
 ```
 
 ### Find
@@ -121,12 +142,36 @@ agent-ctrl find --limit 5                # cap result count
 agent-ctrl click "$(agent-ctrl find "Save" --role button --first)"
 ```
 
+### Inspect
+
+```bash
+agent-ctrl get text @eN                  # value if present, otherwise accessible name
+agent-ctrl get value @eN                 # editable/value-bearing field value
+agent-ctrl get name @eN                  # accessible name
+agent-ctrl get role @eN                  # canonical role
+agent-ctrl get state @eN                 # full state object
+agent-ctrl get bounds @eN                # logical screen bounds
+agent-ctrl get window                    # cached window context
+
+agent-ctrl is visible @eN
+agent-ctrl is enabled @eN
+agent-ctrl is focused @eN
+agent-ctrl is selected @eN
+agent-ctrl is checked @eN
+agent-ctrl is expanded @eN
+```
+
+Inspect commands read the cached snapshot. They are fast and deterministic, but require a prior `snapshot`.
+
 ### Wait
 
 ```bash
 agent-ctrl wait <MS>                                # dumb sleep on the daemon worker
 agent-ctrl wait-for "Save" --role button            # wait for a node to appear
 agent-ctrl wait-for "Loading..." --gone             # wait for a node to disappear
+agent-ctrl wait-for "Agree" --state checked         # wait for a boolean state
+agent-ctrl wait-for --role text-field --value-contains ready
+agent-ctrl wait-for --window-appears "Dialog title" # wait for a sibling window title
 agent-ctrl wait-for --stable [--idle-ms 500]        # wait for the tree signature to settle
 agent-ctrl wait-for ... --timeout 10000 --poll 250  # tune the poll loop
 ```
@@ -142,14 +187,16 @@ agent-ctrl focus-window <hex_id>                  # bring a window to the foregr
 agent-ctrl switch-app <app_id>                    # foreground by app id (path or bare exe name)
 ```
 
-When a Save As dialog or popup menu appears as a sibling top-level window, `window-list` is how you find it. `focus-window` re-pins so subsequent `snapshot` / `find` / actions target the dialog. Mirrors agent-browser's `tab_list` / `tab_switch`.
+When a file dialog, confirmation dialog, or popup appears as a sibling top-level window, `window-list` is how you find it. `focus-window` re-pins so subsequent `snapshot` / `find` / actions target the dialog. Mirrors agent-browser's `tab_list` / `tab_switch`.
 
 ```bash
-agent-ctrl press "Ctrl+S"                                 # opens Save As as a sibling HWND
+agent-ctrl press "Ctrl+S"                                 # may open a sibling dialog HWND
 agent-ctrl focus-window "$(agent-ctrl window-list --first-other)"
 agent-ctrl snapshot                                       # now sees the dialog
-agent-ctrl click "$(agent-ctrl find "Zapisz" --role button --first)"
+agent-ctrl click "$(agent-ctrl find "OK" --role button --first)"
 ```
+
+For detailed Windows guidance on dialogs, elevation, stale refs, foreground focus, IME, screenshots, and app framework quirks, see [`docs/windows-reliability.md`](docs/windows-reliability.md).
 
 ### Output
 
@@ -157,7 +204,42 @@ agent-ctrl click "$(agent-ctrl find "Zapisz" --role button --first)"
 agent-ctrl screenshot                            # PNG of the pinned window to a temp path
 agent-ctrl screenshot result.png                 # to a specific path
 agent-ctrl screenshot --region X,Y,W,H           # crop in physical screen pixels
+agent-ctrl screenshot --target desktop           # virtual desktop
+agent-ctrl screenshot --target window            # pinned window
+agent-ctrl screenshot --target ref --ref @eN     # element bounds
+agent-ctrl screenshot --annotated                # draw @eN labels from cached snapshot bounds
 ```
+
+`--annotated` draws cached snapshot refs onto the PNG. Run `snapshot` first so the screenshot has a current ref map and bounds.
+
+### Batch
+
+```bash
+agent-ctrl batch --file steps.json
+Get-Content steps.json | agent-ctrl batch --stdin      # PowerShell-friendly
+agent-ctrl batch '[{"op":"find","query":{"name":"Save","limit":1}}]'  # Unix-shell-friendly
+```
+
+Batch steps run in order on one daemon session and return structured per-step results. Supported step ops: `act`, `find`, `get`, `is`, `wait`, and `list_windows`.
+
+### JSON mode
+
+```bash
+agent-ctrl list --json
+agent-ctrl find "Save" --role button --json
+agent-ctrl get state @eN --json
+agent-ctrl is enabled @eN --json
+agent-ctrl click @eN --json
+agent-ctrl wait-for --stable --json
+agent-ctrl window-list --json
+agent-ctrl screenshot out.png --json
+```
+
+Most runtime commands accept `--json` for machine-readable output. `snapshot --json` returns the full snapshot; `get --json`, `is --json`, action commands, `wait-for --json`, and `window-list --json` return structured protocol results. `batch` output is always JSON, so `batch --json` is accepted as a compatibility no-op.
+
+Session commands redact the TCP auth token from JSON output. `screenshot --json` writes the PNG to disk and prints file metadata (`path`, `width`, `height`, `bytes`, `annotated`) instead of echoing the base64 image payload.
+
+When `--json` is present, parse and runtime failures are emitted as one structured object with `ok: false`, `error.code`, `error.message`, and, when available, `error.hint`. Exit codes still matter: 0 means success, 1 means command/request failure, and `wait-for --json` keeps exit 2 for timeouts while printing the structured wait outcome.
 
 ## Sessions
 
@@ -167,8 +249,8 @@ Run multiple isolated UIA sessions side by side:
 agent-ctrl open uia --session app1
 agent-ctrl open uia --session app2
 
-agent-ctrl snapshot --session app1 --target-process Notepad
-agent-ctrl snapshot --session app2 --target-process Calc
+agent-ctrl snapshot --session app1 --target-process <process-a>
+agent-ctrl snapshot --session app2 --target-process <process-b>
 
 agent-ctrl list
 # SESSION         SURFACE   PID         ENDPOINT
@@ -179,7 +261,7 @@ agent-ctrl close --session app1
 agent-ctrl close --session app2
 ```
 
-The default session is `default`, so most commands need no flag. Each session has its own daemon process, pinned target window, cached snapshot, and refs. Session metadata lives at `~/.agent-ctrl/<name>.json` while the daemon is running.
+The default session is `default`, so most commands need no flag. Each session has its own daemon process, pinned target window, cached snapshot, and refs. Session metadata lives at `~/.agent-ctrl/<name>.json` while the daemon is running. TCP session files include a random per-session auth token, and every CLI TCP request sends it automatically. Stdio daemon clients, including the TypeScript client, do not need a token.
 
 ## Mock surface
 
@@ -203,7 +285,7 @@ const ctrl = new AgentCtrl();              // spawns `agent-ctrl daemon` over st
 const session = await ctrl.openSession("uia");
 
 await ctrl.snapshot(session, {
-  target: { by: "process-name", name: "Notepad" },
+  target: { by: "process-name", name: "target-app" },
 });
 
 const matches = await ctrl.find(session, {
@@ -233,7 +315,7 @@ agent-ctrl uses a client-daemon architecture mirroring agent-browser:
 
 1. **Rust CLI** (`crates/cli`) - parses commands, dials the daemon, prints results.
 2. **Rust daemon** (`crates/daemon`) - long-running process that owns surface sessions and dispatches snapshot / action / find / wait / list-windows requests.
-3. **Surface trait** (`crates/core`) - cross-platform contract every backend implements. Per-platform crates (`crates/surface-uia`, `surface-ax`, `surface-cdp`) provide the implementations, gated by `target_os`.
+3. **Surface trait** (`crates/core`) - cross-platform contract every backend implements. Per-platform crates (`crates/surface-uia`, `surface-ax`) provide the implementations, gated by `target_os`.
 
 The daemon starts via `agent-ctrl open <surface>` and persists across CLI invocations for fast subsequent operations. Each session has its own daemon process and writes a discovery file at `~/.agent-ctrl/<session>.json`.
 
@@ -247,7 +329,7 @@ The repository is a **dual workspace** - a Cargo workspace for the Rust engine a
 | [`crates/daemon`](crates/daemon) | Long-running process that owns surface sessions and dispatches actions. |
 | [`crates/cli`](crates/cli) | The `agent-ctrl` binary - user-facing entrypoint. |
 | [`crates/surface-uia`](crates/surface-uia) | Windows UI Automation surface (Windows-only). |
-| [`crates/surface-cdp`](crates/surface-cdp) | Chromium-via-CDP surface (scaffolded; cross-platform). |
+| [`crates/uia-fixture`](crates/uia-fixture) | Deterministic native Win32 fixture app for UIA reliability tests. |
 | [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (scaffolded; macOS-only). |
 | [`packages/client`](packages/client) | `@agent-ctrl/client` - typed TypeScript wrapper over stdio JSON-RPC. |
 
@@ -255,17 +337,19 @@ Surfaces gated by `target_os` compile to empty crates on other platforms, so the
 
 ## Platforms
 
-A **surface** is one accessibility protocol - UIA, AX, CDP, etc. A **platform** is an operating system. They aren't 1-to-1: most platforms can be driven by more than one surface, and CDP spans every OS Chrome runs on.
+A **surface** is one accessibility protocol - UIA, AX, AT-SPI, etc. A **platform** is an operating system. They aren't 1-to-1: most platforms can be driven by more than one surface.
 
-| Platform | Native surface | Browser surface | Status |
-|---|---|---|---|
-| Windows | [`surface-uia`](crates/surface-uia) - UI Automation | [`surface-cdp`](crates/surface-cdp) - Chrome / Edge via CDP | **uia: ready** · cdp: scaffolded |
-| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | [`surface-cdp`](crates/surface-cdp) - Chrome via CDP | both scaffolded |
-| Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | [`surface-cdp`](crates/surface-cdp) - Chrome via CDP | cdp scaffolded |
-| Android | _planned_ `surface-accessibility-service` (JNI) | [`surface-cdp`](crates/surface-cdp) - Chrome via CDP | cdp scaffolded |
-| iOS | _planned_ `surface-xcuitest` (WebDriverAgent) | [`surface-cdp`](crates/surface-cdp) - limited | cdp scaffolded |
+| Platform | Native surface | Status |
+|---|---|---|
+| Windows | [`surface-uia`](crates/surface-uia) - UI Automation | **ready** |
+| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | scaffolded |
+| Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | not started |
+| Android | _planned_ `surface-accessibility-service` (JNI) | not started |
+| iOS | _planned_ `surface-xcuitest` (WebDriverAgent) | not started |
 
-Acronyms in one line: **UIA** = Microsoft UI Automation, **AX** = macOS Accessibility, **AT-SPI** = the Linux GNOME accessibility bus, **CDP** = Chrome DevTools Protocol, **XCUITest** = Apple's UI test framework.
+For browsers, run agent-ctrl alongside [agent-browser](https://github.com/vercel-labs/agent-browser); the two are complementary, not competing.
+
+Acronyms in one line: **UIA** = Microsoft UI Automation, **AX** = macOS Accessibility, **AT-SPI** = the Linux GNOME accessibility bus, **XCUITest** = Apple's UI test framework.
 
 ## Build
 
@@ -276,6 +360,27 @@ cargo test --workspace                           # all unit + integration tests
 cargo clippy --workspace --all-targets -- -D warnings   # lint, fail on warnings
 cargo fmt --all -- --check                       # format check
 ```
+
+Windows UIA fixture:
+
+```powershell
+cargo build -p agent-ctrl-cli -p agent-ctrl-uia-fixture
+.\target\debug\agent-ctrl-uia-fixture.exe --ready-file "$env:TEMP\agent-ctrl-fixture.ready"
+.\target\debug\agent-ctrl.exe open uia --session fixture
+.\target\debug\agent-ctrl.exe snapshot --session fixture --target-process agent-ctrl-uia-fixture
+```
+
+The fixture is the preferred real-UIA test target. It exposes common native controls through stable Win32/UIA patterns so tests do not depend on Notepad, Calculator, localized strings, or Windows-version-specific app redesigns.
+
+Opt-in fixture integration test:
+
+```powershell
+cargo build -p agent-ctrl-uia-fixture
+$env:RUN_UIA_TESTS = "1"
+cargo test -p agent-ctrl-cli --test windows_uia_fixture
+```
+
+Successful UIA actions may print a method diagnostic such as `ok method=keyboard-space`, `ok method=selection-item-pattern`, or `ok method=toggle-pattern`. These are intended for agents and humans debugging cross-app behavior.
 
 TypeScript client:
 
@@ -320,14 +425,18 @@ Use `agent-ctrl` for native UI automation on Windows. Core workflow:
 
 ### Example flow
 
-A complete "open Notepad, type something, save it" walkthrough is in [examples/notepad-tour.sh](examples/notepad-tour.sh).
+The recommended pattern is app-agnostic: launch or focus the target, snapshot by
+process/window, find by role/name, act, wait for stability, and re-snapshot after
+the tree changes. A concrete Notepad walkthrough is available in
+[examples/notepad-tour.sh](examples/notepad-tour.sh), but production agents should
+prefer the generic loop above over app-specific assumptions.
 
 ## Known limitations
 
 These are real today - the goal is to fix or document them as the project matures.
 
-- **Windows is the only ready surface.** Other surfaces are scaffolded - they compile but their methods return `Unsupported`. macOS / Linux / Android / iOS / browser flows don't work yet.
-- **Local TCP daemon has no authentication.** Anyone with shell access on the host can dial `127.0.0.1:<port>` (read from `~/.agent-ctrl/<session>.json`) and drive your apps. Treat sessions as a developer-machine convenience, not a security boundary. A token check on every wire frame is on the v0.x list.
+- **Windows is the only ready surface.** AX is scaffolded on macOS and returns `Unsupported`; Linux / Android / iOS / browser flows are not implemented in this project yet.
+- **Local TCP daemon auth is developer-machine scoped.** TCP session files include a random bearer token and the daemon rejects missing or incorrect tokens, but anyone who can read `~/.agent-ctrl/<session>.json` can still use that session. Treat sessions as a local developer-machine boundary, not a multi-user security sandbox.
 - **Refs are valid only against the snapshot that produced them.** If `wait-for` runs in parallel with another command on the same session (across two shells), the wait loop refreshes the cached refs on each poll, and a previously-issued ref may resolve to a different element. Sequential CLI usage in one shell - the realistic flow - doesn't trip this.
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.
 - **`type` bypasses IME.** Synthetic Unicode keystrokes via `SendInput` are reliable for ASCII; CJK with IME composition is not supported yet. `fill` (UIA `ValuePattern`) is the right escape hatch for non-ASCII text input.

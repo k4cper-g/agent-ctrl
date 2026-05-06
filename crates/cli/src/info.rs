@@ -18,7 +18,6 @@ const ALL_SURFACES: &[SurfaceKind] = &[
     SurfaceKind::Mock,
     SurfaceKind::Uia,
     SurfaceKind::Ax,
-    SurfaceKind::Cdp,
     SurfaceKind::Android,
     SurfaceKind::Ios,
 ];
@@ -76,15 +75,9 @@ fn build_report() -> InfoReport {
 /// Returned by `info` so an agent can `agent-ctrl open <recommended>`
 /// without a per-OS lookup table on its own side.
 fn recommended_surface() -> SurfaceKind {
-    // Pick the first surface whose status is `Ready` on this OS, in a
-    // priority order that prefers the native a11y stack over the browser
-    // stack. Falls back to mock so callers always get something working.
-    let priority = [
-        SurfaceKind::Uia,
-        SurfaceKind::Ax,
-        SurfaceKind::Cdp,
-        SurfaceKind::Mock,
-    ];
+    // Pick the first native a11y surface whose status is `Ready` on this
+    // OS. Falls back to mock so callers always get something working.
+    let priority = [SurfaceKind::Uia, SurfaceKind::Ax, SurfaceKind::Mock];
     priority
         .into_iter()
         .find(|k| surface_status(*k) == SurfaceStatus::Ready)
@@ -122,7 +115,6 @@ mod tests {
         assert!(kinds.contains(&"mock"));
         assert!(kinds.contains(&"uia"));
         assert!(kinds.contains(&"ax"));
-        assert!(kinds.contains(&"cdp"));
         assert!(kinds.contains(&"android"));
         assert!(kinds.contains(&"ios"));
     }

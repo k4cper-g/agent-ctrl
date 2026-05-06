@@ -49,8 +49,10 @@ impl UiaSurface {
             Ok(Self {
                 capabilities: CapabilitySet::new()
                     .with("snapshot")
+                    .with("screenshot")
                     .with("keyboard")
                     .with("mouse")
+                    .with("drag")
                     .with("multi_app"),
                 inner,
             })

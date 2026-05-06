@@ -1,8 +1,5 @@
 //! `agent-ctrl` CLI entrypoint.
 
-#![forbid(unsafe_code)]
-
-use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -19,10 +16,31 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     init_tracing();
-    let cli = Cli::parse();
-    cli.command.run().await
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if args_request_json() {
+                commands::print_parse_error_json(&error);
+                std::process::exit(error.exit_code());
+            }
+            error.exit();
+        }
+    };
+    let json_errors = cli.command.wants_json_output();
+    if let Err(error) = cli.command.run().await {
+        if json_errors {
+            commands::print_error_json(&error);
+        } else {
+            eprintln!("Error: {error:#}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn args_request_json() -> bool {
+    std::env::args_os().any(|arg| arg == "--json")
 }
 
 fn init_tracing() {

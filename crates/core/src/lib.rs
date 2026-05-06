@@ -25,6 +25,7 @@
 
 pub mod action;
 pub mod error;
+pub mod inspect;
 pub mod node;
 pub mod role;
 pub mod snapshot;
@@ -34,8 +35,11 @@ pub mod wait;
 #[cfg(feature = "mock")]
 pub mod mock;
 
-pub use action::{Action, ActionResult, Region};
+pub use action::{
+    Action, ActionResult, ClipboardOp, MouseButton, MouseOp, Region, ScreenshotTarget,
+};
 pub use error::{Error, Result};
+pub use inspect::{GetField, GetResult, IsResult, StateField};
 pub use node::{AppContext, Bounds, Checked, NativeHandle, Node, RefId, State, WindowContext};
 pub use role::Role;
 pub use snapshot::{

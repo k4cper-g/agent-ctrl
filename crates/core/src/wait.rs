@@ -23,6 +23,7 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
+use crate::inspect::StateField;
 use crate::node::{Checked, Node};
 use crate::snapshot::{FindMatch, FindQuery, Snapshot};
 
@@ -53,6 +54,39 @@ pub enum WaitPredicate {
     Stable {
         /// Minimum quiet period that counts as "settled."
         idle_ms: u64,
+    },
+    /// Wait for the first matching node to have a boolean state.
+    State {
+        /// Filters describing the node to wait for.
+        query: FindQuery,
+        /// State to check.
+        field: StateField,
+        /// Desired value.
+        value: bool,
+    },
+    /// Wait for matching node text to contain a substring.
+    TextContains {
+        /// Filters describing the node to wait for.
+        query: FindQuery,
+        /// Substring to find in `value` or `name`.
+        text: String,
+    },
+    /// Wait for matching node value to contain a substring.
+    ValueContains {
+        /// Filters describing the node to wait for.
+        query: FindQuery,
+        /// Substring to find in `value`.
+        value: String,
+    },
+    /// Wait for a top-level window title to appear.
+    WindowAppears {
+        /// Case-insensitive title substring.
+        title: String,
+    },
+    /// Wait for a top-level window title to be absent.
+    WindowGone {
+        /// Case-insensitive title substring.
+        title: String,
     },
 }
 

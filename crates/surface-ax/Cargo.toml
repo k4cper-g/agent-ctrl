@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "macOS Accessibility (AX) surface for agent-ctrl."
+publish = false
 
 [dependencies]
 agent-ctrl-core.workspace = true

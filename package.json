@@ -3,6 +3,14 @@
   "private": true,
   "description": "Top-level workspace for the agent-ctrl TypeScript packages.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/k4cper-g/agent-ctrl.git"
+  },
+  "homepage": "https://github.com/k4cper-g/agent-ctrl#readme",
+  "bugs": {
+    "url": "https://github.com/k4cper-g/agent-ctrl/issues"
+  },
   "workspaces": [
     "packages/*"
   ],

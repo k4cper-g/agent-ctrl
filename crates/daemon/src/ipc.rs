@@ -36,7 +36,7 @@ pub async fn run_stdio(state: &DaemonState) -> std::io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let bytes = handle_line(state, &line, &dummy_shutdown).await;
+        let bytes = handle_line(state, &line, &dummy_shutdown, None).await;
         stdout.write_all(&bytes).await?;
         stdout.write_all(b"\n").await?;
         stdout.flush().await?;
@@ -54,7 +54,12 @@ pub async fn run_stdio(state: &DaemonState) -> std::io::Result<()> {
 /// Each connection is handled on its own task so multiple CLI invocations
 /// can talk to the daemon concurrently. Errors on individual connections
 /// are logged but don't tear the listener down.
-pub async fn run_tcp<F, Fut>(state: Arc<DaemonState>, bind: &str, bound: F) -> std::io::Result<()>
+pub async fn run_tcp<F, Fut>(
+    state: Arc<DaemonState>,
+    bind: &str,
+    auth_token: String,
+    bound: F,
+) -> std::io::Result<()>
 where
     F: FnOnce(std::net::SocketAddr) -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -85,8 +90,9 @@ where
                 };
                 let state = Arc::clone(&state);
                 let shutdown = Arc::clone(&shutdown);
+                let auth_token = auth_token.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_connection(state, stream, shutdown).await {
+                    if let Err(e) = serve_connection(state, stream, shutdown, Some(auth_token)).await {
                         tracing::warn!("connection from {peer} ended: {e}");
                     }
                 });
@@ -102,6 +108,7 @@ async fn serve_connection(
     state: Arc<DaemonState>,
     stream: TcpStream,
     shutdown: Arc<Notify>,
+    expected_auth: Option<String>,
 ) -> std::io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -110,7 +117,7 @@ async fn serve_connection(
         if line.trim().is_empty() {
             continue;
         }
-        let bytes = handle_line(&state, &line, &shutdown).await;
+        let bytes = handle_line(&state, &line, &shutdown, expected_auth.as_deref()).await;
         write_half.write_all(&bytes).await?;
         write_half.write_all(b"\n").await?;
         write_half.flush().await?;
@@ -125,9 +132,19 @@ async fn serve_connection(
 /// `shutdown` fires when the request was a `Shutdown` op; the TCP accept
 /// loop wakes on this and exits. Stdio passes a Notify nobody is waiting
 /// on, since stdin closing is its existing exit signal.
-async fn handle_line(state: &DaemonState, line: &str, shutdown: &Notify) -> Vec<u8> {
+async fn handle_line(
+    state: &DaemonState,
+    line: &str,
+    shutdown: &Notify,
+    expected_auth: Option<&str>,
+) -> Vec<u8> {
     let response = match serde_json::from_str::<Request>(line) {
         Ok(req) => {
+            if let Some(expected) = expected_auth {
+                if req.auth.as_deref() != Some(expected) {
+                    return serialize_response(&Response::error(&req.id, "authentication failed"));
+                }
+            }
             let is_shutdown = matches!(req.op, RequestOp::Shutdown);
             let resp = dispatcher::dispatch(state, req).await;
             if is_shutdown {
@@ -145,7 +162,11 @@ async fn handle_line(state: &DaemonState, line: &str, shutdown: &Notify) -> Vec<
             Response::error(&id, format!("invalid request: {e}"))
         }
     };
-    match serde_json::to_vec(&response) {
+    serialize_response(&response)
+}
+
+fn serialize_response(response: &Response) -> Vec<u8> {
+    match serde_json::to_vec(response) {
         Ok(b) => b,
         Err(e) => {
             // Build the fallback through serde_json::json! so the error
@@ -170,4 +191,78 @@ async fn handle_line(state: &DaemonState, line: &str, shutdown: &Notify) -> Vec<
 struct IdProbe {
     #[serde(default)]
     id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use agent_ctrl_core::SurfaceKind;
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn tcp_auth_rejects_missing_token() {
+        let state = DaemonState::new();
+        let shutdown = Notify::new();
+        let line = serde_json::to_string(&Request {
+            id: "auth-missing".into(),
+            auth: None,
+            op: RequestOp::OpenSession {
+                surface: SurfaceKind::Mock,
+            },
+        })
+        .unwrap();
+
+        let bytes = handle_line(&state, &line, &shutdown, Some("secret")).await;
+        let response: Response = serde_json::from_slice(&bytes).unwrap();
+        assert!(matches!(
+            response.body,
+            crate::dispatcher::ResponseBody::Error { ref message }
+                if message == "authentication failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn tcp_auth_accepts_matching_token() {
+        let state = DaemonState::new();
+        let shutdown = Notify::new();
+        let line = serde_json::to_string(&Request {
+            id: "auth-ok".into(),
+            auth: Some("secret".into()),
+            op: RequestOp::OpenSession {
+                surface: SurfaceKind::Mock,
+            },
+        })
+        .unwrap();
+
+        let bytes = handle_line(&state, &line, &shutdown, Some("secret")).await;
+        let response: Response = serde_json::from_slice(&bytes).unwrap();
+        assert!(matches!(
+            response.body,
+            crate::dispatcher::ResponseBody::SessionOpened { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_exempts_auth() {
+        let state = DaemonState::new();
+        let shutdown = Notify::new();
+        let line = serde_json::to_string(&Request {
+            id: "stdio-ok".into(),
+            auth: None,
+            op: RequestOp::OpenSession {
+                surface: SurfaceKind::Mock,
+            },
+        })
+        .unwrap();
+
+        let bytes = handle_line(&state, &line, &shutdown, None).await;
+        let response: Response = serde_json::from_slice(&bytes).unwrap();
+        assert!(matches!(
+            response.body,
+            crate::dispatcher::ResponseBody::SessionOpened { .. }
+        ));
+    }
 }

@@ -48,3 +48,53 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
       - run: cargo test --workspace
+
+  ts:
+    name: TypeScript client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run build --workspace=@agent-ctrl/client
+      - run: npm run test --workspace=@agent-ctrl/client
+
+  windows-smoke:
+    name: Windows smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: cargo build -q -p agent-ctrl-cli -p agent-ctrl-uia-fixture
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $env:AGENT_CTRL_HOME = Join-Path $env:RUNNER_TEMP "agent-ctrl-mock-home"
+          New-Item -ItemType Directory -Force -Path $env:AGENT_CTRL_HOME | Out-Null
+          .\target\debug\agent-ctrl.exe info
+          .\target\debug\agent-ctrl.exe open mock --session mock
+          .\target\debug\agent-ctrl.exe snapshot --session mock
+          .\target\debug\agent-ctrl.exe get name @e0 --session mock
+          .\target\debug\agent-ctrl.exe is enabled @e0 --session mock
+          Set-Content -Path batch.json -Encoding utf8 -Value '[{"op":"find","query":{"limit":1}}]'
+          .\target\debug\agent-ctrl.exe batch --file batch.json --session mock
+          .\target\debug\agent-ctrl.exe close --session mock
+      - run: cargo test -q -p agent-ctrl-cli --test windows_uia_fixture
+        env:
+          RUN_UIA_TESTS: "1"
+        if: runner.os == 'Windows'
+      - run: .\target\debug\agent-ctrl.exe close --session mock
+        if: always()
+        continue-on-error: true

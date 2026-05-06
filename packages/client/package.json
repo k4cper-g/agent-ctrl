@@ -3,6 +3,22 @@
   "version": "0.1.0",
   "description": "TypeScript client for the agent-ctrl daemon.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/k4cper-g/agent-ctrl.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/k4cper-g/agent-ctrl/tree/main/packages/client#readme",
+  "bugs": {
+    "url": "https://github.com/k4cper-g/agent-ctrl/issues"
+  },
+  "keywords": [
+    "agent",
+    "automation",
+    "accessibility",
+    "uia",
+    "windows"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

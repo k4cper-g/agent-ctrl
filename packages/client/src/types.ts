@@ -14,7 +14,7 @@ export type RefId = string;
 
 // ---------- Surface ----------
 
-export type SurfaceKind = "cdp" | "uia" | "ax" | "android" | "ios" | "mock";
+export type SurfaceKind = "uia" | "ax" | "android" | "ios" | "mock";
 
 // ---------- Roles ----------
 
@@ -28,6 +28,13 @@ export type Role = string | { unknown: string };
 // ---------- Geometry ----------
 
 export interface Bounds {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface Region {
   x: number;
   y: number;
   w: number;
@@ -48,7 +55,6 @@ export interface NodeState {
 
 /** Platform-specific element handle, kept opaque to client code. */
 export type NativeHandle =
-  | { platform: "cdp"; backend_node_id: number }
   | { platform: "uia"; runtime_id: number[]; automation_id?: string }
   | { platform: "ax"; element_ref: number }
   | { platform: "android"; window_id: number; virtual_view_id: number; resource_id?: string }
@@ -144,11 +150,38 @@ export type Action =
   | { kind: "drag"; from: RefId; to: RefId }
   | { kind: "select"; ref_id: RefId; value: string }
   | { kind: "select_all"; ref_id?: RefId }
+  | { kind: "check"; ref_id: RefId }
+  | { kind: "uncheck"; ref_id: RefId }
+  | { kind: "toggle"; ref_id: RefId }
+  | { kind: "clear"; ref_id: RefId }
+  | { kind: "clipboard"; op: ClipboardOp }
+  | { kind: "mouse"; op: MouseOp }
+  | { kind: "highlight"; ref_id: RefId; duration_ms?: number }
   | { kind: "scroll_into_view"; ref_id: RefId }
   | { kind: "wait"; ms: number }
   | { kind: "switch_app"; app_id: string }
   | { kind: "focus_window"; window_id: string }
-  | { kind: "screenshot"; region?: { x: number; y: number; w: number; h: number } };
+  | { kind: "screenshot"; region?: Region; target?: ScreenshotTarget; annotated?: boolean };
+
+export type ClipboardOp =
+  | { op: "read" }
+  | { op: "write"; text: string }
+  | { op: "copy" }
+  | { op: "paste" };
+
+export type MouseButton = "left" | "right" | "middle";
+
+export type MouseOp =
+  | { op: "move"; x: number; y: number }
+  | { op: "down"; x: number; y: number; button: MouseButton }
+  | { op: "up"; x: number; y: number; button: MouseButton }
+  | { op: "wheel"; x: number; y: number; dx: number; dy: number };
+
+export type ScreenshotTarget =
+  | { kind: "window" }
+  | { kind: "desktop" }
+  | { kind: "region"; region: Region }
+  | { kind: "ref"; ref_id: RefId };
 
 export interface ActionResult {
   ok: boolean;
@@ -195,6 +228,23 @@ export interface FindMatch {
   name: string;
 }
 
+// ---------- Inspect ----------
+
+export type GetField = "text" | "value" | "name" | "role" | "state" | "bounds" | "window";
+export type StateField = "visible" | "enabled" | "focused" | "selected" | "checked" | "expanded";
+
+export interface GetResult {
+  field: GetField;
+  ref_id?: RefId;
+  value: unknown;
+}
+
+export interface IsResult {
+  field: StateField;
+  ref_id: RefId;
+  value: boolean;
+}
+
 // ---------- Wait-for ----------
 
 /**
@@ -211,7 +261,12 @@ export interface FindMatch {
 export type WaitPredicate =
   | { kind: "appears"; query: FindQuery }
   | { kind: "gone"; query: FindQuery }
-  | { kind: "stable"; idle_ms: number };
+  | { kind: "stable"; idle_ms: number }
+  | { kind: "state"; query: FindQuery; field: StateField; value: boolean }
+  | { kind: "text-contains"; query: FindQuery; text: string }
+  | { kind: "value-contains"; query: FindQuery; value: string }
+  | { kind: "window-appears"; title: string }
+  | { kind: "window-gone"; title: string };
 
 /** Options for one `wait-for` invocation. */
 export interface WaitOptions {
@@ -247,6 +302,23 @@ export interface WindowInfo {
   pinned: boolean;
 }
 
+// ---------- Batch ----------
+
+export type BatchStep =
+  | { op: "act"; action: Action }
+  | { op: "find"; query: FindQuery }
+  | { op: "get"; ref_id?: RefId; field: GetField }
+  | { op: "is"; ref_id: RefId; field: StateField }
+  | { op: "wait"; opts: WaitOptions }
+  | { op: "list_windows" };
+
+export interface BatchStepOutcome {
+  index: number;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
 // ---------- Wire envelope ----------
 
 export type RequestOp =
@@ -254,19 +326,31 @@ export type RequestOp =
   | { op: "snapshot"; session: SessionId; opts?: SnapshotOptions }
   | { op: "act"; session: SessionId; action: Action }
   | { op: "find"; session: SessionId; query: FindQuery }
+  | { op: "get"; session: SessionId; ref_id?: RefId; field: GetField }
+  | { op: "is"; session: SessionId; ref_id: RefId; field: StateField }
   | { op: "wait"; session: SessionId; opts: WaitOptions }
   | { op: "list_windows"; session: SessionId }
-  | { op: "close_session"; session: SessionId };
+  | { op: "close_session"; session: SessionId }
+  | { op: "batch"; session: SessionId; steps: BatchStep[]; bail?: boolean };
 
-export type Request = { id: string } & RequestOp;
+export type Request = { id: string; auth?: string } & RequestOp;
 
 export type Response = { id: string } & (
-  | { result: "session_opened"; session: SessionId }
+  | {
+      result: "session_opened";
+      session: SessionId;
+      protocol_version?: number;
+      surface?: SurfaceKind;
+      capabilities?: string[];
+    }
   | { result: "snapshot"; snapshot: Snapshot }
   | { result: "action_done"; outcome: ActionResult }
   | { result: "find_results"; matches: FindMatch[] }
+  | { result: "get_done"; output: GetResult }
+  | { result: "is_done"; output: IsResult }
   | { result: "wait_done"; outcome: WaitOutcome }
   | { result: "windows"; windows: WindowInfo[] }
+  | { result: "batch_done"; outcomes: BatchStepOutcome[] }
   | { result: "closed" }
   | { result: "error"; message: string }
 );

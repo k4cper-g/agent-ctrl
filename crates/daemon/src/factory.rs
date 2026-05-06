@@ -74,9 +74,6 @@ pub fn surface_status(kind: SurfaceKind) -> SurfaceStatus {
             }
         }
 
-        // CDP is cross-platform but currently a stub on every OS.
-        SurfaceKind::Cdp => SurfaceStatus::Stub,
-
         SurfaceKind::Android | SurfaceKind::Ios => SurfaceStatus::NotImplemented,
     }
 }
@@ -89,10 +86,6 @@ pub fn surface_status(kind: SurfaceKind) -> SurfaceStatus {
 pub async fn open_surface(kind: SurfaceKind) -> Result<Box<dyn Surface>> {
     match kind {
         SurfaceKind::Mock => Ok(Box::new(MockSurface::new())),
-
-        SurfaceKind::Cdp => Err(Error::Surface(
-            "CDP surface requires a WebSocket URL; not yet wired into open_session".into(),
-        )),
 
         #[cfg(target_os = "windows")]
         SurfaceKind::Uia => {

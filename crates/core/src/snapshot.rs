@@ -141,6 +141,12 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Return the node carrying `ref_id`, if present in this snapshot.
+    #[must_use]
+    pub fn node_by_ref(&self, ref_id: &RefId) -> Option<&Node> {
+        find_subtree(&self.root, ref_id)
+    }
+
     /// Search this snapshot's tree for nodes matching `query`.
     ///
     /// Returns matches in tree order (pre-order DFS). Only nodes that carry a

@@ -11,14 +11,21 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import type {
   Action,
   ActionResult,
+  BatchStep,
+  BatchStepOutcome,
   FindMatch,
   FindQuery,
+  GetField,
+  GetResult,
+  IsResult,
   Request,
   RequestOp,
   Response,
+  RefId,
   SessionId,
   Snapshot,
   SnapshotOptions,
+  StateField,
   SurfaceKind,
   WaitOptions,
   WaitOutcome,
@@ -138,6 +145,20 @@ export class AgentCtrl {
     throw asError("find", r);
   }
 
+  /** Read one field from a ref in the session's most recent snapshot. */
+  async get(session: SessionId, field: GetField, refId?: RefId): Promise<GetResult> {
+    const r = await this.send({ op: "get", session, field, ref_id: refId });
+    if (r.result === "get_done") return r.output;
+    throw asError("get", r);
+  }
+
+  /** Check one boolean state on a ref in the session's most recent snapshot. */
+  async is(session: SessionId, refId: RefId, field: StateField): Promise<IsResult> {
+    const r = await this.send({ op: "is", session, ref_id: refId, field });
+    if (r.result === "is_done") return r.output;
+    throw asError("is", r);
+  }
+
   /**
    * Block until a UI predicate is satisfied or the timeout fires.
    *
@@ -168,6 +189,17 @@ export class AgentCtrl {
     const r = await this.send({ op: "list_windows", session });
     if (r.result === "windows") return r.windows;
     throw asError("list_windows", r);
+  }
+
+  /** Execute multiple operations in order on the daemon. */
+  async batch(
+    session: SessionId,
+    steps: BatchStep[],
+    { bail = false }: { bail?: boolean } = {},
+  ): Promise<BatchStepOutcome[]> {
+    const r = await this.send({ op: "batch", session, steps, bail });
+    if (r.result === "batch_done") return r.outcomes;
+    throw asError("batch", r);
   }
 
   /** Close one session without shutting down the daemon. */

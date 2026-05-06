@@ -50,11 +50,13 @@ pub struct WindowInfo {
 }
 
 /// Identifier for a concrete [`Surface`] implementation.
+///
+/// agent-ctrl is intentionally scoped to native UI surfaces. Browsers are
+/// covered by the sibling agent-browser project, so there is no CDP variant
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SurfaceKind {
-    /// Chromium via Chrome DevTools Protocol.
-    Cdp,
     /// Windows UI Automation.
     Uia,
     /// macOS Accessibility (AX).
@@ -73,7 +75,6 @@ impl SurfaceKind {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Cdp => "cdp",
             Self::Uia => "uia",
             Self::Ax => "ax",
             Self::Android => "android",
@@ -94,8 +95,6 @@ impl SurfaceKind {
 /// - `"mouse"` - synthetic pointer input
 /// - `"drag"` - pointer drag gestures
 /// - `"multi_app"` - can list and switch among multiple apps
-/// - `"network_intercept"` - CDP-only
-/// - `"trace"` - CDP-only profiling
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitySet {
     features: HashSet<String>,
@@ -154,13 +153,13 @@ pub trait Surface: Send + Sync {
     ///
     /// Implementations should return windows that share an "app" with the
     /// session's currently pinned target - typically all windows owned by
-    /// the same OS process (UIA), all `AXWindow`s of the same
-    /// `AXApplication` (macOS), or all tabs of the same browser context
-    /// (CDP). The pinned window is included with `pinned: true`.
+    /// the same OS process (UIA) or all `AXWindow`s of the same
+    /// `AXApplication` (macOS). The pinned window is included with
+    /// `pinned: true`.
     ///
     /// The default implementation returns [`Error::Unsupported`] so
-    /// scaffold surfaces (CDP, AX, Android, iOS) compile without having
-    /// to provide a stub.
+    /// scaffold surfaces (AX, Android, iOS) compile without having to
+    /// provide a stub.
     async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
         Err(Error::Unsupported {
             surface: self.kind().as_str().into(),

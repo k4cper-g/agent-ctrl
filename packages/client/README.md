@@ -28,7 +28,15 @@ try {
   const [firstRef] = Object.keys(snap.refs.entries);
   if (firstRef) {
     await ctrl.act(session, { kind: "click", ref_id: firstRef });
+    await ctrl.waitFor(session, {
+      predicate: { kind: "stable", idle_ms: 250 },
+      timeout_ms: 5_000,
+      poll_ms: 250,
+    });
   }
+
+  const name = firstRef ? await ctrl.get(session, "name", firstRef) : null;
+  console.log(name?.value);
 
   await ctrl.closeSession(session);
 } finally {
@@ -51,8 +59,22 @@ new AgentCtrl({
 
 ## Status
 
-`v0.1` - paired with the daemon's mock surface for protocol validation.
-Real surfaces (UIA, AX, CDP) land in subsequent versions.
+`v0.1` - paired with the daemon's mock surface for protocol validation and
+the Windows UIA surface for real native-app automation. AX is present as a
+scaffold; Linux, Android, and iOS are not implemented yet.
+
+## API Notes
+
+The client uses stdio daemon transport, so TCP session auth tokens are not
+needed. The shell CLI uses TCP session files and sends the per-session token
+automatically.
+
+Main methods: `openSession`, `snapshot`, `act`, `find`, `get`, `is`,
+`waitFor`, `listWindows`, `batch`, `closeSession`, and `close`.
+
+Windows action types include check state actions, clipboard operations, raw
+mouse events, screenshot targets, and highlight requests. See
+[`src/types.ts`](src/types.ts) for the exact wire shapes.
 
 The TypeScript wire types in [`src/types.ts`](src/types.ts) are hand-maintained.
 A future commit will generate them from the Rust source via `ts-rs`.

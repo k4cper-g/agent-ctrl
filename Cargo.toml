@@ -4,9 +4,9 @@ members = [
     "crates/core",
     "crates/daemon",
     "crates/cli",
-    "crates/surface-cdp",
     "crates/surface-uia",
     "crates/surface-ax",
+    "crates/uia-fixture",
 ]
 
 [workspace.package]
@@ -22,7 +22,6 @@ description = "Cross-platform computer-use framework for AI agents."
 [workspace.dependencies]
 agent-ctrl-core = { path = "crates/core", version = "0.1.0" }
 agent-ctrl-daemon = { path = "crates/daemon", version = "0.1.0" }
-agent-ctrl-surface-cdp = { path = "crates/surface-cdp", version = "0.1.0" }
 agent-ctrl-surface-uia = { path = "crates/surface-uia", version = "0.1.0" }
 agent-ctrl-surface-ax = { path = "crates/surface-ax", version = "0.1.0" }
 
@@ -56,7 +55,7 @@ todo = "allow"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-# `doc_markdown` is noisy on product names (UIA, CDP, XCUITest, etc.) and
+# `doc_markdown` is noisy on product names (UIA, XCUITest, etc.) and
 # adds no real value. Code identifiers still get backticked manually.
 doc_markdown = "allow"
 

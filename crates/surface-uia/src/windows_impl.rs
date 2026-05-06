@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime};
 use windows::core::Result as WinResult;
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::LPARAM;
-use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HGLOBAL, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
     GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -33,9 +33,13 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     SAFEARRAY,
 };
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
-    SafeArrayUnaccessData,
+    SafeArrayUnaccessData, CF_UNICODETEXT,
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
@@ -70,22 +74,24 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY,
-    VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PAUSE, VK_PRIOR, VK_RETURN,
-    VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CAPITAL, VK_CONTROL,
+    VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT,
+    VK_NUMLOCK, VK_PAUSE, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SCROLL, VK_SHIFT, VK_SNAPSHOT,
+    VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+    SetForegroundWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
 };
 
 use agent_ctrl_core::{
-    Action, ActionResult, AppContext, Bounds, Checked, Error, NativeHandle, Node, RefEntry, RefId,
-    RefMap, Region, Result, Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext,
-    WindowInfo, WindowTarget,
+    Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error, MouseButton, MouseOp,
+    NativeHandle, Node, RefEntry, RefId, RefMap, Region, Result, Role, ScreenshotTarget, Snapshot,
+    SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
 };
 
 // ---------- Worker thread ----------
@@ -116,6 +122,9 @@ struct WorkerState {
     /// first snapshot. Subsequent actions resolve elements relative to this
     /// window, not the foreground (which may have changed in the meantime).
     last_hwnd: Option<HWND>,
+    /// Most recent successful snapshot. Used to draw ref labels onto
+    /// annotated screenshots without re-walking UIA.
+    last_snapshot: Option<Snapshot>,
 }
 
 /// Owns the worker thread that holds the live UIA session.
@@ -166,6 +175,7 @@ impl UiaInner {
                     automation,
                     last_refs: RefMap::new(),
                     last_hwnd: None,
+                    last_snapshot: None,
                 };
 
                 while let Ok(cmd) = cmd_rx.recv() {
@@ -271,6 +281,7 @@ fn capture_foreground(state: &mut WorkerState, opts: &SnapshotOptions) -> Result
     let snap = capture_with_options(&state.automation, opts, hwnd)?;
     state.last_refs = snap.refs.clone();
     state.last_hwnd = Some(hwnd);
+    state.last_snapshot = Some(snap.clone());
     Ok(snap)
 }
 
@@ -996,6 +1007,16 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::Select { ref_id, value } => act_select(state, ref_id, value),
         Action::ScrollIntoView { ref_id } => act_scroll_into_view(state, ref_id),
         Action::SelectAll { ref_id } => act_select_all(state, ref_id.as_ref()),
+        Action::Check { ref_id } => act_check(state, ref_id, true),
+        Action::Uncheck { ref_id } => act_check(state, ref_id, false),
+        Action::Toggle { ref_id } => act_toggle(state, ref_id),
+        Action::Clear { ref_id } => act_clear(state, ref_id),
+        Action::Clipboard { op } => act_clipboard(state, op),
+        Action::Mouse { op } => act_mouse(*op),
+        Action::Highlight {
+            ref_id,
+            duration_ms,
+        } => act_highlight(state, ref_id, *duration_ms),
         Action::DoubleClick { ref_id } => act_double_click(state, ref_id),
         Action::RightClick { ref_id } => act_right_click(state, ref_id),
         Action::Hover { ref_id } => act_hover(state, ref_id),
@@ -1003,7 +1024,11 @@ fn act_dispatch(state: &mut WorkerState, action: &Action) -> Result<ActionResult
         Action::Drag { from, to } => act_drag(state, from, to),
         Action::SwitchApp { app_id } => act_switch_app(state, app_id),
         Action::FocusWindow { window_id } => act_focus_window(state, window_id),
-        Action::Screenshot { region } => act_screenshot(state, region.as_ref()),
+        Action::Screenshot {
+            region,
+            target,
+            annotated,
+        } => act_screenshot_target(state, region.as_ref(), target.as_ref(), *annotated),
         Action::Wait { ms } => act_wait(*ms),
     }
 }
@@ -1023,12 +1048,65 @@ fn act_wait(ms: u64) -> Result<ActionResult> {
 
 fn act_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
-    let hwnd = state.last_hwnd.ok_or_else(|| Error::Action {
-        action: "resolve".into(),
-        reason: "no prior snapshot - call snapshot before act".into(),
-    })?;
+    let hwnd = require_hwnd(state, "click")?;
     let element = resolve_element(&state.automation, hwnd, &entry)?;
 
+    if entry.role == Role::Button {
+        return try_invoke(&element)
+            .map(|()| action_result_with_method("invoke-pattern"))
+            .or_else(|invoke_error| {
+                activate_button_with_keyboard(state, &element).or_else(|keyboard_error| {
+                    pointer_click(state, &element, MouseButton::Left, "click").map_err(
+                        |fallback_error| Error::Action {
+                            action: "click".into(),
+                            reason: format!(
+                                "InvokePattern failed ({invoke_error}); keyboard activation failed ({keyboard_error}); mouse fallback failed ({fallback_error})"
+                            ),
+                        },
+                    )
+                })
+            });
+    }
+
+    match try_invoke(&element) {
+        Ok(()) => Ok(action_result_with_method("invoke-pattern")),
+        Err(invoke_error) => pointer_click(state, &element, MouseButton::Left, "click").map_err(
+            |fallback_error| Error::Action {
+                action: "click".into(),
+                reason: format!(
+                    "InvokePattern failed ({invoke_error}); mouse fallback failed ({fallback_error})"
+                ),
+            },
+        ),
+    }
+}
+
+fn activate_button_with_keyboard(
+    state: &WorkerState,
+    element: &IUIAutomationElement,
+) -> Result<ActionResult> {
+    // Win32 buttons can expose InvokePattern while only reliably firing
+    // their command through keyboard activation. Focusing the element and
+    // pressing Space matches the platform's native button contract.
+    unsafe { element.SetFocus() }.map_err(|e| Error::Action {
+        action: "click".into(),
+        reason: format!("SetFocus before Space activation: {e}"),
+    })?;
+    std::thread::sleep(Duration::from_millis(30));
+    let mut result = act_press(state, "Space")?;
+    result.data = Some(serde_json::json!({ "method": "keyboard-space" }));
+    Ok(result)
+}
+
+fn action_result_with_method(method: &str) -> ActionResult {
+    ActionResult {
+        ok: true,
+        message: None,
+        data: Some(serde_json::json!({ "method": method })),
+    }
+}
+
+fn try_invoke(element: &IUIAutomationElement) -> Result<()> {
     // SAFETY: `element` is a valid COM interface; pattern interface IDs are
     // well-known UIA constants.
     let pattern: IUIAutomationInvokePattern =
@@ -1036,14 +1114,12 @@ fn act_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
             action: "click".into(),
             reason: format!("element does not support InvokePattern: {e}"),
         })?;
-
     // SAFETY: `pattern` is a valid IUIAutomationInvokePattern.
     unsafe { pattern.Invoke() }.map_err(|e| Error::Action {
         action: "click".into(),
         reason: format!("Invoke: {e}"),
     })?;
-
-    Ok(ActionResult::ok())
+    Ok(())
 }
 
 fn act_focus(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
@@ -1122,7 +1198,7 @@ fn act_select(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<Action
             action: "select".into(),
             reason: format!("SelectionItemPattern.Select: {e}"),
         })?;
-        return Ok(ActionResult::ok());
+        return Ok(action_result_with_method("selection-item-pattern"));
     }
 
     // Treat as container - walk for a named SelectionItem descendant.
@@ -1153,7 +1229,7 @@ fn act_select(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<Action
         action: "select".into(),
         reason: format!("SelectionItemPattern.Select: {e}"),
     })?;
-    Ok(ActionResult::ok())
+    Ok(action_result_with_method("selection-item-pattern"))
 }
 
 /// Scroll the element into view via `ScrollItemPattern.ScrollIntoView()`.
@@ -1177,7 +1253,7 @@ fn act_scroll_into_view(state: &WorkerState, ref_id: &RefId) -> Result<ActionRes
         action: "scroll_into_view".into(),
         reason: format!("ScrollIntoView: {e}"),
     })?;
-    Ok(ActionResult::ok())
+    Ok(action_result_with_method("scroll-item-pattern"))
 }
 
 /// Select all content in the focused field, or in the referenced field.
@@ -1188,7 +1264,280 @@ fn act_select_all(state: &WorkerState, ref_id: Option<&RefId>) -> Result<ActionR
         // Reuse Focus's resolution + SetFocus path.
         act_focus(state, rid)?;
     }
-    act_press(state, "Ctrl+A")
+    let mut result = act_press(state, "Ctrl+A")?;
+    result.data = Some(serde_json::json!({ "method": "keyboard-ctrl-a" }));
+    Ok(result)
+}
+
+fn act_toggle(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, "toggle")?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let pattern: IUIAutomationTogglePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_TogglePatternId) }.map_err(|e| Error::Action {
+            action: "toggle".into(),
+            reason: format!("element does not support TogglePattern: {e}"),
+        })?;
+    unsafe { pattern.Toggle() }.map_err(|e| Error::Action {
+        action: "toggle".into(),
+        reason: format!("TogglePattern.Toggle: {e}"),
+    })?;
+    Ok(action_result_with_method("toggle-pattern"))
+}
+
+fn act_check(state: &WorkerState, ref_id: &RefId, desired: bool) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, if desired { "check" } else { "uncheck" })?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let pattern: IUIAutomationTogglePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_TogglePatternId) }.map_err(|e| Error::Action {
+            action: if desired { "check" } else { "uncheck" }.into(),
+            reason: format!("element does not support TogglePattern: {e}"),
+        })?;
+    let action = if desired { "check" } else { "uncheck" };
+    for _ in 0..3 {
+        let current = unsafe { pattern.CurrentToggleState() }.map_err(|e| Error::Action {
+            action: action.into(),
+            reason: format!("TogglePattern.CurrentToggleState: {e}"),
+        })?;
+        if (desired && current == ToggleState_On) || (!desired && current == ToggleState_Off) {
+            return Ok(action_result_with_method("toggle-pattern"));
+        }
+        unsafe { pattern.Toggle() }.map_err(|e| Error::Action {
+            action: action.into(),
+            reason: format!("TogglePattern.Toggle: {e}"),
+        })?;
+        std::thread::sleep(Duration::from_millis(30));
+        let current = unsafe { pattern.CurrentToggleState() }.map_err(|e| Error::Action {
+            action: action.into(),
+            reason: format!("TogglePattern.CurrentToggleState after Toggle: {e}"),
+        })?;
+        if (desired && current == ToggleState_On) || (!desired && current == ToggleState_Off) {
+            return Ok(action_result_with_method("toggle-pattern"));
+        }
+    }
+    Err(Error::Action {
+        action: action.into(),
+        reason: "control did not reach requested check state".into(),
+    })
+}
+
+fn act_clear(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
+    let entry = lookup_ref(state, ref_id)?;
+    let hwnd = require_hwnd(state, "clear")?;
+    let element = resolve_element(&state.automation, hwnd, &entry)?;
+
+    if let Ok(pattern) =
+        unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
+    {
+        let empty = BSTR::from("");
+        if unsafe { pattern.SetValue(&empty) }.is_ok() {
+            std::thread::sleep(Duration::from_millis(30));
+            let value = unsafe { pattern.CurrentValue() }
+                .ok()
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            if value.is_empty() {
+                return Ok(action_result_with_method("value-pattern"));
+            }
+        }
+    }
+
+    unsafe { element.SetFocus() }.map_err(|e| Error::Action {
+        action: "clear".into(),
+        reason: format!("SetFocus before keyboard clear: {e}"),
+    })?;
+    act_press(state, "Ctrl+A")?;
+    act_press(state, "Delete")?;
+
+    if let Some((value, _)) = read_value_pattern(&element) {
+        if !value.is_empty() {
+            return Err(Error::Action {
+                action: "clear".into(),
+                reason: "keyboard clear completed but the control value did not become empty"
+                    .into(),
+            });
+        }
+    }
+    Ok(action_result_with_method("keyboard-select-all-delete"))
+}
+
+fn act_clipboard(state: &WorkerState, op: &ClipboardOp) -> Result<ActionResult> {
+    match op {
+        ClipboardOp::Read => {
+            let text = clipboard_read_text()?;
+            Ok(ActionResult {
+                ok: true,
+                message: None,
+                data: Some(serde_json::json!({ "text": text })),
+            })
+        }
+        ClipboardOp::Write { text } => {
+            clipboard_write_text(text)?;
+            Ok(ActionResult::ok())
+        }
+        ClipboardOp::Copy => act_press(state, "Ctrl+C"),
+        ClipboardOp::Paste => act_press(state, "Ctrl+V"),
+    }
+}
+
+fn clipboard_read_text() -> Result<String> {
+    // SAFETY: Clipboard ownership is process-global. We open, read, unlock,
+    // and close in this function before returning.
+    unsafe { OpenClipboard(HWND(std::ptr::null_mut())) }.map_err(|e| Error::Action {
+        action: "clipboard_read".into(),
+        reason: format!("OpenClipboard: {e}"),
+    })?;
+    let result = (|| {
+        // SAFETY: clipboard is open; null handle means no CF_UNICODETEXT data.
+        let handle = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT.0)) }.map_err(|e| {
+            Error::Action {
+                action: "clipboard_read".into(),
+                reason: format!("GetClipboardData: {e}"),
+            }
+        })?;
+        if handle.is_invalid() {
+            return Ok(String::new());
+        }
+        let global = HGLOBAL(handle.0);
+        // SAFETY: handle comes from CF_UNICODETEXT; GlobalLock returns a
+        // null pointer on failure, otherwise a NUL-terminated UTF-16 buffer.
+        let ptr = unsafe { GlobalLock(global) }.cast::<u16>();
+        if ptr.is_null() {
+            return Err(Error::Action {
+                action: "clipboard_read".into(),
+                reason: "GlobalLock returned null".into(),
+            });
+        }
+        let mut len = 0usize;
+        // SAFETY: CF_UNICODETEXT is NUL-terminated by contract.
+        while unsafe { *ptr.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `ptr` is valid for `len` UTF-16 units per the scan above.
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let text = String::from_utf16_lossy(slice);
+        // SAFETY: paired with GlobalLock above.
+        let _ = unsafe { GlobalUnlock(global) };
+        Ok(text)
+    })();
+    // SAFETY: paired with OpenClipboard above.
+    unsafe { CloseClipboard() }.map_err(|e| Error::Action {
+        action: "clipboard_read".into(),
+        reason: format!("CloseClipboard: {e}"),
+    })?;
+    result
+}
+
+fn clipboard_write_text(text: &str) -> Result<()> {
+    let mut utf16: Vec<u16> = text.encode_utf16().collect();
+    utf16.push(0);
+    let byte_len = utf16.len() * std::mem::size_of::<u16>();
+
+    // Prepare the replacement memory before opening and clearing the
+    // clipboard. This preserves the old clipboard content if allocation or
+    // UTF-16 copy fails.
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_len) }.map_err(|e| Error::Action {
+        action: "clipboard_write".into(),
+        reason: format!("GlobalAlloc: {e}"),
+    })?;
+    if handle.is_invalid() {
+        return Err(Error::Action {
+            action: "clipboard_write".into(),
+            reason: "GlobalAlloc returned null".into(),
+        });
+    }
+    // SAFETY: handle is newly allocated and large enough for utf16.
+    let ptr = unsafe { GlobalLock(handle) }.cast::<u16>();
+    if ptr.is_null() {
+        return Err(Error::Action {
+            action: "clipboard_write".into(),
+            reason: "GlobalLock returned null".into(),
+        });
+    }
+    // SAFETY: `ptr` points to `byte_len` bytes; utf16 has the same size.
+    unsafe { std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len()) };
+    // SAFETY: paired with GlobalLock above.
+    let _ = unsafe { GlobalUnlock(handle) };
+
+    // SAFETY: Clipboard ownership is process-global. We open, replace text,
+    // and close in this function before returning.
+    unsafe { OpenClipboard(HWND(std::ptr::null_mut())) }.map_err(|e| Error::Action {
+        action: "clipboard_write".into(),
+        reason: format!("OpenClipboard: {e}"),
+    })?;
+    let result = (|| {
+        // SAFETY: clipboard is open for this process.
+        unsafe { EmptyClipboard() }.map_err(|e| Error::Action {
+            action: "clipboard_write".into(),
+            reason: format!("EmptyClipboard: {e}"),
+        })?;
+        // SAFETY: ownership of `handle` transfers to the clipboard on success.
+        unsafe { SetClipboardData(u32::from(CF_UNICODETEXT.0), HANDLE(handle.0)) }.map_err(
+            |e| Error::Action {
+                action: "clipboard_write".into(),
+                reason: format!("SetClipboardData: {e}"),
+            },
+        )?;
+        Ok(())
+    })();
+    // SAFETY: paired with OpenClipboard above.
+    unsafe { CloseClipboard() }.map_err(|e| Error::Action {
+        action: "clipboard_write".into(),
+        reason: format!("CloseClipboard: {e}"),
+    })?;
+    result
+}
+
+fn act_mouse(op: MouseOp) -> Result<ActionResult> {
+    let inputs = match op {
+        MouseOp::Move { x, y } => {
+            let (ax, ay) = screen_to_absolute(x, y);
+            vec![make_mouse_move_absolute(ax, ay)]
+        }
+        MouseOp::Down { x, y, button } => {
+            let (ax, ay) = screen_to_absolute(x, y);
+            vec![
+                make_mouse_move_absolute(ax, ay),
+                make_mouse_button(button, true),
+            ]
+        }
+        MouseOp::Up { x, y, button } => {
+            let (ax, ay) = screen_to_absolute(x, y);
+            vec![
+                make_mouse_move_absolute(ax, ay),
+                make_mouse_button(button, false),
+            ]
+        }
+        MouseOp::Wheel { x, y, dx, dy } => {
+            let (ax, ay) = screen_to_absolute(x, y);
+            let mut inputs = vec![make_mouse_move_absolute(ax, ay)];
+            if dy != 0 {
+                inputs.push(make_mouse_wheel(WheelAxis::Vertical, dy));
+            }
+            if dx != 0 {
+                inputs.push(make_mouse_wheel(WheelAxis::Horizontal, dx));
+            }
+            inputs
+        }
+    };
+    send_inputs(&inputs, "mouse")
+}
+
+fn act_highlight(
+    state: &WorkerState,
+    ref_id: &RefId,
+    duration_ms: Option<u64>,
+) -> Result<ActionResult> {
+    act_hover(state, ref_id)?;
+    if let Some(ms) = duration_ms {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    Ok(ActionResult {
+        ok: true,
+        message: Some("highlighted via cursor hover".into()),
+        data: None,
+    })
 }
 
 /// Look up the snapshot's pinned HWND, mapping the missing-snapshot case to a
@@ -1374,16 +1723,25 @@ fn act_right_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> 
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "right_click")?;
     let element = resolve_element(&state.automation, hwnd, &entry)?;
-    let (cx, cy) = element_center_physical(&element)?;
+    pointer_click(state, &element, MouseButton::Right, "right_click")
+}
+
+fn pointer_click(
+    state: &WorkerState,
+    element: &IUIAutomationElement,
+    button: MouseButton,
+    action: &str,
+) -> Result<ActionResult> {
+    let (cx, cy) = element_center_physical(element)?;
     let (ax, ay) = screen_to_absolute(cx, cy);
-    ensure_foreground(state, "right_click")?;
+    ensure_foreground(state, action)?;
     send_inputs(
         &[
             make_mouse_move_absolute(ax, ay),
-            make_mouse_button(MouseButton::Right, true),
-            make_mouse_button(MouseButton::Right, false),
+            make_mouse_button(button, true),
+            make_mouse_button(button, false),
         ],
-        "right_click",
+        action,
     )
 }
 
@@ -1466,15 +1824,14 @@ fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResul
     let (tax, tay) = screen_to_absolute(tx, ty);
 
     ensure_foreground(state, "drag")?;
-    send_inputs(
-        &[
-            make_mouse_move_absolute(fax, fay),
-            make_mouse_button(MouseButton::Left, true),
-            make_mouse_move_absolute(tax, tay),
-            make_mouse_button(MouseButton::Left, false),
-        ],
-        "drag",
-    )
+    let mut inputs = Vec::with_capacity(10);
+    inputs.push(make_mouse_move_absolute(fax, fay));
+    inputs.push(make_mouse_button(MouseButton::Left, true));
+    for (x, y) in interpolate_absolute_points((fax, fay), (tax, tay), 8) {
+        inputs.push(make_mouse_move_absolute(x, y));
+    }
+    inputs.push(make_mouse_button(MouseButton::Left, false));
+    send_inputs(&inputs, "drag")
 }
 
 // ---------- Window / process targeting ----------
@@ -1501,6 +1858,7 @@ fn act_switch_app(state: &mut WorkerState, app_id: &str) -> Result<ActionResult>
     bring_window_to_foreground(hwnd);
     state.last_hwnd = Some(hwnd);
     state.last_refs = RefMap::new();
+    state.last_snapshot = None;
     Ok(ActionResult::ok())
 }
 
@@ -1516,6 +1874,14 @@ fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionRe
         action: "focus_window".into(),
         reason: format!("invalid window_id {window_id:?}; expected hex like 0x10edc"),
     })?;
+    // SAFETY: `IsWindow` accepts any HWND value and returns false for
+    // invalid or recycled handles that no longer name a live window.
+    if !unsafe { IsWindow(hwnd) }.as_bool() {
+        return Err(Error::Action {
+            action: "focus_window".into(),
+            reason: format!("window_id {window_id:?} does not refer to an existing window"),
+        });
+    }
 
     // Best-effort restore. Windows whose pattern doesn't support the call,
     // or which aren't minimized, just skip this - Set/Bring foreground does
@@ -1534,6 +1900,7 @@ fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionRe
     bring_window_to_foreground(hwnd);
     state.last_hwnd = Some(hwnd);
     state.last_refs = RefMap::new();
+    state.last_snapshot = None;
     Ok(ActionResult::ok())
 }
 
@@ -1550,27 +1917,335 @@ fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionRe
 /// ```
 /// PNG is the only format we emit; clients should decode the base64 and
 /// pass the bytes to any standard PNG decoder.
-fn act_screenshot(state: &WorkerState, region: Option<&Region>) -> Result<ActionResult> {
-    use base64::Engine;
-    let image = if let Some(r) = region {
-        capture_screen_region(r)?
-    } else {
-        let hwnd = require_hwnd(state, "screenshot")?;
-        capture_window(hwnd)?
+fn act_screenshot_target(
+    state: &WorkerState,
+    region: Option<&Region>,
+    target: Option<&ScreenshotTarget>,
+    annotated: bool,
+) -> Result<ActionResult> {
+    let effective_region;
+    let origin;
+    let mut image = match target {
+        Some(ScreenshotTarget::Window) => {
+            let hwnd = require_hwnd(state, "screenshot")?;
+            origin = window_origin(hwnd)?;
+            capture_window(hwnd)?
+        }
+        Some(ScreenshotTarget::Desktop) => {
+            effective_region = virtual_desktop_region();
+            origin = (effective_region.x, effective_region.y);
+            capture_screen_region(&effective_region)?
+        }
+        Some(ScreenshotTarget::Region { region }) => {
+            origin = (region.x, region.y);
+            capture_screen_region(region)?
+        }
+        Some(ScreenshotTarget::Ref { ref_id }) => {
+            let entry = lookup_ref(state, ref_id)?;
+            let hwnd = require_hwnd(state, "screenshot")?;
+            let element = resolve_element(&state.automation, hwnd, &entry)?;
+            effective_region = element_region_physical(&element)?;
+            origin = (effective_region.x, effective_region.y);
+            capture_screen_region(&effective_region)?
+        }
+        None => {
+            if let Some(region) = region {
+                origin = (region.x, region.y);
+                capture_screen_region(region)?
+            } else {
+                let hwnd = require_hwnd(state, "screenshot")?;
+                origin = window_origin(hwnd)?;
+                capture_window(hwnd)?
+            }
+        }
     };
-    let png = encode_png(&image)?;
+    if annotated {
+        annotate_screenshot(state, &mut image, origin)?;
+    }
+    encode_screenshot_result(&image, annotated)
+}
+
+fn encode_screenshot_result(image: &CapturedImage, annotated: bool) -> Result<ActionResult> {
+    use base64::Engine;
+    let png = encode_png(image)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
     Ok(ActionResult {
         ok: true,
-        message: None,
+        message: annotated.then(|| "annotated with cached snapshot refs".into()),
         data: Some(serde_json::json!({
             "format": "png",
             "encoding": "base64",
             "width": image.width,
             "height": image.height,
+            "annotated": annotated,
             "data": encoded,
         })),
     })
+}
+
+fn virtual_desktop_region() -> Region {
+    // SAFETY: GetSystemMetrics is side-effect-free and accepts these constants.
+    let x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let w = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1);
+    let h = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1);
+    Region {
+        x,
+        y,
+        w: u32::try_from(w).unwrap_or(1),
+        h: u32::try_from(h).unwrap_or(1),
+    }
+}
+
+fn window_origin(hwnd: HWND) -> Result<(i32, i32)> {
+    let mut rect = RECT::default();
+    // SAFETY: `GetWindowRect` accepts an HWND and writes to a local RECT.
+    unsafe { GetWindowRect(hwnd, &raw mut rect) }.map_err(|e| Error::Action {
+        action: "screenshot".into(),
+        reason: format!("GetWindowRect: {e}"),
+    })?;
+    Ok((rect.left, rect.top))
+}
+
+fn annotate_screenshot(
+    state: &WorkerState,
+    image: &mut CapturedImage,
+    origin: (i32, i32),
+) -> Result<()> {
+    let snapshot = state.last_snapshot.as_ref().ok_or_else(|| Error::Action {
+        action: "screenshot".into(),
+        reason: "no cached snapshot to annotate - run snapshot first".into(),
+    })?;
+    let hwnd = require_hwnd(state, "screenshot")?;
+    let dpi_scale = window_dpi_scale(hwnd);
+    let mut labels = Vec::new();
+    collect_annotation_labels(
+        &snapshot.root,
+        origin,
+        dpi_scale,
+        image.width,
+        image.height,
+        &mut labels,
+    );
+    draw_annotations(image, &labels);
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnnotationLabel {
+    text: String,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+fn collect_annotation_labels(
+    node: &Node,
+    origin: (i32, i32),
+    dpi_scale: f64,
+    image_w: u32,
+    image_h: u32,
+    out: &mut Vec<AnnotationLabel>,
+) {
+    if let (Some(ref_id), Some(bounds)) = (&node.ref_id, node.bounds) {
+        if let Some(label) = annotation_label(ref_id, bounds, origin, dpi_scale, image_w, image_h) {
+            out.push(label);
+        }
+    }
+    for child in &node.children {
+        collect_annotation_labels(child, origin, dpi_scale, image_w, image_h, out);
+    }
+}
+
+fn annotation_label(
+    ref_id: &RefId,
+    bounds: Bounds,
+    origin: (i32, i32),
+    dpi_scale: f64,
+    image_w: u32,
+    image_h: u32,
+) -> Option<AnnotationLabel> {
+    let x = round_to_i32(bounds.x * dpi_scale) - origin.0;
+    let y = round_to_i32(bounds.y * dpi_scale) - origin.1;
+    let w = round_to_i32(bounds.w * dpi_scale).max(1);
+    let h = round_to_i32(bounds.h * dpi_scale).max(1);
+    let image_w = i32::try_from(image_w).unwrap_or(i32::MAX);
+    let image_h = i32::try_from(image_h).unwrap_or(i32::MAX);
+    if x >= image_w || y >= image_h || x + w <= 0 || y + h <= 0 {
+        return None;
+    }
+    let label_x = x.clamp(0, image_w.saturating_sub(1));
+    let label_y = y.clamp(0, image_h.saturating_sub(1));
+    Some(AnnotationLabel {
+        text: display_ref_label(ref_id),
+        x: label_x,
+        y: label_y,
+        w: w.min(image_w),
+        h: h.min(image_h),
+    })
+}
+
+fn display_ref_label(ref_id: &RefId) -> String {
+    ref_id
+        .0
+        .strip_prefix("ref_")
+        .map_or_else(|| ref_id.0.clone(), |n| format!("@e{n}"))
+}
+
+fn round_to_i32(v: f64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let rounded = v.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    rounded
+}
+
+fn draw_annotations(image: &mut CapturedImage, labels: &[AnnotationLabel]) {
+    for label in labels {
+        draw_rect_outline(
+            image,
+            label.x,
+            label.y,
+            label.w,
+            label.h,
+            [255, 45, 85, 255],
+        );
+        let text_w = text_width(&label.text);
+        let bg_w = text_w + 4;
+        let bg_h = 11;
+        let bg_x = label
+            .x
+            .min(i32::try_from(image.width).unwrap_or(i32::MAX) - bg_w);
+        let bg_y = label
+            .y
+            .min(i32::try_from(image.height).unwrap_or(i32::MAX) - bg_h);
+        let bg_x = bg_x.max(0);
+        let bg_y = bg_y.max(0);
+        fill_rect(image, bg_x, bg_y, bg_w, bg_h, [255, 45, 85, 235]);
+        draw_text(image, bg_x + 2, bg_y + 2, &label.text, [255, 255, 255, 255]);
+    }
+}
+
+fn text_width(text: &str) -> i32 {
+    let chars = i32::try_from(text.chars().count()).unwrap_or(i32::MAX);
+    chars.saturating_mul(6).saturating_sub(1).max(0)
+}
+
+fn draw_rect_outline(image: &mut CapturedImage, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    draw_line_h(image, x, y, w, color);
+    draw_line_h(image, x, y + h - 1, w, color);
+    draw_line_v(image, x, y, h, color);
+    draw_line_v(image, x + w - 1, y, h, color);
+}
+
+fn draw_line_h(image: &mut CapturedImage, x: i32, y: i32, w: i32, color: [u8; 4]) {
+    for px in x..x.saturating_add(w) {
+        blend_pixel(image, px, y, color);
+    }
+}
+
+fn draw_line_v(image: &mut CapturedImage, x: i32, y: i32, h: i32, color: [u8; 4]) {
+    for py in y..y.saturating_add(h) {
+        blend_pixel(image, x, py, color);
+    }
+}
+
+fn fill_rect(image: &mut CapturedImage, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
+    for py in y..y.saturating_add(h) {
+        for px in x..x.saturating_add(w) {
+            blend_pixel(image, px, py, color);
+        }
+    }
+}
+
+fn draw_text(image: &mut CapturedImage, x: i32, y: i32, text: &str, color: [u8; 4]) {
+    let mut cursor = x;
+    for ch in text.chars() {
+        draw_glyph(image, cursor, y, ch, color);
+        cursor = cursor.saturating_add(6);
+    }
+}
+
+fn draw_glyph(image: &mut CapturedImage, x: i32, y: i32, ch: char, color: [u8; 4]) {
+    let glyph = glyph_5x7(ch);
+    for (row_idx, row) in glyph.iter().enumerate() {
+        let row_y = y + i32::try_from(row_idx).unwrap_or(0);
+        for col in 0..5 {
+            if row & (1 << (4 - col)) != 0 {
+                blend_pixel(image, x + col, row_y, color);
+            }
+        }
+    }
+}
+
+fn glyph_5x7(ch: char) -> [u8; 7] {
+    match ch {
+        '@' => [
+            0b01110, 0b10001, 0b10111, 0b10101, 0b10111, 0b10000, 0b01110,
+        ],
+        'e' | 'E' => [
+            0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110, 0b00000,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        '6' => [
+            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+        ],
+        _ => [0; 7],
+    }
+}
+
+fn blend_pixel(image: &mut CapturedImage, x: i32, y: i32, color: [u8; 4]) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let Ok(xu) = u32::try_from(x) else {
+        return;
+    };
+    let Ok(yu) = u32::try_from(y) else {
+        return;
+    };
+    if xu >= image.width || yu >= image.height {
+        return;
+    }
+    let idx = (usize::try_from(yu).unwrap_or(0) * usize::try_from(image.width).unwrap_or(0)
+        + usize::try_from(xu).unwrap_or(0))
+        * 4;
+    let alpha = u16::from(color[3]);
+    let inv = 255_u16.saturating_sub(alpha);
+    for (channel, value) in color.iter().take(3).enumerate() {
+        let dst = u16::from(image.pixels[idx + channel]);
+        let src = u16::from(*value);
+        image.pixels[idx + channel] = u8::try_from((src * alpha + dst * inv) / 255).unwrap_or(255);
+    }
+    image.pixels[idx + 3] = 255;
 }
 
 /// Logical RGBA bitmap. Top-down (row 0 is the top); 4 bytes per pixel
@@ -1864,18 +2539,14 @@ fn scroll_delta_from_pixels(px: f64) -> i32 {
     v
 }
 
-#[derive(Clone, Copy)]
-enum MouseButton {
-    Left,
-    Right,
-}
-
 fn make_mouse_button(button: MouseButton, down: bool) -> INPUT {
     let flag = match (button, down) {
         (MouseButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
         (MouseButton::Left, false) => MOUSEEVENTF_LEFTUP,
         (MouseButton::Right, true) => MOUSEEVENTF_RIGHTDOWN,
         (MouseButton::Right, false) => MOUSEEVENTF_RIGHTUP,
+        (MouseButton::Middle, true) => MOUSEEVENTF_MIDDLEDOWN,
+        (MouseButton::Middle, false) => MOUSEEVENTF_MIDDLEUP,
     };
     INPUT {
         r#type: INPUT_MOUSE,
@@ -1921,6 +2592,22 @@ fn element_center_physical(element: &IUIAutomationElement) -> Result<(i32, i32)>
     Ok(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
 }
 
+fn element_region_physical(element: &IUIAutomationElement) -> Result<Region> {
+    // SAFETY: `element` is a valid COM interface.
+    let r = unsafe { element.CurrentBoundingRectangle() }.map_err(|e| Error::Action {
+        action: "screenshot".into(),
+        reason: format!("CurrentBoundingRectangle: {e}"),
+    })?;
+    let w = (r.right - r.left).max(1);
+    let h = (r.bottom - r.top).max(1);
+    Ok(Region {
+        x: r.left,
+        y: r.top,
+        w: u32::try_from(w).unwrap_or(1),
+        h: u32::try_from(h).unwrap_or(1),
+    })
+}
+
 /// Convert a physical-pixel screen-space point to UIA's absolute-cursor
 /// coordinate space (`0..=65535` over the virtual desktop). Multi-monitor
 /// setups with negative virtual coords (secondary monitor to the left of
@@ -1941,6 +2628,33 @@ fn screen_to_absolute(x_phys: i32, y_phys: i32) -> (i32, i32) {
     // Casts are safe after clamp; the clamp ensures the values fit in i32.
     #[allow(clippy::cast_possible_truncation)]
     (nx as i32, ny as i32)
+}
+
+fn interpolate_absolute_points(from: (i32, i32), to: (i32, i32), steps: usize) -> Vec<(i32, i32)> {
+    let steps = steps.max(1);
+    let denom = i64::try_from(steps).unwrap_or(i64::MAX);
+    let dx = i64::from(to.0) - i64::from(from.0);
+    let dy = i64::from(to.1) - i64::from(from.1);
+    let mut points = Vec::with_capacity(steps);
+    for step in 1..=steps {
+        let numer = i64::try_from(step).unwrap_or(i64::MAX);
+        let x = i64::from(from.0) + rounded_step_delta(dx, numer, denom);
+        let y = i64::from(from.1) + rounded_step_delta(dy, numer, denom);
+        points.push((
+            i32::try_from(x.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(i32::MAX),
+            i32::try_from(y.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(i32::MAX),
+        ));
+    }
+    points
+}
+
+fn rounded_step_delta(total_delta: i64, step: i64, denom: i64) -> i64 {
+    let scaled = total_delta.saturating_mul(step);
+    if scaled >= 0 {
+        (scaled + denom / 2) / denom
+    } else {
+        (scaled - denom / 2) / denom
+    }
 }
 
 /// Bring the snapshot's pinned HWND to the foreground so subsequent
@@ -2371,6 +3085,14 @@ fn list_windows_inner(state: &mut WorkerState) -> Result<Vec<WindowInfo>> {
             "no snapshot cached for this session - run `agent-ctrl snapshot` first so window-list knows which app to enumerate".into(),
         )
     })?;
+    // SAFETY: `IsWindow` accepts any HWND value and returns false for stale
+    // handles. We check before deriving PID so a recycled or destroyed
+    // window produces a clear recovery hint.
+    if !unsafe { IsWindow(pinned_hwnd) }.as_bool() {
+        return Err(Error::Surface(
+            "pinned window is no longer valid - re-run `agent-ctrl snapshot`".into(),
+        ));
+    }
 
     let mut pid: u32 = 0;
     // SAFETY: `pinned_hwnd` was a valid HWND when last_hwnd was set; the
@@ -2613,7 +3335,11 @@ fn element_qualifies_as_ref(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{parse_chord, vk_from_name};
+    use super::{
+        annotation_label, display_ref_label, draw_annotations, parse_chord, vk_from_name,
+        AnnotationLabel, CapturedImage,
+    };
+    use agent_ctrl_core::Bounds;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         VK_A, VK_CONTROL, VK_DELETE, VK_F1, VK_F12, VK_RETURN, VK_SHIFT, VK_T,
     };
@@ -2667,6 +3393,77 @@ mod tests {
         assert!(parse_chord("Ctrl+").is_err());
         assert!(parse_chord("+A").is_err());
         assert!(parse_chord("Ctrl+Bogus").is_err());
+    }
+
+    #[test]
+    fn annotation_label_maps_logical_bounds_to_image_space() {
+        let label = annotation_label(
+            &agent_ctrl_core::RefId("ref_12".into()),
+            Bounds {
+                x: 120.0,
+                y: 80.0,
+                w: 40.0,
+                h: 20.0,
+            },
+            (100, 60),
+            1.5,
+            200,
+            100,
+        )
+        .unwrap();
+        assert_eq!(label.text, "@e12");
+        assert_eq!((label.x, label.y, label.w, label.h), (80, 60, 60, 30));
+    }
+
+    #[test]
+    fn annotation_label_skips_offscreen_bounds() {
+        let label = annotation_label(
+            &agent_ctrl_core::RefId("ref_0".into()),
+            Bounds {
+                x: 1_000.0,
+                y: 1_000.0,
+                w: 40.0,
+                h: 20.0,
+            },
+            (0, 0),
+            1.0,
+            200,
+            100,
+        );
+        assert!(label.is_none());
+    }
+
+    #[test]
+    fn draw_annotations_changes_pixels() {
+        let mut image = CapturedImage {
+            width: 80,
+            height: 40,
+            pixels: vec![255; 80 * 40 * 4],
+        };
+        let before = image.pixels.clone();
+        draw_annotations(
+            &mut image,
+            &[AnnotationLabel {
+                text: "@e0".into(),
+                x: 5,
+                y: 6,
+                w: 30,
+                h: 15,
+            }],
+        );
+        assert_ne!(image.pixels, before);
+    }
+
+    #[test]
+    fn ref_labels_use_agent_friendly_form() {
+        assert_eq!(
+            display_ref_label(&agent_ctrl_core::RefId("ref_7".into())),
+            "@e7"
+        );
+        assert_eq!(
+            display_ref_label(&agent_ctrl_core::RefId("custom".into())),
+            "custom"
+        );
     }
 
     /// Mirror of `screen_to_absolute`'s arithmetic with caller-supplied
@@ -2743,6 +3540,22 @@ mod tests {
         assert_eq!((nx, ny), (0, 0));
         let (nx, ny) = screen_to_absolute_for(100_000, 100_000, 0, 0, 1920, 1080);
         assert_eq!((nx, ny), (65535, 65535));
+    }
+
+    #[test]
+    fn drag_interpolation_includes_destination() {
+        use super::interpolate_absolute_points;
+
+        let points = interpolate_absolute_points((0, 0), (10, 20), 5);
+        assert_eq!(points, vec![(2, 4), (4, 8), (6, 12), (8, 16), (10, 20)]);
+    }
+
+    #[test]
+    fn drag_interpolation_handles_reverse_motion() {
+        use super::interpolate_absolute_points;
+
+        let points = interpolate_absolute_points((10, 20), (0, 0), 5);
+        assert_eq!(points, vec![(8, 16), (6, 12), (4, 8), (2, 4), (0, 0)]);
     }
 
     #[test]

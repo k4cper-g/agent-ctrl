@@ -39,6 +39,7 @@ pub fn send_with_timeout(
 ) -> io::Result<Response> {
     let request = Request {
         id: uuid::Uuid::new_v4().to_string(),
+        auth: Some(info.auth_token.clone()),
         op,
     };
     let mut payload = serde_json::to_vec(&request).map_err(io::Error::other)?;

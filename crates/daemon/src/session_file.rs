@@ -9,8 +9,8 @@
 //!
 //! This is the same shape agent-browser uses (see its
 //! `cli/src/connection.rs`). We get away with TCP localhost on every
-//! platform because UIA / AX / CDP are all driven from the same machine
-//! the agent runs on, and localhost firewall rules block everything else.
+//! platform because UIA / AX are both driven from the same machine the
+//! agent runs on, and localhost firewall rules block everything else.
 
 use std::io;
 use std::net::{SocketAddr, TcpStream};
@@ -39,8 +39,14 @@ pub struct SessionFile {
     pub endpoint: String,
     /// Version of the `agent-ctrl-cli` crate that started the daemon.
     pub version: String,
-    /// Surface kind the session was opened against (`"uia"`, `"cdp"`, etc.).
+    /// Wire protocol version spoken by the daemon.
+    #[serde(default)]
+    pub protocol_version: u32,
+    /// Surface kind the session was opened against (`"uia"`, `"ax"`, etc.).
     pub surface: String,
+    /// Random bearer token required on every TCP request.
+    #[serde(default)]
+    pub auth_token: String,
     /// Wall-clock time the daemon started, seconds since the Unix epoch.
     pub started_at_unix: u64,
     /// UUID of the open Surface session inside the daemon - written by the

@@ -97,6 +97,44 @@ pub enum Action {
         #[serde(skip_serializing_if = "Option::is_none")]
         ref_id: Option<RefId>,
     },
+    /// Set a checkable control to the checked state.
+    Check {
+        /// Target element.
+        ref_id: RefId,
+    },
+    /// Set a checkable control to the unchecked state.
+    Uncheck {
+        /// Target element.
+        ref_id: RefId,
+    },
+    /// Toggle a checkable control.
+    Toggle {
+        /// Target element.
+        ref_id: RefId,
+    },
+    /// Clear an editable field.
+    Clear {
+        /// Target element.
+        ref_id: RefId,
+    },
+    /// Read from, write to, copy from, or paste from the host clipboard.
+    Clipboard {
+        /// Clipboard operation to perform.
+        op: ClipboardOp,
+    },
+    /// Raw mouse event in screen coordinates.
+    Mouse {
+        /// Mouse operation to perform.
+        op: MouseOp,
+    },
+    /// Visually mark an element for human debugging.
+    Highlight {
+        /// Target element.
+        ref_id: RefId,
+        /// Highlight duration in milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
     /// Scroll the element into view without focusing it.
     ScrollIntoView {
         /// Target element.
@@ -122,6 +160,103 @@ pub enum Action {
         /// Optional crop region in screen coordinates.
         #[serde(skip_serializing_if = "Option::is_none")]
         region: Option<Region>,
+        /// Optional target. When absent, `region` preserves the legacy shape.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<ScreenshotTarget>,
+        /// Draw visible ref labels on the screenshot when supported.
+        #[serde(default, skip_serializing_if = "is_false")]
+        annotated: bool,
+    },
+}
+
+/// Clipboard operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ClipboardOp {
+    /// Read Unicode text from the clipboard.
+    Read,
+    /// Replace clipboard text.
+    Write {
+        /// Text to store.
+        text: String,
+    },
+    /// Send the platform copy shortcut.
+    Copy,
+    /// Send the platform paste shortcut.
+    Paste,
+}
+
+/// Raw mouse operation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum MouseOp {
+    /// Move the cursor to screen coordinates.
+    Move {
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+    },
+    /// Press a mouse button at screen coordinates.
+    Down {
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+        /// Button to press.
+        button: MouseButton,
+    },
+    /// Release a mouse button at screen coordinates.
+    Up {
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+        /// Button to release.
+        button: MouseButton,
+    },
+    /// Send a wheel event at screen coordinates.
+    Wheel {
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+        /// Horizontal wheel delta.
+        dx: i32,
+        /// Vertical wheel delta.
+        dy: i32,
+    },
+}
+
+/// Mouse button name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButton {
+    /// Primary button.
+    Left,
+    /// Secondary button.
+    Right,
+    /// Middle button.
+    Middle,
+}
+
+/// Screenshot target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScreenshotTarget {
+    /// Capture the current pinned window.
+    Window,
+    /// Capture the desktop or virtual screen.
+    Desktop,
+    /// Capture a specific region.
+    Region {
+        /// Region to capture.
+        region: Region,
+    },
+    /// Capture the bounds of an element ref.
+    Ref {
+        /// Element whose bounds define the screenshot region.
+        ref_id: RefId,
     },
 }
 
@@ -136,6 +271,11 @@ pub struct Region {
     pub w: u32,
     /// Height in pixels.
     pub h: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Result of executing an [`Action`].

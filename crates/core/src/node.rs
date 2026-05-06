@@ -57,11 +57,6 @@ pub struct Bounds {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "platform", rename_all = "kebab-case")]
 pub enum NativeHandle {
-    /// Chrome DevTools Protocol backend node id.
-    Cdp {
-        /// CDP `BackendNodeId`.
-        backend_node_id: i64,
-    },
     /// Windows UI Automation handle.
     Uia {
         /// UIA `RuntimeId` - unstable across runs but useful within one session.

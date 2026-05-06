@@ -28,7 +28,7 @@ pub enum Error {
     /// The surface does not support the requested action.
     #[error("action '{action}' is not supported by the {surface} surface")]
     Unsupported {
-        /// Surface kind, e.g. `"uia"` or `"cdp"`.
+        /// Surface kind, e.g. `"uia"` or `"ax"`.
         surface: String,
         /// Action name.
         action: String,
