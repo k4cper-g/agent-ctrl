@@ -11,3 +11,13 @@ python -m http.server 4173 --directory site
 
 The page intentionally lives in this repository while the project is young so
 release copy, install instructions, and platform status stay close to the code.
+
+## Deploy
+
+Enable GitHub Pages once in the repository settings:
+
+```text
+Settings > Pages > Source > GitHub Actions
+```
+
+After that, run the `Site` workflow manually from GitHub Actions.
