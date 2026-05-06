@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="agent-ctrl is a native OS automation CLI and TypeScript client for AI agents."
+    >
+    <title>agent-ctrl - Native OS automation for agents</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="agent-ctrl home">
+        <img src="assets/logo.png" alt="" width="38" height="38">
+        <span>agent-ctrl</span>
+      </a>
+      <nav aria-label="Primary">
+        <a href="#install">Install</a>
+        <a href="#loop">Agent Loop</a>
+        <a href="#surfaces">Surfaces</a>
+        <a href="https://github.com/k4cper-g/agent-ctrl">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero__background" aria-hidden="true">
+          <img src="assets/logo.png" alt="">
+        </div>
+        <div class="hero__content">
+          <p class="eyebrow">Native computer-use primitives</p>
+          <h1 id="hero-title">agent-ctrl</h1>
+          <p class="hero__copy">
+            A fast Rust CLI and TypeScript interface for agents that need to inspect,
+            click, type, wait, and screenshot real desktop apps.
+          </p>
+          <div class="hero__actions" aria-label="Primary actions">
+            <a class="button button--primary" href="#install">Install on Windows</a>
+            <a class="button button--secondary" href="https://github.com/k4cper-g/agent-ctrl">
+              View source
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="command-band" aria-label="Quick command">
+        <div class="command-card">
+          <div class="command-card__chrome" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <pre><code>agent-ctrl open uia
+agent-ctrl snapshot --target-process Obsidian
+agent-ctrl find --role button --first
+agent-ctrl click @e4
+agent-ctrl wait-for --stable</code></pre>
+        </div>
+      </section>
+
+      <section id="loop" class="section section--split">
+        <div>
+          <p class="eyebrow">Designed for the core agent loop</p>
+          <h2>Snapshot, inspect, act, wait.</h2>
+          <p>
+            agent-ctrl exposes native UI through stable JSON shapes instead of
+            app-specific scripts. Agents read an accessibility tree, resolve refs,
+            execute small actions, and verify state before moving on.
+          </p>
+        </div>
+        <div class="snapshot-visual" aria-label="Example accessibility snapshot">
+          <div class="snapshot-window">
+            <div class="snapshot-title">YC App - Obsidian</div>
+            <div class="snapshot-row">
+              <span class="ref">@e0</span>
+              <span class="role">document</span>
+              <span class="name">YC App</span>
+            </div>
+            <div class="snapshot-row indent">
+              <span class="ref">@e1</span>
+              <span class="role">textbox</span>
+              <span class="name">Pitch draft</span>
+            </div>
+            <div class="snapshot-row indent">
+              <span class="ref">@e2</span>
+              <span class="role">button</span>
+              <span class="name">Save</span>
+            </div>
+            <div class="snapshot-tag tag-one">@e1</div>
+            <div class="snapshot-tag tag-two">@e2</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="install" class="section section--install">
+        <div class="section-heading">
+          <p class="eyebrow">Install</p>
+          <h2>Start with one binary.</h2>
+        </div>
+        <div class="install-grid">
+          <article class="install-panel">
+            <h3>Windows release</h3>
+            <p>Download the latest signed release asset from GitHub Releases.</p>
+            <div class="code-line">
+              <code>powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1</code>
+              <button type="button" data-copy="powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1">
+                Copy
+              </button>
+            </div>
+          </article>
+          <article class="install-panel">
+            <h3>TypeScript client</h3>
+            <p>Use the typed stdio client when building agents in Node.js.</p>
+            <div class="code-line">
+              <code>npm install @agent-ctrl/client</code>
+              <button type="button" data-copy="npm install @agent-ctrl/client">Copy</button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="surfaces" class="section">
+        <div class="section-heading">
+          <p class="eyebrow">Native surfaces</p>
+          <h2>Built for desktops first.</h2>
+        </div>
+        <div class="surface-grid">
+          <article>
+            <span class="status status--ready">Ready</span>
+            <h3>Windows UIA</h3>
+            <p>
+              Production-grade native automation with inspect, action, wait,
+              screenshots, window switching, JSON mode, and fixture-backed tests.
+            </p>
+          </article>
+          <article>
+            <span class="status status--preview">Preview</span>
+            <h3>macOS AX</h3>
+            <p>
+              Focused-window snapshots plus window listing and raise support.
+              Element actions come next after runtime validation on macOS.
+            </p>
+          </article>
+          <article>
+            <span class="status status--planned">Planned</span>
+            <h3>Linux, Android, iOS</h3>
+            <p>
+              The shared Surface trait is ready for the next native backends
+              without pulling browser automation into this project.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section section--cta">
+        <h2>Give agents a native control plane.</h2>
+        <p>
+          Keep browser automation in agent-browser. Use agent-ctrl for the rest
+          of the machine.
+        </p>
+        <a class="button button--primary" href="https://github.com/k4cper-g/agent-ctrl">
+          Star on GitHub
+        </a>
+      </section>
+    </main>
+
+    <footer>
+      <span>Apache-2.0</span>
+      <span>agent-ctrl</span>
+      <span id="year"></span>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>
