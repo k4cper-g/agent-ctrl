@@ -63,9 +63,9 @@ pub fn surface_status(kind: SurfaceKind) -> SurfaceStatus {
         SurfaceKind::Ax => {
             #[cfg(target_os = "macos")]
             {
-                // The AX crate compiles on macOS but its body is a stub
-                // until someone fills it in. Mark it Stub rather than Ready
-                // so doctor warns instead of green-checking it.
+                // AX can snapshot the focused window but actions are not
+                // implemented yet. Keep it out of the "ready" recommendation
+                // path until it can drive apps, not just inspect them.
                 SurfaceStatus::Stub
             }
             #[cfg(not(target_os = "macos"))]

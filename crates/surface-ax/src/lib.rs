@@ -1,22 +1,49 @@
 //! macOS Accessibility (AX) surface.
 //!
-//! Walks the system-wide AX tree via `AXUIElementCopy*` calls, maps AX roles
-//! to canonical [`Role`](agent_ctrl_core::Role) variants, and performs actions
-//! through `AXUIElementPerformAction`.
-//!
-//! Status: scaffold. The real implementation will use the `accessibility-sys`
-//! / `core-foundation` crates and require the user to grant Accessibility
-//! permission in System Settings → Privacy → Accessibility for the binary.
-//! For consumers on other platforms this crate compiles to an empty rlib.
+//! The current AX implementation is a snapshot preview: it checks macOS
+//! Accessibility trust, captures the focused window's AX tree, maps common
+//! roles/states/bounds into the shared schema, and returns `Unsupported` for
+//! actions. This is enough to begin validating the next native surface without
+//! pretending it has Windows-level action maturity yet.
 
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
-#![forbid(unsafe_code)]
+#![cfg_attr(target_os = "macos", allow(unsafe_code))]
 
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Error, Result, Snapshot, SnapshotOptions, Surface,
     SurfaceKind,
 };
 use async_trait::async_trait;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// macOS Accessibility permission state for the current process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxTrustStatus {
+    /// The process is trusted and can query other apps through AX.
+    Trusted,
+    /// The process needs Accessibility permission in System Settings.
+    NotTrusted,
+    /// The current OS cannot host AX.
+    Unavailable,
+}
+
+/// Return the current process's macOS Accessibility trust state.
+#[must_use]
+pub fn accessibility_trust_status() -> AxTrustStatus {
+    #[cfg(target_os = "macos")]
+    {
+        if macos::is_process_trusted() {
+            AxTrustStatus::Trusted
+        } else {
+            AxTrustStatus::NotTrusted
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        AxTrustStatus::Unavailable
+    }
+}
 
 /// Surface backed by macOS Accessibility.
 pub struct AxSurface {
@@ -26,19 +53,19 @@ pub struct AxSurface {
 impl AxSurface {
     /// Initialize an AX session.
     ///
-    /// Stubbed: the real implementation will check `AXIsProcessTrusted()`
-    /// and prompt the user to grant Accessibility permission if not.
-    #[allow(clippy::unused_async)] // body is sync today; will await once AX walking is real
+    /// On macOS this requires the user to grant Accessibility permission to
+    /// the `agent-ctrl` binary in System Settings.
+    #[allow(clippy::unused_async)] // non-macOS body is sync; macOS will grow async work later
     pub async fn open() -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
+            if accessibility_trust_status() != AxTrustStatus::Trusted {
+                return Err(Error::PermissionDenied(
+                    "macOS Accessibility permission is required. Grant access in System Settings > Privacy & Security > Accessibility, then retry.".into(),
+                ));
+            }
             Ok(Self {
-                capabilities: CapabilitySet::new()
-                    .with("snapshot")
-                    .with("screenshot")
-                    .with("keyboard")
-                    .with("mouse")
-                    .with("multi_app"),
+                capabilities: CapabilitySet::new().with("snapshot"),
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -60,11 +87,19 @@ impl Surface for AxSurface {
         &self.capabilities
     }
 
-    async fn snapshot(&self, _opts: &SnapshotOptions) -> Result<Snapshot> {
-        Err(Error::Unsupported {
-            surface: SurfaceKind::Ax.as_str().into(),
-            action: "snapshot".into(),
-        })
+    async fn snapshot(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
+        #[cfg(target_os = "macos")]
+        {
+            macos::snapshot(opts)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = opts;
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Ax.as_str().into(),
+                action: "snapshot".into(),
+            })
+        }
     }
 
     async fn act(&self, _action: &Action) -> Result<ActionResult> {

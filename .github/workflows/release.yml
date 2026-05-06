@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: write
+
+jobs:
+  windows-binary:
+    name: Windows binary
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p agent-ctrl-cli
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          $asset = "agent-ctrl-$tag-x86_64-pc-windows-msvc.zip"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\agent-ctrl.exe dist\agent-ctrl.exe
+          Copy-Item README.md dist\README.md
+          Copy-Item LICENSE dist\LICENSE
+          Compress-Archive -Path dist\* -DestinationPath $asset -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+          generate_release_notes: true

@@ -95,6 +95,10 @@ jobs:
         env:
           RUN_UIA_TESTS: "1"
         if: runner.os == 'Windows'
+      - run: npm run test --workspace=@agent-ctrl/client
+        env:
+          RUN_UIA_TESTS: "1"
+        if: runner.os == 'Windows'
       - run: .\target\debug\agent-ctrl.exe close --session mock
         if: always()
         continue-on-error: true

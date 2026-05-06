@@ -60,8 +60,19 @@ new AgentCtrl({
 ## Status
 
 `v0.1` - paired with the daemon's mock surface for protocol validation and
-the Windows UIA surface for real native-app automation. AX is present as a
-scaffold; Linux, Android, and iOS are not implemented yet.
+the Windows UIA surface for real native-app automation. AX has an initial
+macOS snapshot preview; Linux, Android, and iOS are not implemented yet.
+
+## Real UIA Tests
+
+The default test suite uses the mock surface. The opt-in Windows UIA test uses
+the deterministic `agent-ctrl-uia-fixture`, not a built-in Windows app:
+
+```powershell
+cargo build -p agent-ctrl-cli -p agent-ctrl-uia-fixture
+$env:RUN_UIA_TESTS = "1"
+npm run test --workspace=@agent-ctrl/client
+```
 
 ## API Notes
 

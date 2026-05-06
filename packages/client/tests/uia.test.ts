@@ -1,49 +1,23 @@
-// End-to-end test: drives the UIA surface against a real Notepad window.
-//
-// This file is a *contract* for `surface-uia` - it captures what v0.1 of
-// the implementation must deliver. As we implement the surface against
-// the spec in `docs/uia-mapping.md`, these tests turn green.
+// Opt-in end-to-end test: drives the UIA surface through the TypeScript client
+// against the deterministic Win32 fixture app.
 //
 // Skipped unless:
 //   - `process.platform === "win32"` (UIA is Windows-only), AND
 //   - `RUN_UIA_TESTS=1` is set in the environment.
 //
-// The env-var gate keeps CI green and avoids spawning Notepad windows on
-// every contributor's machine. Run locally with:
+// Build the fixture and run locally with:
 //
+//   cargo build -p agent-ctrl-cli -p agent-ctrl-uia-fixture
 //   RUN_UIA_TESTS=1 npm run test --workspace=@agent-ctrl/client
 
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AgentCtrl, type Snapshot } from "../src/index.js";
-
-/**
- * Bring a window matching `titleSubstring` to the foreground via `WScript.Shell.AppActivate`.
- *
- * Notepad is foregrounded by Windows when it spawns, but adjacent apps (the
- * IDE / terminal hosting the test runner) often steal focus back before our
- * snapshot fires. Without this helper the snapshot captures whatever app
- * happens to be foreground, not Notepad.
- */
-function bringToForeground(titleSubstring: string): void {
-  try {
-    execFileSync(
-      "powershell",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `$null = (New-Object -ComObject WScript.Shell).AppActivate('${titleSubstring}')`,
-      ],
-      { stdio: "ignore" },
-    );
-  } catch {
-    // Best-effort. If PowerShell or WScript is unavailable the test will fail
-    // later with a clearer assertion error.
-  }
-}
+import { AgentCtrl, type RefId, type SessionId, type Snapshot } from "../src/index.js";
 
 const DAEMON_COMMAND = [
   "cargo",
@@ -61,10 +35,234 @@ const isWindows = process.platform === "win32";
 const optedIn = process.env.RUN_UIA_TESTS === "1";
 const runSuite = isWindows && optedIn;
 
-/** Wait until `predicate` returns truthy or the deadline passes. */
+describe.skipIf(!runSuite)("AgentCtrl driving the UIA fixture", () => {
+  let client: AgentCtrl | null = null;
+  let session: SessionId | null = null;
+  let fixture: ChildProcess | null = null;
+  let tempDir: string | null = null;
+
+  beforeEach(async () => {
+    tempDir = mkdtempSync(resolve(tmpdir(), "agent-ctrl-ts-uia-"));
+    const readyFile = resolve(tempDir, "fixture.ready");
+    const fixtureExe = fixturePath();
+    if (!existsSync(fixtureExe)) {
+      throw new Error(
+        `missing UIA fixture at ${fixtureExe}; run cargo build -p agent-ctrl-uia-fixture`,
+      );
+    }
+
+    fixture = spawn(
+      fixtureExe,
+      ["--ready-file", readyFile, "--auto-close-ms", "60000"],
+      { stdio: "ignore" },
+    );
+    await waitFor(async () => (existsSync(readyFile) ? true : null));
+
+    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    session = await client.openSession("uia");
+  });
+
+  afterEach(async () => {
+    if (client) {
+      if (session) {
+        await client.closeSession(session).catch(() => {});
+      }
+      await client.close().catch(() => {});
+      client = null;
+      session = null;
+    }
+    if (fixture) {
+      fixture.kill();
+      fixture = null;
+    }
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+  });
+
+  it("snapshots the fixture and exposes inspect helpers", async () => {
+    const snap = await snapshotFixture();
+    expect(snap.surface_kind).toBe("uia");
+    expect(snap.app.name).toBe("agent-ctrl-uia-fixture");
+
+    const button = await firstRef({ name: "Increment", role: "button" });
+    const name = await client!.get(session!, "name", button);
+    expect(name.value).toBe("Increment");
+
+    const enabled = await client!.is(session!, button, "enabled");
+    expect(enabled.value).toBe(true);
+  }, 120_000);
+
+  it("acts, waits, and reads updated values", async () => {
+    await snapshotFixture();
+    const field = await firstRef({ role: "text-field" });
+    const button = await firstRef({ name: "Increment", role: "button" });
+    const clicked = await client!.act(session!, { kind: "click", ref_id: button });
+    expect(clicked.ok).toBe(true);
+
+    const waited = await client!.waitFor(session!, {
+      predicate: {
+        kind: "appears",
+        query: { name: "Status: count 1", role: "text-field", limit: 1 },
+      },
+      timeout_ms: 5000,
+      poll_ms: 100,
+    });
+    expect(waited.outcome).toBe("matched");
+
+    const filled = await client!.act(session!, {
+      kind: "fill",
+      ref_id: field,
+      value: "fixture edited from ts",
+    });
+    expect(filled.ok).toBe(true);
+
+    const valueWait = await client!.waitFor(session!, {
+      predicate: {
+        kind: "value-contains",
+        query: { role: "text-field", limit: 1 },
+        value: "fixture edited from ts",
+      },
+      timeout_ms: 5000,
+      poll_ms: 100,
+    });
+    expect(valueWait.outcome).toBe("matched");
+  }, 120_000);
+
+  it("handles check state and selection state", async () => {
+    await snapshotFixture();
+
+    const checkbox = await firstRef({ name: "Enable advanced mode", role: "checkbox" });
+    const checked = await client!.act(session!, { kind: "check", ref_id: checkbox });
+    expect(checked.ok).toBe(true);
+
+    const checkedState = await client!.waitFor(session!, {
+      predicate: {
+        kind: "state",
+        query: { name: "Enable advanced mode", role: "checkbox", limit: 1 },
+        field: "checked",
+        value: true,
+      },
+      timeout_ms: 5000,
+      poll_ms: 100,
+    });
+    expect(checkedState.outcome).toBe("matched");
+
+    await snapshotFixture();
+    const option = await firstRef({ name: "Second", role: "option" });
+    const selected = await client!.act(session!, {
+      kind: "select",
+      ref_id: option,
+      value: "Second",
+    });
+    expect(selected.ok).toBe(true);
+
+    const selectedState = await client!.waitFor(session!, {
+      predicate: {
+        kind: "state",
+        query: { name: "Second", role: "option", limit: 1 },
+        field: "selected",
+        value: true,
+      },
+      timeout_ms: 5000,
+      poll_ms: 100,
+    });
+    expect(selectedState.outcome).toBe("matched");
+  }, 120_000);
+
+  it("captures window, ref, region, and annotated screenshots", async () => {
+    await snapshotFixture();
+    const checkbox = await firstRef({ name: "Enable advanced mode", role: "checkbox" });
+
+    const windowShot = await client!.act(session!, {
+      kind: "screenshot",
+      target: { kind: "window" },
+    });
+    const refShot = await client!.act(session!, {
+      kind: "screenshot",
+      target: { kind: "ref", ref_id: checkbox },
+    });
+    const regionShot = await client!.act(session!, {
+      kind: "screenshot",
+      target: { kind: "region", region: { x: 0, y: 0, w: 64, h: 64 } },
+    });
+    const annotated = await client!.act(session!, {
+      kind: "screenshot",
+      target: { kind: "window" },
+      annotated: true,
+    });
+
+    assertPngPayload(windowShot.data);
+    assertPngPayload(refShot.data);
+    assertPngPayload(regionShot.data);
+    assertPngPayload(annotated.data);
+    expect((annotated.data as { annotated?: boolean }).annotated).toBe(true);
+  }, 120_000);
+
+  it("executes batch steps in order", async () => {
+    await snapshotFixture();
+    const outcomes = await client!.batch(
+      session!,
+      [
+        { op: "find", query: { name: "Increment", role: "button", limit: 1 } },
+        { op: "get", field: "window" },
+        { op: "list_windows" },
+      ],
+      { bail: true },
+    );
+
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
+  }, 120_000);
+
+  it("tracks sibling dialog windows", async () => {
+    await snapshotFixture();
+    const opener = await firstRef({ name: "Open dialog", role: "button" });
+    const opened = await client!.act(session!, { kind: "click", ref_id: opener });
+    expect(opened.ok).toBe(true);
+
+    const appeared = await client!.waitFor(session!, {
+      predicate: { kind: "window-appears", title: "Fixture Secondary Dialog" },
+      timeout_ms: 5000,
+      poll_ms: 100,
+    });
+    expect(appeared.outcome).toBe("matched");
+
+    const windows = await client!.listWindows(session!);
+    const dialog = windows.find((w) => w.title?.includes("Fixture Secondary Dialog"));
+    expect(dialog).toBeDefined();
+
+    const focused = await client!.act(session!, {
+      kind: "focus_window",
+      window_id: dialog!.id,
+    });
+    expect(focused.ok).toBe(true);
+
+    await client!.snapshot(session!);
+    const ok = await firstRef({ name: "Dialog OK", role: "button" });
+    const closed = await client!.act(session!, { kind: "click", ref_id: ok });
+    expect(closed.ok).toBe(true);
+  }, 120_000);
+
+  async function snapshotFixture(): Promise<Snapshot> {
+    return client!.snapshot(session!, {
+      target: { by: "process-name", name: "agent-ctrl-uia-fixture" },
+    });
+  }
+
+  async function firstRef(query: { name?: string; role?: string }): Promise<RefId> {
+    const matches = await waitFor(async () => {
+      const results = await client!.find(session!, { ...query, limit: 1 });
+      return results[0]?.ref_id;
+    });
+    return matches;
+  }
+});
+
 async function waitFor<T>(
   predicate: () => Promise<T | null | undefined>,
-  { timeoutMs = 10_000, intervalMs = 200 } = {},
+  { timeoutMs = 10_000, intervalMs = 100 } = {},
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -75,340 +273,26 @@ async function waitFor<T>(
   throw new Error(`waitFor timed out after ${timeoutMs}ms`);
 }
 
-describe.skipIf(!runSuite)("AgentCtrl driving the UIA surface against Notepad", () => {
-  let client: AgentCtrl | null = null;
-  let notepad: ChildProcess | null = null;
-
-  beforeEach(async () => {
-    notepad = spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
-    // Win11 Notepad's UIA tree (XAML) populates lazily after the window is
-    // visible - the editable Document and the tab bar arrive on a separate
-    // tick from the top-level window. Give it a moment, then poll inside the
-    // test if a snapshot still misses them.
-    await new Promise((r) => setTimeout(r, 750));
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
-  });
-
-  /**
-   * Snapshot Notepad, retrying until the editable Document ref shows up.
-   * Win11 Notepad emits the document into its UIA tree a beat after the
-   * window appears; without this, fast snapshots intermittently catch a
-   * window-only tree.
-   */
-  async function snapshotReady(session: SessionId): Promise<Snapshot> {
-    return waitFor(async () => {
-      const s = await client!.snapshot(session, NOTEPAD_TARGET);
-      return findEditableRefs(s).length > 0 ? s : null;
-    });
-  }
-
-  afterEach(async () => {
-    if (client) {
-      await client.close();
-      client = null;
-    }
-    if (notepad) {
-      notepad.kill();
-      notepad = null;
-    }
-  });
-
-  // Use process-name targeting so the test is locale-independent - the window
-  // title is "Untitled - Notepad" in English but localized in other languages.
-  const NOTEPAD_TARGET = { target: { by: "process-name" as const, name: "Notepad" } };
-
-  it("captures Notepad and exposes its edit area", async () => {
-    const session = await client!.openSession("uia");
-    const snap: Snapshot = await snapshotReady(session);
-
-    expect(snap.surface_kind).toBe("uia");
-    expect(snap.app.name.toLowerCase()).toMatch(/notepad/);
-
-    // Notepad's edit surface is a TextField on classic Notepad (UIA `Edit`)
-    // or a Document on Win11 Notepad (UIA `Document` + ValuePattern). Either
-    // is a legitimate "user-editable text region" and should produce a ref.
-    const editableRefs = findEditableRefs(snap);
-    expect(editableRefs.length).toBeGreaterThan(0);
-
-    // Every emitted ref should carry a UIA NativeHandle with a non-empty
-    // RuntimeId (4 LE bytes per i32 slot, so length is a positive multiple
-    // of 4). AutomationId is optional - Notepad's controls usually omit it.
-    const editEntry = snap.refs.entries[editableRefs[0]!]!;
-    expect(editEntry.native?.platform).toBe("uia");
-    if (editEntry.native?.platform === "uia") {
-      expect(editEntry.native.runtime_id.length).toBeGreaterThan(0);
-      expect(editEntry.native.runtime_id.length % 4).toBe(0);
-    }
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("fills the edit area and reads the value back", async () => {
-    const session = await client!.openSession("uia");
-    const snap = await snapshotReady(session);
-
-    const editableRefs = findEditableRefs(snap);
-    const editRef = editableRefs[0];
-    expect(editRef).toBeDefined();
-
-    const text = "hello from agent-ctrl";
-    const result = await client!.act(session, {
-      kind: "fill",
-      ref_id: editRef!,
-      value: text,
-    });
-    expect(result.ok).toBe(true);
-
-    // Re-snapshot the same window. The edit's value should reflect the typed text.
-    const snap2 = await waitFor(async () => {
-      const s = await client!.snapshot(session, NOTEPAD_TARGET);
-      const node = findNodeByRef(s, editRef!);
-      return node?.value && node.value.includes(text) ? s : null;
-    });
-
-    const node = findNodeByRef(snap2, editRef!);
-    expect(node?.value).toContain(text);
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("clicks an invoke-able menu item", async () => {
-    const session = await client!.openSession("uia");
-    const snap = await snapshotReady(session);
-
-    // Pick any menu-item ref. We can't hardcode "File" because the menu text
-    // is localized (Polish: "Plik", German: "Datei", etc.). The contract is
-    // "click action works against an Invoke-pattern element", and any menu
-    // item exposes Invoke.
-    const menuRef = Object.entries(snap.refs.entries).find(
-      ([, e]) => e.role === "menu-item",
-    )?.[0];
-    expect(menuRef, "no menu-item refs found in Notepad's tree").toBeDefined();
-
-    const result = await client!.act(session, { kind: "click", ref_id: menuRef! });
-    expect(result.ok).toBe(true);
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("types text via SendInput without erroring", async () => {
-    const session = await client!.openSession("uia");
-    const snap = await snapshotReady(session);
-
-    const editRef = findEditableRefs(snap)[0];
-    expect(editRef).toBeDefined();
-
-    bringToForeground("Notepad");
-    const focusRes = await client!.act(session, { kind: "focus", ref_id: editRef! });
-    expect(focusRes.ok).toBe(true);
-
-    // We deliberately do NOT round-trip the typed value through a
-    // re-snapshot. Win11 Notepad's WinUI 3 input layer is unreliable about
-    // reflecting injected `KEYEVENTF_UNICODE` keystrokes (under load it can
-    // drop, reorder, or substitute characters), and what `surface-uia`
-    // actually owns is "the events were inserted into the OS input queue".
-    // For guaranteed text delivery against an editable field, agents should
-    // use `Fill` - covered above and in the `clears typed text` test below.
-    const typeRes = await client!.act(session, { kind: "type", text: "hello" });
-    expect(typeRes.ok).toBe(true);
-
-    // The daemon must stay responsive after the SendInput batch - a stuck
-    // worker would surface here as a snapshot timeout.
-    const snap2 = await client!.snapshot(session, NOTEPAD_TARGET);
-    expect(snap2.surface_kind).toBe("uia");
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("reads selection state from the active Notepad tab", async () => {
-    const session = await client!.openSession("uia");
-    const snap = await snapshotReady(session);
-
-    // Win11 Notepad's tab bar contains a selectable TabItem per open file.
-    // With a fresh Notepad there's exactly one tab, and it's the active one,
-    // so its SelectionItemPattern.IsSelected must surface as true.
-    const tabs = collectNodesByRole(snap, "tab");
-    expect(tabs.length, "no tab elements found in Notepad's tree").toBeGreaterThan(0);
-    const selectedTabs = tabs.filter((t) => t.state.selected === true);
-    expect(selectedTabs.length, "expected at least one tab with selected: true").toBeGreaterThan(0);
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("focuses Notepad by window_id", async () => {
-    const session = await client!.openSession("uia");
-    const snap = await snapshotReady(session);
-
-    const windowId = snap.window?.id;
-    expect(windowId, "snapshot is missing window.id").toBeDefined();
-
-    // Steal foreground first so FocusWindow has work to do - otherwise the
-    // AttachThreadInput dance short-circuits.
-    spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
-    await new Promise((r) => setTimeout(r, 500));
-
-    const res = await client!.act(session, { kind: "focus_window", window_id: windowId! });
-    expect(res.ok).toBe(true);
-
-    // Daemon must remain responsive and still resolve Notepad.
-    const after = await client!.snapshot(session, NOTEPAD_TARGET);
-    expect(after.surface_kind).toBe("uia");
-    expect(after.app.name.toLowerCase()).toMatch(/notepad/);
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("switches to Notepad by app_id", async () => {
-    const session = await client!.openSession("uia");
-    const snap = await snapshotReady(session);
-
-    const appId = snap.app.id;
-    expect(appId).toBeTruthy();
-
-    // Open a competing window so the foreground actually changes.
-    spawn("notepad.exe", [], { detached: false, stdio: "ignore" });
-    await new Promise((r) => setTimeout(r, 500));
-
-    const res = await client!.act(session, { kind: "switch_app", app_id: appId });
-    expect(res.ok).toBe(true);
-
-    // SwitchApp clears the daemon's RefMap, so the next ref-bearing action
-    // would need a fresh snapshot. Verifying the snapshot itself succeeds
-    // is enough to confirm the daemon remains responsive.
-    const after = await client!.snapshot(session, NOTEPAD_TARGET);
-    expect(after.surface_kind).toBe("uia");
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("captures a PNG screenshot of the pinned Notepad window", async () => {
-    const session = await client!.openSession("uia");
-    await snapshotReady(session);
-
-    const res = await client!.act(session, { kind: "screenshot" });
-    expect(res.ok).toBe(true);
-
-    // ActionResult.data carries { format, encoding, width, height, data }.
-    const data = res.data as
-      | { format?: string; encoding?: string; width?: number; height?: number; data?: string }
-      | undefined;
-    expect(data?.format).toBe("png");
-    expect(data?.encoding).toBe("base64");
-    expect(typeof data?.width).toBe("number");
-    expect(typeof data?.height).toBe("number");
-    expect(data!.width!).toBeGreaterThan(0);
-    expect(data!.height!).toBeGreaterThan(0);
-    expect(typeof data?.data).toBe("string");
-    expect(data!.data!.length).toBeGreaterThan(100);
-
-    // Verify the payload is actually a PNG by checking the magic bytes.
-    const png = Buffer.from(data!.data!, "base64");
-    expect(png.length).toBeGreaterThan(8);
-    // PNG signature: 89 50 4E 47 0D 0A 1A 0A
-    expect(png[0]).toBe(0x89);
-    expect(png[1]).toBe(0x50);
-    expect(png[2]).toBe(0x4e);
-    expect(png[3]).toBe(0x47);
-
-    await client!.closeSession(session);
-  }, 120_000);
-
-  it("clears typed text with SelectAll then Delete", async () => {
-    const session = await client!.openSession("uia");
-    const snap = await snapshotReady(session);
-
-    const editRef = findEditableRefs(snap)[0];
-    expect(editRef).toBeDefined();
-
-    // Seed via Fill (path already verified in earlier test) so the Press
-    // assertions are about the chord, not about typing.
-    const seed = "to be deleted";
-    const fillRes = await client!.act(session, {
-      kind: "fill",
-      ref_id: editRef!,
-      value: seed,
-    });
-    expect(fillRes.ok).toBe(true);
-
-    // Wait until the Fill is reflected before clearing - otherwise a fast
-    // Press could race with Notepad's value-pattern apply.
-    await waitFor(async () => {
-      const s = await client!.snapshot(session, NOTEPAD_TARGET);
-      return findNodeByRef(s, editRef!)?.value?.includes(seed) ? s : null;
-    });
-
-    bringToForeground("Notepad");
-
-    // SelectAll(ref_id) focuses the field then sends Ctrl+A - single round
-    // trip rather than two. This also exercises the SelectAll action plumbing.
-    const selectRes = await client!.act(session, { kind: "select_all", ref_id: editRef! });
-    expect(selectRes.ok).toBe(true);
-    const deleteRes = await client!.act(session, { kind: "press", keys: "Delete" });
-    expect(deleteRes.ok).toBe(true);
-
-    const snap2 = await waitFor(async () => {
-      const s = await client!.snapshot(session, NOTEPAD_TARGET);
-      const node = findNodeByRef(s, editRef!);
-      // Notepad reports an empty Document value as undefined or "".
-      return !node?.value ? s : null;
-    });
-
-    const node = findNodeByRef(snap2, editRef!);
-    expect(node?.value ?? "").toBe("");
-
-    await client!.closeSession(session);
-  }, 120_000);
-});
-
-// ---------- helpers ----------
-
-function findRefs(snap: Snapshot, role: string): string[] {
-  return Object.entries(snap.refs.entries)
-    .filter(([, e]) => e.role === role)
-    .map(([refId]) => refId);
+function fixturePath(): string {
+  if (process.env.AGENT_CTRL_UIA_FIXTURE) return process.env.AGENT_CTRL_UIA_FIXTURE;
+  const exe = process.platform === "win32" ? "agent-ctrl-uia-fixture.exe" : "agent-ctrl-uia-fixture";
+  return resolve(process.cwd(), "../../target/debug", exe);
 }
 
-/** Refs that point at user-editable text regions, regardless of which UIA
- *  ControlType the host app chose to use. */
-function findEditableRefs(snap: Snapshot): string[] {
-  return Object.entries(snap.refs.entries)
-    .filter(([, e]) => e.role === "text-field" || e.role === "document")
-    .map(([refId]) => refId);
-}
+function assertPngPayload(data: unknown): void {
+  const payload = data as
+    | { format?: string; encoding?: string; width?: number; height?: number; data?: string }
+    | undefined;
+  expect(payload?.format).toBe("png");
+  expect(payload?.encoding).toBe("base64");
+  expect(payload?.width).toBeGreaterThan(0);
+  expect(payload?.height).toBeGreaterThan(0);
+  expect(typeof payload?.data).toBe("string");
 
-function findNodeByRef(snap: Snapshot, refId: string): { value?: string } | null {
-  const stack: Array<{ ref_id?: string; value?: string; children?: unknown[] }> = [
-    snap.root as unknown as { ref_id?: string; value?: string; children?: unknown[] },
-  ];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    if (node.ref_id === refId) return node;
-    if (Array.isArray(node.children)) {
-      for (const c of node.children) {
-        stack.push(c as { ref_id?: string; value?: string; children?: unknown[] });
-      }
-    }
-  }
-  return null;
-}
-
-interface NodeWithState {
-  role: string | { unknown: string };
-  state: { selected?: boolean; checked?: string; expanded?: boolean; required?: boolean };
-  children?: unknown[];
-}
-
-function collectNodesByRole(snap: Snapshot, role: string): NodeWithState[] {
-  const found: NodeWithState[] = [];
-  const stack: NodeWithState[] = [snap.root as unknown as NodeWithState];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    if (node.role === role) found.push(node);
-    if (Array.isArray(node.children)) {
-      for (const c of node.children) {
-        stack.push(c as NodeWithState);
-      }
-    }
-  }
-  return found;
+  const bytes = Buffer.from(payload!.data!, "base64");
+  expect(bytes.length).toBeGreaterThan(8);
+  expect(bytes[0]).toBe(0x89);
+  expect(bytes[1]).toBe(0x50);
+  expect(bytes[2]).toBe(0x4e);
+  expect(bytes[3]).toBe(0x47);
 }

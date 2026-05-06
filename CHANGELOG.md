@@ -6,6 +6,15 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [0.1.1] - 2026-05-06
+
+Production-polish release for the Windows native agent loop. Windows is the
+supported action-ready surface; macOS AX now has an initial focused-window
+snapshot preview. Browser automation remains out of scope - use the sibling
+[agent-browser](https://github.com/vercel-labs/agent-browser) project.
+
 ### Added
 
 - Mature Windows UIA agent loop:
@@ -19,6 +28,8 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
     stable tree signatures.
 - Screenshot targets for pinned window, desktop, region, and element refs, plus
   annotated PNG screenshots with cached `@eN` labels.
+- Windows install script and tag-based GitHub Release artifact workflow.
+- macOS AX focused-window snapshot preview with role/name/value/state/bounds mapping.
 
 ### Changed
 
@@ -34,9 +45,6 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 - CLI JSON contract tests against the mock surface.
 - Windows reliability guide covering dialogs, elevation/UIPI, stale refs,
   foreground focus, IME/non-ASCII text, screenshots, and app framework quirks.
-
-### Changed
-
 - Removed browser/CDP scope from this project. Use agent-ctrl for native UI and
   agent-browser for browser automation.
 - Windows button activation now prefers `InvokePattern`, with keyboard Space and
@@ -61,18 +69,30 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
   `cargo fmt --all -- --check`, TypeScript build, and TypeScript tests.
 - Optional Windows smoke: `RUN_UIA_TESTS=1 cargo test -p agent-ctrl-cli --test windows_uia_fixture`.
 
+### Known Limitations
+
+See README's "Known limitations" section. Highlights:
+
+- Windows is the only action-ready surface. AX can capture a focused-window snapshot on macOS;
+  Linux / Android / iOS / browser flows are not implemented in this project yet.
+- Local TCP daemon auth is developer-machine scoped. Anyone who can read the session
+  file can use that session.
+- Refs are valid only against the snapshot that produced them; running `wait-for` in
+  parallel with another command on the same session can shift the cached refs mid-flow.
+- Modern Win11 file dialogs and popup menus open as sibling top-level HWNDs.
+- `type` bypasses IME; non-ASCII text input goes through `fill` or clipboard paste.
+
 ## [0.1.0] - 2026-05-01
 
-First public release. **Windows is the supported platform**; macOS AX is scaffolded,
-while Linux AT-SPI, Android, and iOS are planned. Browser automation is intentionally out of scope -
-use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project.
+First public source release. Windows was the supported platform; CDP, macOS AX,
+Linux AT-SPI, Android, and iOS were scaffolded.
 
 ### Added
 
 - **`Surface` trait** as the cross-platform contract every accessibility backend implements.
   Data-oriented (`snapshot()` returns a unified `Snapshot` schema); refs are stable per
   snapshot and re-resolved at action time via `(role, name, nth)`.
-- **Windows UI Automation surface** (`agent-ctrl-surface-uia`), initial implementation:
+- **Windows UI Automation surface** (`agent-ctrl-surface-uia`), feature-complete:
   full action vocabulary, COM worker thread, DPI-normalized coordinates, locale-independent
   process targeting via `WindowTarget::ProcessName`.
 - **Long-running daemon** (`agent-ctrl-daemon`) with both stdio (TS client transport) and
@@ -81,35 +101,16 @@ use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) pr
   `double-click`, `right-click`, `hover`, `focus`, `fill`, `type`, `press`, `key-down`,
   `key-up`, `select`, `select-all`, `scroll`, `scroll-into-view`, `drag`, `switch-app`,
   `focus-window`, `screenshot`, `wait`.
-- **`find` verb** (and `Snapshot::find` API). Looks up refs in the cached snapshot
-  without re-walking the OS tree. Supports `--role`, `--exact`, `--in @eN`, `--first`
-  (bare-ref shell substitution), and `--limit`.
-- **`wait-for` verb** with three reliability-tiered predicates: name/role appearance
-  (`appears`), disappearance (`--gone`), and tree-signature stability (`--stable`,
-  with `--idle-ms`). Daemon-side polling at `--poll` cadence, capped at a 1h timeout.
-  Distinct exit codes: 0 satisfied, 1 bad args, 2 timeout.
-- **`window-list` verb** mirroring agent-browser's `tab_list`. Enumerates all visible
-  top-level windows owned by the pinned process; exposes `--first-other` for shell
-  substitution into `focus-window` when a dialog opens as a sibling HWND.
-- **`@agent-ctrl/client`** TypeScript wrapper that spawns the Rust daemon and talks
-  JSON-RPC over stdio. Surface area matches the CLI: `openSession`, `snapshot`, `act`,
-  `find`, `waitFor`, `listWindows`, `closeSession`, `close`.
-- **Mock surface** (gated by the `mock` Cargo feature) returning a deterministic two-button
-  fake tree. Powers protocol tests on every host without requiring real OS accessibility.
-- **GitHub Actions CI** running fmt, clippy (`-D warnings`, pedantic + nursery), and
-  tests on Ubuntu, macOS, and Windows runners.
+- **`find` verb** and `Snapshot::find` API. Looks up refs in the cached snapshot
+  without re-walking the OS tree.
+- **`wait-for` verb** with appearance, disappearance, and tree-stability predicates.
+- **`window-list` verb** for visible top-level windows owned by the pinned process.
+- **`@agent-ctrl/client`** TypeScript wrapper over stdio JSON-RPC.
+- **Mock surface** gated by the `mock` Cargo feature.
+- **GitHub Actions CI** running fmt, clippy, and tests on Ubuntu, macOS, and Windows.
 
-### Known limitations
+### Known Limitations
 
-See README's "Known limitations" section. Highlights:
-
-- Windows is the only ready surface. AX is scaffolded on macOS and returns `Unsupported`;
-  Linux / Android / iOS / browser flows are not implemented in this project yet.
-- Local TCP daemon auth is developer-machine scoped. Anyone who can read the session
-  file can use that session.
-- Refs are valid only against the snapshot that produced them; running `wait-for` in
-  parallel with another command on the same session (across two shells) can shift the
-  cached refs mid-flow.
-- Modern Win11 file dialogs and popup menus open as sibling top-level HWNDs -
-  use `window-list` + `focus-window` to reach them.
-- `type` bypasses IME; non-ASCII text input goes through `fill` (UIA `ValuePattern`).
+- Windows was the only ready surface. Other surfaces compiled and returned `Unsupported`.
+- Local TCP daemon sessions had no authentication.
+- Refs were valid only against the snapshot that produced them.

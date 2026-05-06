@@ -6,11 +6,23 @@
   OS automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
-> **Status (v0.1.0):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against real apps. macOS Accessibility (AX) is scaffolded - it compiles, but its methods return `Unsupported`. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
+> **Status (v0.1.1):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against the deterministic Win32 fixture. macOS Accessibility (AX) has an initial focused-window snapshot preview, but actions are still unsupported. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
 >
 > **Browser automation is out of scope.** agent-ctrl drives native UI; for Chromium-via-CDP use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project. The two are designed to compose in the same agent loop.
 
 ## Installation
+
+### Windows binary
+
+For tagged releases, download the Windows zip from GitHub Releases or run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+```
+
+The installer downloads the latest `agent-ctrl.exe`, installs it under
+`%LOCALAPPDATA%\agent-ctrl\bin`, and adds that directory to the user PATH
+unless `-NoPath` is passed.
 
 ### From source (recommended for v0.1)
 
@@ -34,7 +46,7 @@ npm install @agent-ctrl/client
 
 ### Requirements
 
-- **Windows 10/11** for UIA. Other OSes build cleanly; AX is scaffolded on macOS, while Linux / Android / iOS are not implemented yet.
+- **Windows 10/11** for UIA. Other OSes build cleanly; AX has a macOS snapshot preview, while Linux / Android / iOS are not implemented yet.
 - **Rust 1.85+** (workspace MSRV; rustup will install it from `rust-toolchain.toml`).
 - **Node.js 20+** only when using the TypeScript client.
 
@@ -330,7 +342,7 @@ The repository is a **dual workspace** - a Cargo workspace for the Rust engine a
 | [`crates/cli`](crates/cli) | The `agent-ctrl` binary - user-facing entrypoint. |
 | [`crates/surface-uia`](crates/surface-uia) | Windows UI Automation surface (Windows-only). |
 | [`crates/uia-fixture`](crates/uia-fixture) | Deterministic native Win32 fixture app for UIA reliability tests. |
-| [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (scaffolded; macOS-only). |
+| [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (snapshot preview; macOS-only). |
 | [`packages/client`](packages/client) | `@agent-ctrl/client` - typed TypeScript wrapper over stdio JSON-RPC. |
 
 Surfaces gated by `target_os` compile to empty crates on other platforms, so the workspace builds on any host.
@@ -342,7 +354,7 @@ A **surface** is one accessibility protocol - UIA, AX, AT-SPI, etc. A **platform
 | Platform | Native surface | Status |
 |---|---|---|
 | Windows | [`surface-uia`](crates/surface-uia) - UI Automation | **ready** |
-| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | scaffolded |
+| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | snapshot preview |
 | Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | not started |
 | Android | _planned_ `surface-accessibility-service` (JNI) | not started |
 | iOS | _planned_ `surface-xcuitest` (WebDriverAgent) | not started |
@@ -350,6 +362,9 @@ A **surface** is one accessibility protocol - UIA, AX, AT-SPI, etc. A **platform
 For browsers, run agent-ctrl alongside [agent-browser](https://github.com/vercel-labs/agent-browser); the two are complementary, not competing.
 
 Acronyms in one line: **UIA** = Microsoft UI Automation, **AX** = macOS Accessibility, **AT-SPI** = the Linux GNOME accessibility bus, **XCUITest** = Apple's UI test framework.
+
+AX preview notes live in [docs/macos-ax.md](docs/macos-ax.md). Windows
+production guidance lives in [docs/windows-reliability.md](docs/windows-reliability.md).
 
 ## Build
 
@@ -435,7 +450,7 @@ prefer the generic loop above over app-specific assumptions.
 
 These are real today - the goal is to fix or document them as the project matures.
 
-- **Windows is the only ready surface.** AX is scaffolded on macOS and returns `Unsupported`; Linux / Android / iOS / browser flows are not implemented in this project yet.
+- **Windows is the only action-ready surface.** AX can capture the focused macOS window when Accessibility permission is granted, but actions still return `Unsupported`; Linux / Android / iOS / browser flows are not implemented in this project yet.
 - **Local TCP daemon auth is developer-machine scoped.** TCP session files include a random bearer token and the daemon rejects missing or incorrect tokens, but anyone who can read `~/.agent-ctrl/<session>.json` can still use that session. Treat sessions as a local developer-machine boundary, not a multi-user security sandbox.
 - **Refs are valid only against the snapshot that produced them.** If `wait-for` runs in parallel with another command on the same session (across two shells), the wait loop refreshes the cached refs on each poll, and a previously-issued ref may resolve to a different element. Sequential CLI usage in one shell - the realistic flow - doesn't trip this.
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.

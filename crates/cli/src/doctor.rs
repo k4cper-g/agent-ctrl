@@ -147,7 +147,7 @@ fn check_environment(out: &mut Vec<Check>) {
             SurfaceStatus::Stub => (
                 Status::Warn,
                 format!(
-                    "surface {}: scaffold only - open will succeed but actions return Unsupported",
+                    "surface {}: partial implementation - inspect may work but actions return Unsupported",
                     kind.as_str()
                 ),
             ),

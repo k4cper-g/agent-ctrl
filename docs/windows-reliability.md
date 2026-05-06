@@ -86,6 +86,15 @@ Common causes:
 - Remote desktop focus can move while an agent is acting. Re-snapshot and
   verify `get window` or `window-list` if input lands in the wrong app.
 
+Production guidance:
+
+- Run `agent-ctrl` at the same integrity level as the app being driven.
+- Avoid mixing manual keyboard/mouse use with an active agent session.
+- Prefer UIA-pattern actions (`click`, `check`, `select`, `fill`) over raw
+  pointer events when both are available.
+- When foreground focus is contested, take a fresh `window-list --json` and
+  confirm the intended window is `focused: true` before sending keystrokes.
+
 ## Text Input
 
 Use the right text primitive:
@@ -96,6 +105,15 @@ Use the right text primitive:
   large or non-ASCII text when the target does not expose `ValuePattern`.
 - `type "text"` sends human-like keystrokes. It is useful for shortcut flows
   and controls that need real key events, but IME composition is not modeled.
+
+IME and keyboard layout caveats:
+
+- `type` sends key/input events through the active Windows input stack. It is
+  useful for shortcuts and ASCII-ish human typing, but it is not an IME model.
+- `fill` bypasses the keyboard layout when the target exposes `ValuePattern`.
+- For long or non-ASCII text, prefer clipboard paste when `fill` is
+  unsupported. Restore the clipboard yourself if the calling agent needs to
+  preserve user clipboard state.
 
 ## App Framework Quirks
 
@@ -109,6 +127,20 @@ For reliable agents:
 - Use `screenshot --target ref --ref @eN` when a visual check needs the exact
   element bounds.
 
+Framework notes:
+
+- Win32 common controls are the most predictable and are covered by the
+  fixture.
+- WinUI and XAML apps can populate their UIA tree lazily. Snapshot, wait for a
+  role/name predicate, then act.
+- Electron and Chromium apps often expose large document-like subtrees. Use
+  `--depth`, role filters, and `--first` to keep agent prompts compact.
+- Office apps may expose rich but deeply nested trees. Prefer named controls
+  and stable waits over index-based flows.
+- Custom-rendered canvases may appear as opaque regions. Use screenshots for
+  visual inspection, but do not expect accessibility refs inside a canvas
+  unless the app exposes them.
+
 ## Screenshots
 
 PNG is the only screenshot format in this milestone. Supported targets:
@@ -120,3 +152,22 @@ PNG is the only screenshot format in this milestone. Supported targets:
 
 `--annotated` draws labels from the cached accessibility snapshot onto the
 PNG. Run `snapshot` first so refs and bounds are current.
+
+## Release Smoke Checklist
+
+Before publishing a Windows binary:
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build -p agent-ctrl-cli -p agent-ctrl-uia-fixture
+$env:RUN_UIA_TESTS = "1"
+cargo test -p agent-ctrl-cli --test windows_uia_fixture
+npm run build --workspace=@agent-ctrl/client
+npm run test --workspace=@agent-ctrl/client
+```
+
+The TypeScript UIA test also uses the fixture when `RUN_UIA_TESTS=1`, so it
+should not depend on Notepad, Calculator, Settings, Explorer, locale-specific
+strings, or Windows-version-specific app redesigns.
