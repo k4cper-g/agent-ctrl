@@ -6,7 +6,7 @@
   OS automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
-> **Status (v0.1.1):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against the deterministic Win32 fixture. macOS Accessibility (AX) has an initial focused-window snapshot preview, but actions are still unsupported. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
+> **Status (v0.1.1):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against the deterministic Win32 fixture. macOS Accessibility (AX) has an initial focused-window snapshot and window-focus preview, but element actions are still unsupported. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
 >
 > **Browser automation is out of scope.** agent-ctrl drives native UI; for Chromium-via-CDP use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project. The two are designed to compose in the same agent loop.
 
@@ -450,7 +450,7 @@ prefer the generic loop above over app-specific assumptions.
 
 These are real today - the goal is to fix or document them as the project matures.
 
-- **Windows is the only action-ready surface.** AX can capture the focused macOS window when Accessibility permission is granted, but actions still return `Unsupported`; Linux / Android / iOS / browser flows are not implemented in this project yet.
+- **Windows is the only action-ready surface.** AX can capture the focused macOS window and raise listed windows when Accessibility permission is granted, but element actions still return `Unsupported`; Linux / Android / iOS / browser flows are not implemented in this project yet.
 - **Local TCP daemon auth is developer-machine scoped.** TCP session files include a random bearer token and the daemon rejects missing or incorrect tokens, but anyone who can read `~/.agent-ctrl/<session>.json` can still use that session. Treat sessions as a local developer-machine boundary, not a multi-user security sandbox.
 - **Refs are valid only against the snapshot that produced them.** If `wait-for` runs in parallel with another command on the same session (across two shells), the wait loop refreshes the cached refs on each poll, and a previously-issued ref may resolve to a different element. Sequential CLI usage in one shell - the realistic flow - doesn't trip this.
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.

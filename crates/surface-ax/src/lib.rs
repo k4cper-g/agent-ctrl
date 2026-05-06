@@ -2,17 +2,20 @@
 //!
 //! The current AX implementation is a snapshot preview: it checks macOS
 //! Accessibility trust, captures the focused window's AX tree, maps common
-//! roles/states/bounds into the shared schema, and returns `Unsupported` for
-//! actions. This is enough to begin validating the next native surface without
-//! pretending it has Windows-level action maturity yet.
+//! roles/states/bounds into the shared schema, lists AX windows for the pinned
+//! app, and supports `focus-window` through `AXRaise`. Element actions still
+//! return `Unsupported`. This is enough to begin validating the next native
+//! surface without pretending it has Windows-level action maturity yet.
 
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
 
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Error, Result, Snapshot, SnapshotOptions, Surface,
-    SurfaceKind,
+    SurfaceKind, WindowInfo,
 };
 use async_trait::async_trait;
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -48,6 +51,8 @@ pub fn accessibility_trust_status() -> AxTrustStatus {
 /// Surface backed by macOS Accessibility.
 pub struct AxSurface {
     capabilities: CapabilitySet,
+    #[cfg(target_os = "macos")]
+    pinned: Mutex<Option<macos::AxPinnedWindow>>,
 }
 
 impl AxSurface {
@@ -65,7 +70,8 @@ impl AxSurface {
                 ));
             }
             Ok(Self {
-                capabilities: CapabilitySet::new().with("snapshot"),
+                capabilities: CapabilitySet::new().with("snapshot").with("windows"),
+                pinned: Mutex::new(None),
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -90,7 +96,17 @@ impl Surface for AxSurface {
     async fn snapshot(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
         #[cfg(target_os = "macos")]
         {
-            macos::snapshot(opts)
+            let pinned = *self
+                .pinned
+                .lock()
+                .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))?;
+            let capture = macos::snapshot(opts, pinned)?;
+            *self
+                .pinned
+                .lock()
+                .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))? =
+                Some(capture.pinned);
+            Ok(capture.snapshot)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -102,11 +118,50 @@ impl Surface for AxSurface {
         }
     }
 
-    async fn act(&self, _action: &Action) -> Result<ActionResult> {
+    async fn act(&self, action: &Action) -> Result<ActionResult> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Action::FocusWindow { window_id } = action {
+                let pinned = macos::focus_window(window_id)?;
+                *self
+                    .pinned
+                    .lock()
+                    .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))? =
+                    Some(pinned);
+                return Ok(ActionResult::ok());
+            }
+        }
+        let _ = action;
         Err(Error::Unsupported {
             surface: SurfaceKind::Ax.as_str().into(),
             action: "act".into(),
         })
+    }
+
+    async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
+        #[cfg(target_os = "macos")]
+        {
+            let pinned = *self
+                .pinned
+                .lock()
+                .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))?;
+            let windows = macos::list_windows(pinned)?;
+            if let Some(next_pinned) = windows.pinned {
+                *self
+                    .pinned
+                    .lock()
+                    .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))? =
+                    Some(next_pinned);
+            }
+            Ok(windows.windows)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Ax.as_str().into(),
+                action: "list_windows".into(),
+            })
+        }
     }
 
     async fn shutdown(&mut self) -> Result<()> {

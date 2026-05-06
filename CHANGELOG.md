@@ -6,7 +6,10 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Added
+
+- AX window listing and `focus-window` preview using session-oriented
+  `pid:<pid>:window:<index>` ids and AX `AXRaise`.
 
 ## [0.1.1] - 2026-05-06
 

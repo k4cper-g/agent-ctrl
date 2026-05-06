@@ -9,16 +9,17 @@ use accessibility_sys::{
     kAXDialogSubrole, kAXEnabledAttribute, kAXErrorSuccess, kAXExpandedAttribute,
     kAXFocusedAttribute, kAXFocusedWindowAttribute, kAXGroupRole, kAXImageRole, kAXMenuBarItemRole,
     kAXMenuBarRole, kAXMenuButtonRole, kAXMenuItemRole, kAXMenuRole, kAXOutlineRole,
-    kAXPopUpButtonRole, kAXPositionAttribute, kAXRadioButtonRole, kAXRoleAttribute,
+    kAXPopUpButtonRole, kAXPositionAttribute, kAXRadioButtonRole, kAXRaiseAction, kAXRoleAttribute,
     kAXScrollAreaRole, kAXSearchFieldSubrole, kAXSelectedAttribute, kAXSizeAttribute,
     kAXSliderRole, kAXStaticTextRole, kAXSubroleAttribute, kAXTabGroupRole, kAXTableRole,
     kAXTextAreaRole, kAXTextFieldRole, kAXTitleAttribute, kAXValueAttribute, kAXValueTypeCGPoint,
-    kAXValueTypeCGSize, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
-    AXUIElementCreateSystemWide, AXUIElementGetPid, AXUIElementRef, AXValueGetValue, AXValueRef,
+    kAXValueTypeCGSize, kAXWindowsAttribute, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
+    AXUIElementCreateApplication, AXUIElementCreateSystemWide, AXUIElementGetPid,
+    AXUIElementPerformAction, AXUIElementRef, AXValueGetValue, AXValueRef,
 };
 use agent_ctrl_core::{
     AppContext, Bounds, Error, NativeHandle, Node, RefMap, Result, Role, Snapshot, SnapshotOptions,
-    State, SurfaceKind, WindowContext, WindowTarget,
+    State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
 };
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 use core_foundation_sys::base::{kCFAllocatorDefault, CFGetTypeID, CFRelease, CFRetain, CFTypeRef};
@@ -29,6 +30,22 @@ use core_foundation_sys::string::{
 };
 
 const DEFAULT_DEPTH: usize = 12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AxPinnedWindow {
+    pub(super) pid: u32,
+    pub(super) index: usize,
+}
+
+pub(super) struct AxSnapshotCapture {
+    pub(super) snapshot: Snapshot,
+    pub(super) pinned: AxPinnedWindow,
+}
+
+pub(super) struct AxWindowList {
+    pub(super) windows: Vec<WindowInfo>,
+    pub(super) pinned: Option<AxPinnedWindow>,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -49,9 +66,18 @@ pub(super) fn is_process_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
-pub(super) fn snapshot(opts: &SnapshotOptions) -> Result<Snapshot> {
-    let root = match &opts.target {
-        WindowTarget::Foreground => focused_window()?,
+pub(super) fn snapshot(
+    opts: &SnapshotOptions,
+    pinned: Option<AxPinnedWindow>,
+) -> Result<AxSnapshotCapture> {
+    let (root, pinned) = match &opts.target {
+        WindowTarget::Foreground => {
+            if let Some(pinned) = pinned {
+                (window_by_index(pinned.pid, pinned.index)?, pinned)
+            } else {
+                focused_window_with_pin()?
+            }
+        }
         WindowTarget::Pid { pid } => app_focused_window(*pid)?,
         WindowTarget::Title { .. } | WindowTarget::ProcessName { .. } => {
             return Err(Error::Unsupported {
@@ -65,23 +91,88 @@ pub(super) fn snapshot(opts: &SnapshotOptions) -> Result<Snapshot> {
     let max_depth = opts.depth.unwrap_or(DEFAULT_DEPTH);
     let mut refs = RefMap::new();
     let node = build_node(root, 0, max_depth, &mut refs);
+    let window_id = window_id(pinned);
     // SAFETY: `root` is returned by a create/copy rule helper.
     unsafe { CFRelease(root.cast::<c_void>()) };
 
-    Ok(Snapshot {
-        captured_at: SystemTime::now(),
-        surface_kind: SurfaceKind::Ax,
-        app: AppContext {
-            id: format!("pid:{pid}"),
-            name: process_name(pid).unwrap_or_else(|| format!("pid {pid}")),
+    Ok(AxSnapshotCapture {
+        snapshot: Snapshot {
+            captured_at: SystemTime::now(),
+            surface_kind: SurfaceKind::Ax,
+            app: AppContext {
+                id: format!("pid:{pid}"),
+                name: process_name(pid).unwrap_or_else(|| format!("pid {pid}")),
+            },
+            window: Some(WindowContext {
+                id: window_id,
+                title,
+            }),
+            root: node,
+            refs,
         },
-        window: Some(WindowContext {
-            id: format!("0x{:x}", root as usize),
-            title,
-        }),
-        root: node,
-        refs,
+        pinned,
     })
+}
+
+pub(super) fn list_windows(pinned: Option<AxPinnedWindow>) -> Result<AxWindowList> {
+    let pinned = match pinned {
+        Some(pinned) => Some(pinned),
+        None => focused_window_pin().ok(),
+    };
+    let pid = pinned.map_or_else(focused_window_pid, |pinned| Ok(pinned.pid))?;
+    let process = process_name(pid).unwrap_or_else(|| format!("pid {pid}"));
+    let focused = focused_window_pin().ok();
+    let array = app_windows(pid)?;
+    // SAFETY: `array` is a valid CFArray copied from AX.
+    let count = unsafe { CFArrayGetCount(array) };
+    let mut windows = Vec::new();
+    for idx in 0..count {
+        let Ok(index) = usize::try_from(idx) else {
+            continue;
+        };
+        let Some(window) = array_element_retained(array, idx) else {
+            continue;
+        };
+        let pin = AxPinnedWindow { pid, index };
+        let window_ref = window.cast_mut().cast();
+        windows.push(WindowInfo {
+            id: window_id(pin),
+            title: string_attr(window_ref, kAXTitleAttribute),
+            process: process.clone(),
+            pid,
+            focused: focused == Some(pin)
+                || bool_attr(window_ref, kAXFocusedAttribute) == Some(true),
+            pinned: pinned == Some(pin),
+        });
+        // SAFETY: release the retained window element.
+        unsafe { CFRelease(window.cast::<c_void>()) };
+    }
+    // SAFETY: release the copy-rule array.
+    unsafe { CFRelease(array.cast::<c_void>()) };
+
+    Ok(AxWindowList { windows, pinned })
+}
+
+pub(super) fn focus_window(id: &str) -> Result<AxPinnedWindow> {
+    let pinned = parse_window_id(id)?;
+    let window = window_by_index(pinned.pid, pinned.index)?;
+    let action = cf_string(kAXRaiseAction)
+        .ok_or_else(|| Error::Surface("failed to allocate AXRaise action string".into()))?;
+    // SAFETY: window and action are valid AX/Core Foundation refs.
+    let err = unsafe { AXUIElementPerformAction(window, action) };
+    // SAFETY: release create/copy-rule refs.
+    unsafe {
+        CFRelease(action.cast::<c_void>());
+        CFRelease(window.cast::<c_void>());
+    }
+    if err == kAXErrorSuccess {
+        Ok(pinned)
+    } else {
+        Err(Error::Action {
+            action: "focus_window".into(),
+            reason: format!("AXRaise failed with AX error {err}"),
+        })
+    }
 }
 
 fn focused_window() -> Result<AXUIElementRef> {
@@ -99,23 +190,55 @@ fn focused_window() -> Result<AXUIElementRef> {
     Ok(window as AXUIElementRef)
 }
 
-fn app_focused_window(pid: u32) -> Result<AXUIElementRef> {
+fn focused_window_with_pin() -> Result<(AXUIElementRef, AxPinnedWindow)> {
+    let window = focused_window()?;
+    let pid = element_pid(window).unwrap_or_default();
+    let index = window_index(pid, window).unwrap_or(0);
+    Ok((window, AxPinnedWindow { pid, index }))
+}
+
+fn focused_window_pin() -> Result<AxPinnedWindow> {
+    let (window, pinned) = focused_window_with_pin()?;
+    // SAFETY: `window` is returned by a copy-rule helper.
+    unsafe { CFRelease(window.cast::<c_void>()) };
+    Ok(pinned)
+}
+
+fn focused_window_pid() -> Result<u32> {
+    let window = focused_window()?;
+    let pid = element_pid(window)
+        .filter(|pid| *pid != 0)
+        .ok_or_else(|| Error::Surface("focused AX window has no pid".into()));
+    // SAFETY: `window` is returned by a copy-rule helper.
+    unsafe { CFRelease(window.cast::<c_void>()) };
+    pid
+}
+
+fn app_focused_window(pid: u32) -> Result<(AXUIElementRef, AxPinnedWindow)> {
+    let original_pid = pid;
     let pid = i32::try_from(pid).map_err(|_| Error::Surface("pid out of range".into()))?;
     // SAFETY: create rule returns an AX application object for pid or null.
-    let app = unsafe { accessibility_sys::AXUIElementCreateApplication(pid) };
+    let app = unsafe { AXUIElementCreateApplication(pid) };
     if app.is_null() {
         return Err(Error::Surface(format!(
             "AX application for pid {pid} was null"
         )));
     }
     let window = element_attr(app, kAXFocusedWindowAttribute)
-        .or_else(|| first_array_element(app, accessibility_sys::kAXWindowsAttribute));
+        .or_else(|| first_array_element(app, kAXWindowsAttribute));
     // SAFETY: release the create-rule app object after copying the window.
     unsafe { CFRelease(app.cast::<c_void>()) };
     let Some(window) = window else {
         return Err(Error::Surface(format!("pid {pid} has no AX window")));
     };
-    Ok(window as AXUIElementRef)
+    let index = window_index(original_pid, window.cast_mut().cast()).unwrap_or(0);
+    Ok((
+        window.cast_mut().cast(),
+        AxPinnedWindow {
+            pid: original_pid,
+            index,
+        },
+    ))
 }
 
 fn build_node(element: AXUIElementRef, depth: usize, max_depth: usize, refs: &mut RefMap) -> Node {
@@ -257,6 +380,105 @@ fn first_array_element(element: AXUIElementRef, attr: &str) -> Option<CFTypeRef>
     } else {
         Some(value)
     }
+}
+
+fn app_windows(pid: u32) -> Result<CFArrayRef> {
+    let pid_i32 = i32::try_from(pid).map_err(|_| Error::Surface("pid out of range".into()))?;
+    // SAFETY: create rule returns an AX application object for pid or null.
+    let app = unsafe { AXUIElementCreateApplication(pid_i32) };
+    if app.is_null() {
+        return Err(Error::Surface(format!(
+            "AX application for pid {pid_i32} was null"
+        )));
+    }
+    let windows = array_attr(app, kAXWindowsAttribute);
+    // SAFETY: release app after copying the windows array.
+    unsafe { CFRelease(app.cast::<c_void>()) };
+    windows.ok_or_else(|| Error::Surface(format!("pid {pid} has no AX windows")))
+}
+
+fn window_by_index(pid: u32, index: usize) -> Result<AXUIElementRef> {
+    let array = app_windows(pid)?;
+    // SAFETY: `array` is a valid CFArray copied from AX.
+    let count = unsafe { CFArrayGetCount(array) };
+    let idx =
+        isize::try_from(index).map_err(|_| Error::Surface("window index out of range".into()))?;
+    if idx < 0 || idx >= count {
+        // SAFETY: release copy-rule array before returning.
+        unsafe { CFRelease(array.cast::<c_void>()) };
+        return Err(Error::Surface(format!(
+            "pid {pid} has no AX window at index {index}"
+        )));
+    }
+    let window = array_element_retained(array, idx)
+        .ok_or_else(|| Error::Surface(format!("pid {pid} window {index} was null")))?;
+    // SAFETY: release copy-rule array. The returned element was retained.
+    unsafe { CFRelease(array.cast::<c_void>()) };
+    Ok(window.cast_mut().cast())
+}
+
+fn window_index(pid: u32, target: AXUIElementRef) -> Option<usize> {
+    let array = app_windows(pid).ok()?;
+    // SAFETY: `array` is a valid CFArray copied from AX.
+    let count = unsafe { CFArrayGetCount(array) };
+    let target_title = string_attr(target, kAXTitleAttribute);
+    let target_bounds = bounds(target);
+    let mut found = None;
+    for idx in 0..count {
+        let window = unsafe { CFArrayGetValueAtIndex(array, idx) };
+        if window.is_null() {
+            continue;
+        }
+        if std::ptr::eq(window, target.cast::<c_void>()) {
+            found = usize::try_from(idx).ok();
+            break;
+        }
+        let window_ref = window.cast_mut().cast();
+        let same_title = string_attr(window_ref, kAXTitleAttribute) == target_title;
+        let same_bounds = bounds(window_ref) == target_bounds;
+        if same_title && same_bounds {
+            found = usize::try_from(idx).ok();
+            break;
+        }
+    }
+    // SAFETY: release copy-rule array.
+    unsafe { CFRelease(array.cast::<c_void>()) };
+    found
+}
+
+fn array_element_retained(array: CFArrayRef, idx: isize) -> Option<CFTypeRef> {
+    // SAFETY: caller supplies an in-bounds index for a valid CFArray.
+    let value = unsafe { CFArrayGetValueAtIndex(array, idx) };
+    if value.is_null() {
+        None
+    } else {
+        // SAFETY: retain the borrowed array element so it survives array release.
+        unsafe { CFRetain(value.cast::<c_void>()) };
+        Some(value)
+    }
+}
+
+fn window_id(pinned: AxPinnedWindow) -> String {
+    format!("pid:{}:window:{}", pinned.pid, pinned.index)
+}
+
+fn parse_window_id(id: &str) -> Result<AxPinnedWindow> {
+    let parts = id.split(':').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[0] != "pid" || parts[2] != "window" {
+        return Err(Error::Action {
+            action: "focus_window".into(),
+            reason: format!("invalid AX window id {id:?}; expected pid:<pid>:window:<index>"),
+        });
+    }
+    let pid = parts[1].parse::<u32>().map_err(|_| Error::Action {
+        action: "focus_window".into(),
+        reason: format!("invalid AX window id {id:?}; pid was not a u32"),
+    })?;
+    let index = parts[3].parse::<usize>().map_err(|_| Error::Action {
+        action: "focus_window".into(),
+        reason: format!("invalid AX window id {id:?}; window index was not a usize"),
+    })?;
+    Ok(AxPinnedWindow { pid, index })
 }
 
 fn string_attr(element: AXUIElementRef, attr: &str) -> Option<String> {

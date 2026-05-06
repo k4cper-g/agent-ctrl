@@ -63,9 +63,10 @@ pub fn surface_status(kind: SurfaceKind) -> SurfaceStatus {
         SurfaceKind::Ax => {
             #[cfg(target_os = "macos")]
             {
-                // AX can snapshot the focused window but actions are not
-                // implemented yet. Keep it out of the "ready" recommendation
-                // path until it can drive apps, not just inspect them.
+                // AX can snapshot the focused window and raise listed
+                // windows, but element actions are not implemented yet. Keep
+                // it out of the "ready" recommendation path until it can
+                // drive apps, not just inspect them.
                 SurfaceStatus::Stub
             }
             #[cfg(not(target_os = "macos"))]

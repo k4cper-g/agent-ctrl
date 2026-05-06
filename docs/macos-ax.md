@@ -13,9 +13,12 @@ snapshot preview, not an action-ready automation backend.
 - Reads common AX state: enabled, focused, selected, and expanded.
 - Reads AX position/size into shared bounds.
 - Assigns refs to interactive and content nodes.
+- Lists top-level AX windows for the pinned app using session-oriented ids like
+  `pid:123:window:0`.
+- Supports `focus-window` for those ids through the AX `AXRaise` action.
 
-Actions, screenshots, window listing, title/process-name targeting, stale-ref
-recovery, and app switching are still unsupported for AX.
+Element actions, screenshots, title/process-name targeting, stale-ref recovery,
+and app switching are still unsupported for AX.
 
 ## Permission
 
@@ -40,6 +43,7 @@ cargo build -p agent-ctrl-cli
 target/debug/agent-ctrl info
 target/debug/agent-ctrl open ax --session ax
 target/debug/agent-ctrl snapshot --session ax --json
+target/debug/agent-ctrl window-list --session ax --json
 target/debug/agent-ctrl close --session ax
 ```
 
@@ -48,7 +52,7 @@ retry from a new terminal.
 
 ## Roadmap
 
-1. Add `list_windows` and `focus-window` using `AXWindows` and `AXRaise`.
+1. Validate `list_windows` and `focus-window` behavior on real macOS apps.
 2. Add action support through `AXUIElementPerformAction`, `AXValue`, and
    keyboard/mouse fallbacks.
 3. Add screenshot support through CoreGraphics window capture.
