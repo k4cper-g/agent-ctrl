@@ -10,6 +10,17 @@
 
 ## Installation
 
+### npm (recommended)
+
+```bash
+npm install -g @agent-ctrl/cli
+```
+
+The package ships a Node launcher; the postinstall step downloads the
+matching native binary for your platform from the corresponding GitHub
+Release. Supported in v0.1.x: Windows x64, macOS arm64, macOS x64. Linux
+is on the roadmap.
+
 ### Windows binary
 
 For tagged releases, download the Windows zip from GitHub Releases or run:
@@ -51,8 +62,8 @@ cargo build --release -p agent-ctrl-cli
 ```
 
 The Rust workspace crates are not published to crates.io in v0.1. The public
-distribution path is source builds or GitHub release binaries for `agent-ctrl`,
-plus the npm package for TypeScript consumers.
+distribution paths are `npm install -g @agent-ctrl/cli`, the GitHub release
+binaries (`agent-ctrl-*`), and source builds.
 
 ### TypeScript client
 
