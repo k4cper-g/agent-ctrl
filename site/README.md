@@ -1,23 +1,21 @@
-# agent-ctrl Landing Page
+# Next.js template
 
-This is a dependency-free static landing page for agent-ctrl.
+This is a Next.js template with shadcn/ui.
 
-Open `index.html` directly in a browser, or serve the folder with any static
-file server.
+## Adding components
+
+To add components to your app, run the following command:
 
 ```bash
-python -m http.server 4173 --directory site
+npx shadcn@latest add button
 ```
 
-The page intentionally lives in this repository while the project is young so
-release copy, install instructions, and platform status stay close to the code.
+This will place the ui components in the `components` directory.
 
-## Deploy
+## Using components
 
-Enable GitHub Pages once in the repository settings:
+To use the components in your app, import them as follows:
 
-```text
-Settings > Pages > Source > GitHub Actions
+```tsx
+import { Button } from "@/components/ui/button";
 ```
-
-After that, run the `Site` workflow manually from GitHub Actions.
