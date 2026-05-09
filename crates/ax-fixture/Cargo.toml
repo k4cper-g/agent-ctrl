@@ -1,0 +1,16 @@
+[package]
+name = "agent-ctrl-ax-fixture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic macOS AX fixture app for agent-ctrl tests."
+publish = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
+[lints]
+workspace = true

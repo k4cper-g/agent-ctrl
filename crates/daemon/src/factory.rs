@@ -63,11 +63,12 @@ pub fn surface_status(kind: SurfaceKind) -> SurfaceStatus {
         SurfaceKind::Ax => {
             #[cfg(target_os = "macos")]
             {
-                // AX can snapshot the focused window and raise listed
-                // windows, but element actions are not implemented yet. Keep
-                // it out of the "ready" recommendation path until it can
-                // drive apps, not just inspect them.
-                SurfaceStatus::Stub
+                // Action vocabulary is implemented end-to-end and validated
+                // against the deterministic Cocoa fixture. Whether a given
+                // session can actually open at runtime depends on the
+                // user's TCC grants - that's a probe `doctor` runs, not
+                // something this static map answers.
+                SurfaceStatus::Ready
             }
             #[cfg(not(target_os = "macos"))]
             {

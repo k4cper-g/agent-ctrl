@@ -29,5 +29,8 @@ base64 = "0.22"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Console"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+agent-ctrl-surface-ax.workspace = true
+
 [lints]
 workspace = true

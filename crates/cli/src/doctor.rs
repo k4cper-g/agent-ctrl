@@ -101,6 +101,7 @@ pub(crate) fn run_doctor(opts: DoctorOptions) -> Result<()> {
     let mut fixed: Vec<String> = Vec::new();
 
     check_environment(&mut checks);
+    check_permissions(&mut checks);
     check_daemon(&mut checks);
     if !opts.quick {
         check_probe(&mut checks);
@@ -174,6 +175,60 @@ fn check_environment(out: &mut Vec<Check>) {
             msg,
         ));
     }
+}
+
+// ---------- permissions (macOS only) ----------
+
+#[cfg(target_os = "macos")]
+fn check_permissions(out: &mut Vec<Check>) {
+    use agent_ctrl_surface_ax::{accessibility_trust_status, AxTrustStatus};
+    let exe =
+        std::env::current_exe().map_or_else(|_| "this binary".into(), |p| p.display().to_string());
+    match accessibility_trust_status() {
+        AxTrustStatus::Trusted => out.push(Check::new(
+            "perm.accessibility",
+            "permissions",
+            Status::Pass,
+            "macOS Accessibility: granted",
+        )),
+        AxTrustStatus::NotTrusted => out.push(
+            Check::new(
+                "perm.accessibility",
+                "permissions",
+                Status::Fail,
+                "macOS Accessibility: not granted - `open ax` will refuse to start",
+            )
+            .with_fix(format!(
+                "add {exe} in System Settings > Privacy & Security > Accessibility, then restart any running daemon"
+            )),
+        ),
+        AxTrustStatus::Unavailable => out.push(Check::new(
+            "perm.accessibility",
+            "permissions",
+            Status::Info,
+            "macOS Accessibility: unavailable on this build",
+        )),
+    }
+    // Screen Recording is a separate TCC grant. We don't actually call
+    // CGWindowListCreateImage here because it would prompt the system
+    // permission dialog the very first time, which is not something a
+    // diagnostic tool should do silently. Leave it as an info hint.
+    out.push(Check::new(
+        "perm.screen-recording",
+        "permissions",
+        Status::Info,
+        "macOS Screen Recording is a separate grant required only for `screenshot`",
+    ).with_fix(format!(
+        "if `screenshot` returns null, add {exe} in System Settings > Privacy & Security > Screen Recording and restart the daemon"
+    )));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn check_permissions(_out: &mut [Check]) {
+    // No-op on non-macOS hosts. UIA on Windows has no equivalent
+    // user-grant gate beyond running at the same integrity level as
+    // the target app, which is documented in
+    // `docs/windows-reliability.md` rather than probed here.
 }
 
 // ---------- daemon / sessions ----------

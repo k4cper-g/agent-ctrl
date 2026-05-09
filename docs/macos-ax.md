@@ -1,24 +1,66 @@
 # macOS AX Surface
 
-`surface-ax` is the next native surface after Windows UIA. In v0.1 it is a
-snapshot preview, not an action-ready automation backend.
+`surface-ax` is the next native surface after Windows UIA. It is now a partial
+automation backend: snapshots, window listing, window focus, first element
+actions, checkable controls, and keyboard input are implemented, but it is not
+at Windows UIA parity.
 
 ## Current Coverage
 
 - Checks `AXIsProcessTrusted()` when opening an AX session.
 - Captures the focused window by default.
 - Captures a focused or first window for `WindowTarget::Pid`.
+- Captures a focused or first window for `WindowTarget::ProcessName`.
+- Captures the first window whose title contains `WindowTarget::Title`.
 - Walks `AXChildren` up to the requested snapshot depth.
 - Maps common AX roles to the shared `Role` taxonomy.
-- Reads common AX state: enabled, focused, selected, and expanded.
+- Reads common AX state: enabled, focused, selected, checked, and expanded.
 - Reads AX position/size into shared bounds.
 - Assigns refs to interactive and content nodes.
 - Lists top-level AX windows for the pinned app using session-oriented ids like
   `pid:123:window:0`.
 - Supports `focus-window` for those ids through the AX `AXRaise` action.
+- Stores the latest snapshot refs on the session and rediscover elements by
+  `(role, name, nth)` before acting.
+- Supports `click` through `AXPress`.
+- Supports `focus` by setting `AXFocused`.
+- Supports `fill` by setting `AXValue`.
+- Supports `check`, `uncheck`, and `toggle` for AX controls with readable
+  `AXValue` check state.
+- Supports `type`, `press`, `key-down`, and `key-up` through
+  CoreGraphics keyboard events.
+- Captures `screenshot` for `--target window` (default), `--target desktop`,
+  `--target region`, and `--target ref` through `CGWindowListCreateImage`,
+  including `--annotated` overlays driven by the cached snapshot bounds.
+- Drives `double-click`, `right-click`, `hover`, `highlight`, `drag`,
+  `scroll`, and raw `mouse move/down/up/wheel` through CoreGraphics events.
+  These actions raise the pinned window first, then post the event at the
+  element's center (or the supplied screen coordinates).
+- Supports `select-all` (focus + `Cmd+A`), `clear` (focus + `AXValue=""`),
+  `scroll-into-view` (`AXScrollToVisible` on the resolved element), and
+  `clipboard` read/write through `pbpaste`/`pbcopy` plus copy/paste through
+  the platform `Cmd+C` / `Cmd+V` chord.
+- Supports `select` for `AXPopUpButton`, `AXMenuButton`, and `AXComboBox`
+  by simulating a real user click on the popup, locating the matching
+  `AXMenuItem` in the resulting AXMenu by title, and posting a CGEvent
+  click on the item's center. AX-press paths return inert when fired on
+  menu items inside a synthetic-show menu, so the surface drives the
+  popup the same way a user would. Falls back to setting `AXValue` on
+  other roles.
+- Captures `AXIdentifier` (AppKit `accessibilityIdentifier`) into
+  `NativeHandle::Ax::identifier` during snapshot and prefers it over the
+  `(role, name, nth)` triple when re-resolving refs at action time. This
+  is the AX equivalent of UIA's `AutomationId` fast path: it survives
+  tree mutations that rename or reorder the captured node.
+- Supports `switch-app` through `NSRunningApplication`/`NSWorkspace`. Accepts
+  either a bundle id (e.g., `com.apple.Safari`) or an executable file stem
+  (e.g., `agent-ctrl-ax-fixture`); the bundle-id path is preferred when both
+  match. After the activation, the surface clears its pinned window so the
+  next `snapshot` re-discovers the foreground window for the new app.
+- Snapshot's `app.id` reports the bundle identifier when the running app
+  exposes one, falling back to `pid:N` for binaries without an Info.plist.
 
-Element actions, screenshots, title/process-name targeting, stale-ref recovery,
-and app switching are still unsupported for AX.
+Every action verb in the core vocabulary is now implemented for AX.
 
 ## Permission
 
@@ -34,17 +76,41 @@ System Settings > Privacy & Security > Accessibility
 Add the exact `agent-ctrl` binary you will run. Rebuilding into a different
 path may require granting permission again.
 
+`screenshot` additionally requires Screen Recording permission on macOS 10.15
+and later. Without it, `CGWindowListCreateImage` returns null or a blank
+image; grant access in:
+
+```text
+System Settings > Privacy & Security > Screen Recording
+```
+
+Add the same `agent-ctrl` binary and restart the daemon (`agent-ctrl close`
+then `open ax`) for the new permission to take effect.
+
 ## Recommended Validation
 
 From a macOS host:
 
 ```bash
-cargo build -p agent-ctrl-cli
+cargo build -p agent-ctrl-cli -p agent-ctrl-ax-fixture
 target/debug/agent-ctrl info
 target/debug/agent-ctrl open ax --session ax
-target/debug/agent-ctrl snapshot --session ax --json
+target/debug/agent-ctrl-ax-fixture --ready-file /tmp/agent-ctrl-ax-fixture.ready &
+target/debug/agent-ctrl snapshot --target-process agent-ctrl-ax-fixture --session ax --json
 target/debug/agent-ctrl window-list --session ax --json
+TEXT_REF="$(target/debug/agent-ctrl find --role text-field --first --session ax)"
+target/debug/agent-ctrl fill "$TEXT_REF" "hello from ax" --session ax
+CHECK_REF="$(target/debug/agent-ctrl find "Enable advanced mode" --role checkbox --first --session ax)"
+target/debug/agent-ctrl check "$CHECK_REF" --session ax
+target/debug/agent-ctrl screenshot /tmp/agent-ctrl-ax.png --annotated --session ax
 target/debug/agent-ctrl close --session ax
+```
+
+For automated local coverage:
+
+```bash
+cargo build -p agent-ctrl-ax-fixture
+RUN_AX_TESTS=1 cargo test -p agent-ctrl-cli --test macos_ax_fixture
 ```
 
 If `open ax` fails with a permission error, grant Accessibility permission and
@@ -52,9 +118,11 @@ retry from a new terminal.
 
 ## Roadmap
 
-1. Validate `list_windows` and `focus-window` behavior on real macOS apps.
-2. Add action support through `AXUIElementPerformAction`, `AXValue`, and
-   keyboard/mouse fallbacks.
-3. Add screenshot support through CoreGraphics window capture.
-4. Add stale-ref recovery using AX identifier/title/role/nth paths.
-5. Add a deterministic macOS fixture app for CI-friendly AX coverage.
+1. Stabilize keyboard-action validation under the Rust test harness.
+2. Replace `/bin/ps` shell-outs in `process_name` / `process_ids_by_name`
+   with `libproc` for lower latency and structured errors.
+3. Drive the surface against real apps (Safari, TextEdit, Finder, Mail)
+   and feed the findings back into
+   [docs/macos-ax-reliability.md](macos-ax-reliability.md).
+4. Expand the fixture with a scroll view and a sheet/dialog control so we
+   can deterministically test scroll-into-view and modal dialog handling.

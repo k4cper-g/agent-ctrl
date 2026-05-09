@@ -102,3 +102,34 @@ jobs:
       - run: .\target\debug\agent-ctrl.exe close --session mock
         if: always()
         continue-on-error: true
+
+  macos-smoke:
+    name: macOS smoke
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -q -p agent-ctrl-cli
+      # The AX fixture test (RUN_AX_TESTS=1) needs Accessibility +
+      # Screen Recording grants on the runner, which CI doesn't have.
+      # Stick to the mock-surface smoke + the doctor probe; both
+      # exercise the daemon spawn / TCP / dispatch path the same way
+      # windows-smoke does, and `info` confirms factory.rs reports AX
+      # as ready (not stub) on the macOS host.
+      - run: |
+          set -euo pipefail
+          export AGENT_CTRL_HOME="$RUNNER_TEMP/agent-ctrl-mock-home"
+          mkdir -p "$AGENT_CTRL_HOME"
+          ./target/debug/agent-ctrl info
+          ./target/debug/agent-ctrl doctor --quick
+          ./target/debug/agent-ctrl open mock --session mock
+          ./target/debug/agent-ctrl snapshot --session mock
+          ./target/debug/agent-ctrl get name '@e0' --session mock
+          ./target/debug/agent-ctrl is enabled '@e0' --session mock
+          printf '%s' '[{"op":"find","query":{"limit":1}}]' > batch.json
+          ./target/debug/agent-ctrl batch --file batch.json --session mock
+          ./target/debug/agent-ctrl close --session mock
+      - run: ./target/debug/agent-ctrl close --session mock
+        if: always()
+        continue-on-error: true

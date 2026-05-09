@@ -1,13 +1,18 @@
 //! macOS Accessibility (AX) surface.
 //!
-//! The current AX implementation is a snapshot preview: it checks macOS
+//! The current AX implementation is partial: it checks macOS
 //! Accessibility trust, captures the focused window's AX tree, maps common
 //! roles/states/bounds into the shared schema, lists AX windows for the pinned
-//! app, and supports `focus-window` through `AXRaise`. Element actions still
-//! return `Unsupported`. This is enough to begin validating the next native
-//! surface without pretending it has Windows-level action maturity yet.
+//! app, supports `focus-window` through `AXRaise`, and implements first
+//! element actions, checkable controls, keyboard actions, and screenshot
+//! capture through AX and CoreGraphics calls. It is still a partial surface,
+//! not a Windows UIA parity implementation.
 
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
+#![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
+// `objc` 0.2 macros emit references to the historical `cargo-clippy` cfg in
+// generated code; the allow above suppresses the resulting clippy warnings
+// crate-wide so the workspace `-D warnings` lint stays clean.
 
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Error, Result, Snapshot, SnapshotOptions, Surface,
@@ -53,6 +58,8 @@ pub struct AxSurface {
     capabilities: CapabilitySet,
     #[cfg(target_os = "macos")]
     pinned: Mutex<Option<macos::AxPinnedWindow>>,
+    #[cfg(target_os = "macos")]
+    last_snapshot: Mutex<Option<Snapshot>>,
 }
 
 impl AxSurface {
@@ -70,8 +77,16 @@ impl AxSurface {
                 ));
             }
             Ok(Self {
-                capabilities: CapabilitySet::new().with("snapshot").with("windows"),
+                capabilities: CapabilitySet::new()
+                    .with("snapshot")
+                    .with("windows")
+                    .with("keyboard")
+                    .with("mouse")
+                    .with("drag")
+                    .with("screenshot")
+                    .with("multi_app"),
                 pinned: Mutex::new(None),
+                last_snapshot: Mutex::new(None),
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -82,6 +97,11 @@ impl AxSurface {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+const PINNED_LOCK_ERR: &str = "AX pinned-window mutex poisoned";
+#[cfg(target_os = "macos")]
+const SNAPSHOT_LOCK_ERR: &str = "AX last-snapshot mutex poisoned";
 
 #[async_trait]
 impl Surface for AxSurface {
@@ -99,13 +119,17 @@ impl Surface for AxSurface {
             let pinned = *self
                 .pinned
                 .lock()
-                .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))?;
+                .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))?;
             let capture = macos::snapshot(opts, pinned)?;
             *self
                 .pinned
                 .lock()
-                .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))? =
-                Some(capture.pinned);
+                .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))? = Some(capture.pinned);
+            *self
+                .last_snapshot
+                .lock()
+                .map_err(|_| Error::Surface(SNAPSHOT_LOCK_ERR.into()))? =
+                Some(capture.snapshot.clone());
             Ok(capture.snapshot)
         }
         #[cfg(not(target_os = "macos"))]
@@ -126,16 +150,47 @@ impl Surface for AxSurface {
                 *self
                     .pinned
                     .lock()
-                    .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))? =
-                    Some(pinned);
+                    .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))? = Some(pinned);
+                *self
+                    .last_snapshot
+                    .lock()
+                    .map_err(|_| Error::Surface(SNAPSHOT_LOCK_ERR.into()))? = None;
                 return Ok(ActionResult::ok());
             }
+            if let Action::SwitchApp { app_id } = action {
+                macos::switch_app(app_id)?;
+                // Activated app may not be ours; clear pinned state so the
+                // next snapshot rediscovers the foreground window for the
+                // app the agent just switched to.
+                *self
+                    .pinned
+                    .lock()
+                    .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))? = None;
+                *self
+                    .last_snapshot
+                    .lock()
+                    .map_err(|_| Error::Surface(SNAPSHOT_LOCK_ERR.into()))? = None;
+                return Ok(ActionResult::ok());
+            }
+            let pinned = *self
+                .pinned
+                .lock()
+                .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))?;
+            let snapshot = self
+                .last_snapshot
+                .lock()
+                .map_err(|_| Error::Surface(SNAPSHOT_LOCK_ERR.into()))?
+                .clone();
+            macos::act(action, pinned, snapshot.as_ref())
         }
-        let _ = action;
-        Err(Error::Unsupported {
-            surface: SurfaceKind::Ax.as_str().into(),
-            action: "act".into(),
-        })
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = action;
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Ax.as_str().into(),
+                action: "act".into(),
+            })
+        }
     }
 
     async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
@@ -144,14 +199,13 @@ impl Surface for AxSurface {
             let pinned = *self
                 .pinned
                 .lock()
-                .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))?;
+                .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))?;
             let windows = macos::list_windows(pinned)?;
             if let Some(next_pinned) = windows.pinned {
                 *self
                     .pinned
                     .lock()
-                    .map_err(|_| Error::Surface("AX pinned-window mutex poisoned".into()))? =
-                    Some(next_pinned);
+                    .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))? = Some(next_pinned);
             }
             Ok(windows.windows)
         }

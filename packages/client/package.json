@@ -17,7 +17,10 @@
     "automation",
     "accessibility",
     "uia",
-    "windows"
+    "windows",
+    "ax",
+    "macos",
+    "darwin"
   ],
   "type": "module",
   "main": "./dist/index.js",

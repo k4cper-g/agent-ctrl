@@ -6,7 +6,7 @@
   OS automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
-> **Status (v0.1.1):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against the deterministic Win32 fixture. macOS Accessibility (AX) has an initial focused-window snapshot and window-focus preview, but element actions are still unsupported. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
+> **Status (v0.1.1):** **Windows and macOS are both supported.** The Windows UI Automation surface and the macOS Accessibility (AX) surface implement the full action vocabulary - click, double-click, right-click, hover, drag, scroll, type, press, fill, check/uncheck/toggle, select, select-all, clear, clipboard, scroll-into-view, screenshot, switch-app, focus-window - and each is validated against a deterministic native fixture. macOS additionally has identifier-based ref recovery (AX equivalent of UIA's AutomationId fast path) and method diagnostics in the action result. Real-app validation is in progress and partial: Finder, TextEdit, and Safari (including end-to-end URL navigation) work today; Apple Notes is gated behind macOS's Automation TCC permission and is documented in [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md). Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
 >
 > **Browser automation is out of scope.** agent-ctrl drives native UI; for Chromium-via-CDP use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project. The two are designed to compose in the same agent loop.
 
@@ -23,6 +23,25 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 The installer downloads the latest `agent-ctrl.exe`, installs it under
 `%LOCALAPPDATA%\agent-ctrl\bin`, and adds that directory to the user PATH
 unless `-NoPath` is passed.
+
+### macOS binary
+
+For tagged releases, download the macOS tarball from GitHub Releases (one
+asset per arch: `aarch64-apple-darwin` for Apple Silicon, `x86_64-apple-darwin`
+for Intel) or run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/k4cper-g/agent-ctrl/main/scripts/install-macos.sh | bash
+```
+
+The installer detects the host arch, downloads the matching tarball, places
+`agent-ctrl` at `~/.local/bin/agent-ctrl`, and runs `agent-ctrl info` to
+verify. Pass `--install-dir <path>` to install elsewhere or `--no-path` to
+skip the PATH-update reminder.
+
+After install, grant Accessibility permission in *System Settings >
+Privacy & Security > Accessibility* (and Screen Recording in the same pane
+if you'll use `screenshot`). Run `agent-ctrl doctor` to verify.
 
 ### From source (recommended for v0.1)
 
@@ -46,7 +65,7 @@ npm install @agent-ctrl/client
 
 ### Requirements
 
-- **Windows 10/11** for UIA. Other OSes build cleanly; AX has a macOS snapshot preview, while Linux / Android / iOS are not implemented yet.
+- **Windows 10/11** for UIA, **macOS 12+** for AX. Both surfaces ship the full action vocabulary; Linux / Android / iOS are not implemented yet. Other OSes build cleanly with stub surfaces.
 - **Rust 1.85+** (workspace MSRV; rustup will install it from `rust-toolchain.toml`).
 - **Node.js 20+** only when using the TypeScript client.
 
@@ -107,10 +126,10 @@ agent-ctrl highlight @eN                 # move cursor to element for human debu
 ### Keyboard
 
 ```bash
-agent-ctrl type "hello"                  # synthetic Unicode keystrokes (ASCII reliable; no IME)
-agent-ctrl fill @eN "value"              # UIA ValuePattern.SetValue (best for non-ASCII / form fields)
+agent-ctrl type "hello"                  # synthetic Unicode keystrokes
+agent-ctrl fill @eN "value"              # native value setting where supported
 agent-ctrl clear @eN                     # clear an editable field
-agent-ctrl press "Ctrl+S"                # key chord - Enter, Tab, Ctrl+A, Ctrl+Shift+T, etc.
+agent-ctrl press "Ctrl+S"                # key chord - Enter, Tab, Ctrl+A, Cmd+A, etc.
 agent-ctrl key-down "Shift"              # hold a modifier
 agent-ctrl key-up "Shift"                # release it
 agent-ctrl clipboard read                # read clipboard text
@@ -342,7 +361,8 @@ The repository is a **dual workspace** - a Cargo workspace for the Rust engine a
 | [`crates/cli`](crates/cli) | The `agent-ctrl` binary - user-facing entrypoint. |
 | [`crates/surface-uia`](crates/surface-uia) | Windows UI Automation surface (Windows-only). |
 | [`crates/uia-fixture`](crates/uia-fixture) | Deterministic native Win32 fixture app for UIA reliability tests. |
-| [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (snapshot preview; macOS-only). |
+| [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (full action vocabulary; macOS-only). |
+| [`crates/ax-fixture`](crates/ax-fixture) | Deterministic native Cocoa fixture app for AX reliability tests. |
 | [`packages/client`](packages/client) | `@agent-ctrl/client` - typed TypeScript wrapper over stdio JSON-RPC. |
 
 Surfaces gated by `target_os` compile to empty crates on other platforms, so the workspace builds on any host.
@@ -354,7 +374,7 @@ A **surface** is one accessibility protocol - UIA, AX, AT-SPI, etc. A **platform
 | Platform | Native surface | Status |
 |---|---|---|
 | Windows | [`surface-uia`](crates/surface-uia) - UI Automation | **ready** |
-| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | snapshot preview |
+| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | **ready** |
 | Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | not started |
 | Android | _planned_ `surface-accessibility-service` (JNI) | not started |
 | iOS | _planned_ `surface-xcuitest` (WebDriverAgent) | not started |
@@ -363,8 +383,9 @@ For browsers, run agent-ctrl alongside [agent-browser](https://github.com/vercel
 
 Acronyms in one line: **UIA** = Microsoft UI Automation, **AX** = macOS Accessibility, **AT-SPI** = the Linux GNOME accessibility bus, **XCUITest** = Apple's UI test framework.
 
-AX preview notes live in [docs/macos-ax.md](docs/macos-ax.md). Windows
-production guidance lives in [docs/windows-reliability.md](docs/windows-reliability.md).
+AX feature coverage is in [docs/macos-ax.md](docs/macos-ax.md); production
+guidance for macOS lives in [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md).
+Windows production guidance lives in [docs/windows-reliability.md](docs/windows-reliability.md).
 
 ## Build
 
@@ -397,6 +418,27 @@ cargo test -p agent-ctrl-cli --test windows_uia_fixture
 
 Successful UIA actions may print a method diagnostic such as `ok method=keyboard-space`, `ok method=selection-item-pattern`, or `ok method=toggle-pattern`. These are intended for agents and humans debugging cross-app behavior.
 
+macOS AX fixture:
+
+```bash
+cargo build -p agent-ctrl-cli -p agent-ctrl-ax-fixture
+target/debug/agent-ctrl-ax-fixture --ready-file /tmp/agent-ctrl-ax-fixture.ready &
+target/debug/agent-ctrl open ax --session fixture
+target/debug/agent-ctrl snapshot --session fixture --target-process agent-ctrl-ax-fixture
+```
+
+Opt-in AX fixture integration test:
+
+```bash
+cargo build -p agent-ctrl-ax-fixture
+RUN_AX_TESTS=1 cargo test -p agent-ctrl-cli --test macos_ax_fixture
+```
+
+The AX fixture covers the deterministic macOS loop for snapshots, `find`,
+`click`, `fill`, `check`, `uncheck`, `toggle`, and `window-list`. Keyboard
+actions exist, but are still validated manually because host focus and event-tap
+behavior can vary under the Rust test harness.
+
 TypeScript client:
 
 ```bash
@@ -427,12 +469,12 @@ For consistent results, add to your project or global instructions:
 ```markdown
 ## OS automation
 
-Use `agent-ctrl` for native UI automation on Windows. Core workflow:
+Use `agent-ctrl` for native UI automation on Windows and macOS. Core workflow:
 
-1. `agent-ctrl open uia` - spawn a daemon
+1. `agent-ctrl open uia` (Windows) or `agent-ctrl open ax` (macOS) - spawn a daemon
 2. `agent-ctrl snapshot --target-process <name>` - pin to the app and capture refs
 3. `agent-ctrl find "Save" --role button --first` - discover refs by name/role
-4. `agent-ctrl click @eN` / `fill @eN "text"` / `press "Ctrl+S"` - interact
+4. `agent-ctrl click @eN` / `fill @eN "text"` / `press "Ctrl+S"` (or `Cmd+S` on macOS) - interact
 5. `agent-ctrl wait-for --stable` - let the UI settle before the next action
 6. `agent-ctrl window-list` + `focus-window <id>` - switch to dialogs / popups
 7. Re-`snapshot` after the tree changes
@@ -450,7 +492,7 @@ prefer the generic loop above over app-specific assumptions.
 
 These are real today - the goal is to fix or document them as the project matures.
 
-- **Windows is the only action-ready surface.** AX can capture the focused macOS window and raise listed windows when Accessibility permission is granted, but element actions still return `Unsupported`; Linux / Android / iOS / browser flows are not implemented in this project yet.
+- **Windows and macOS are the supported surfaces.** Linux / Android / iOS / browser flows are not implemented in this project yet. macOS additionally requires Screen Recording permission for `screenshot` and may require Automation permission for some Apple system apps (Notes, Calendar, Music) - see [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md).
 - **Local TCP daemon auth is developer-machine scoped.** TCP session files include a random bearer token and the daemon rejects missing or incorrect tokens, but anyone who can read `~/.agent-ctrl/<session>.json` can still use that session. Treat sessions as a local developer-machine boundary, not a multi-user security sandbox.
 - **Refs are valid only against the snapshot that produced them.** If `wait-for` runs in parallel with another command on the same session (across two shells), the wait loop refreshes the cached refs on each poll, and a previously-issued ref may resolve to a different element. Sequential CLI usage in one shell - the realistic flow - doesn't trip this.
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.
