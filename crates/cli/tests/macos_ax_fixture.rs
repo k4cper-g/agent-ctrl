@@ -131,10 +131,16 @@ impl FixtureRun<'_> {
 
     fn exercise_button_click(&self) {
         let button = self.find("Increment", "button");
-        run_cli(
+        let out = run_cli(
             self.cli,
             self.home,
             ["click", button.trim(), "--session", "fixture"],
+        );
+        // NSButton accepts AXPress, so the click should take the AX fast path
+        // rather than the CGEvent fallback. Method tag proves which path ran.
+        assert!(
+            out.contains("method=ax-press"),
+            "expected method=ax-press, got {out:?}"
         );
         self.snapshot();
         run_cli(
@@ -149,10 +155,14 @@ impl FixtureRun<'_> {
         // NSButton fires its action twice (count 1 -> 3), proving the CGEvent
         // path actually drives the target window.
         let button = self.find("Increment", "button");
-        run_cli(
+        let out = run_cli(
             self.cli,
             self.home,
             ["double-click", button.trim(), "--session", "fixture"],
+        );
+        assert!(
+            out.contains("method=cg-double-click"),
+            "expected method=cg-double-click, got {out:?}"
         );
         self.snapshot();
         run_cli(

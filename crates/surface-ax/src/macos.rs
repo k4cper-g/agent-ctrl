@@ -620,10 +620,61 @@ fn act_click(
     ref_id: &RefId,
 ) -> Result<ActionResult> {
     let element = resolve_element(pinned, refs, ref_id, "click")?;
-    let result = perform_action(element, kAXPressAction, "click");
+    let ax_outcome = perform_action(element, kAXPressAction, "click");
+    if ax_outcome.is_ok() {
+        // SAFETY: `resolve_element` returns a retained AX element.
+        unsafe { CFRelease(element.cast::<c_void>()) };
+        return Ok(action_result_with_method("ax-press"));
+    }
+    // AXPress failed (custom Cocoa view, non-cooperative responder, etc.).
+    // Fall back to a real CGEvent click at the element's center, which is
+    // what users see when they actually tap the control. Keep the original
+    // AX error in the message so callers can tell when the fallback was
+    // needed.
+    let bounds_for_fallback = bounds(element);
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    let logical = bounds_for_fallback.ok_or_else(|| Error::Action {
+        action: "click".into(),
+        reason: "AXPress failed and element has no AX bounds for CGEvent fallback".into(),
+    })?;
+    raise_pinned_app(pinned);
+    let center = CGPoint {
+        x: logical.x + logical.w / 2.0,
+        y: logical.y + logical.h / 2.0,
+    };
+    post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_DOWN,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_UP,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    let ax_reason = ax_outcome
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_default();
+    Ok(ActionResult {
+        ok: true,
+        message: Some(format!(
+            "AXPress failed ({ax_reason}); used CGEvent fallback"
+        )),
+        data: Some(serde_json::json!({ "method": "cg-click" })),
+    })
+}
+
+fn action_result_with_method(method: &str) -> ActionResult {
+    ActionResult {
+        ok: true,
+        message: None,
+        data: Some(serde_json::json!({ "method": method })),
+    }
 }
 
 fn act_focus(
@@ -635,7 +686,7 @@ fn act_focus(
     let result = set_bool_attr(element, kAXFocusedAttribute, "focus");
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("ax-focused"))
 }
 
 fn act_fill(
@@ -649,7 +700,7 @@ fn act_fill(
     let result = set_string_attr(element, kAXValueAttribute, value, "fill");
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("ax-value"))
 }
 
 fn act_check(
@@ -663,7 +714,7 @@ fn act_check(
     let result = press_until_checked(element, desired, action);
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("ax-press"))
 }
 
 fn act_toggle(
@@ -675,7 +726,7 @@ fn act_toggle(
     let result = perform_action(element, kAXPressAction, "toggle");
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("ax-press"))
 }
 
 fn act_double_click(
@@ -710,7 +761,7 @@ fn act_double_click(
         CG_MOUSE_BUTTON_LEFT,
         Some(2),
     )?;
-    Ok(ActionResult::ok())
+    Ok(action_result_with_method("cg-double-click"))
 }
 
 fn act_right_click(
@@ -733,7 +784,7 @@ fn act_right_click(
         CG_MOUSE_BUTTON_RIGHT,
         Some(1),
     )?;
-    Ok(ActionResult::ok())
+    Ok(action_result_with_method("cg-right-click"))
 }
 
 fn act_hover(
@@ -744,7 +795,7 @@ fn act_hover(
     let center = element_center(pinned, refs, ref_id, "hover")?;
     raise_pinned_app(pinned);
     post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
-    Ok(ActionResult::ok())
+    Ok(action_result_with_method("cg-mouse-moved"))
 }
 
 fn act_highlight(
@@ -811,11 +862,11 @@ fn act_drag(
         CG_MOUSE_BUTTON_LEFT,
         Some(1),
     )?;
-    Ok(ActionResult::ok())
+    Ok(action_result_with_method("cg-drag"))
 }
 
 fn act_mouse(op: MouseOp) -> Result<ActionResult> {
-    match op {
+    let method = match op {
         MouseOp::Move { x, y } => {
             post_mouse(
                 CG_EVENT_MOUSE_MOVED,
@@ -823,20 +874,24 @@ fn act_mouse(op: MouseOp) -> Result<ActionResult> {
                 CG_MOUSE_BUTTON_LEFT,
                 None,
             )?;
+            "cg-mouse-moved"
         }
         MouseOp::Down { x, y, button } => {
             let (event, btn) = mouse_button_down(button);
             post_mouse(event, point_from(x, y), btn, Some(1))?;
+            "cg-mouse-down"
         }
         MouseOp::Up { x, y, button } => {
             let (event, btn) = mouse_button_up(button);
             post_mouse(event, point_from(x, y), btn, Some(1))?;
+            "cg-mouse-up"
         }
         MouseOp::Wheel { x, y, dx, dy } => {
             post_scroll(point_from(x, y), dx, dy)?;
+            "cg-scroll-wheel"
         }
-    }
-    Ok(ActionResult::ok())
+    };
+    Ok(action_result_with_method(method))
 }
 
 fn act_scroll(
@@ -859,7 +914,7 @@ fn act_scroll(
     let horizontal = round_to_i32(dx);
     let vertical = round_to_i32(dy);
     post_scroll(position, horizontal, vertical)?;
-    Ok(ActionResult::ok())
+    Ok(action_result_with_method("cg-scroll-wheel"))
 }
 
 fn act_scroll_into_view(
@@ -875,7 +930,7 @@ fn act_scroll_into_view(
     let result = perform_action(element, "AXScrollToVisible", "scroll_into_view");
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("ax-scroll-to-visible"))
 }
 
 fn act_select_all(
@@ -889,7 +944,11 @@ fn act_select_all(
         // SAFETY: `resolve_element` returns a retained AX element.
         unsafe { CFRelease(element.cast::<c_void>()) };
     }
-    act_press(pinned, "Cmd+A")
+    let mut result = act_press(pinned, "Cmd+A")?;
+    // Override the inner method tag with one that reflects what select-all
+    // actually did: focus + Cmd+A, not just a raw key chord.
+    result.data = Some(serde_json::json!({ "method": "keyboard-cmd-a" }));
+    Ok(result)
 }
 
 fn act_select(
@@ -900,19 +959,22 @@ fn act_select(
 ) -> Result<ActionResult> {
     let element = resolve_element(pinned, refs, ref_id, "select")?;
     let role = string_attr(element, kAXRoleAttribute);
-    let result = match role.as_deref() {
+    let (result, method) = match role.as_deref() {
         Some(role)
             if role == kAXPopUpButtonRole
                 || role == kAXMenuButtonRole
                 || role == kAXComboBoxRole =>
         {
-            select_via_menu(element, value)
+            (select_via_menu(element, value), "menu-click")
         }
-        _ => set_string_attr(element, kAXValueAttribute, value, "select"),
+        _ => (
+            set_string_attr(element, kAXValueAttribute, value, "select"),
+            "ax-value",
+        ),
     };
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method(method))
 }
 
 fn select_via_menu(button: AXUIElementRef, value: &str) -> Result<()> {
@@ -1072,7 +1134,7 @@ fn act_clear(
     let result = set_string_attr(element, kAXValueAttribute, "", "clear");
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("ax-value-empty"))
 }
 
 fn act_clipboard(pinned: Option<AxPinnedWindow>, op: &ClipboardOp) -> Result<ActionResult> {
@@ -1082,15 +1144,26 @@ fn act_clipboard(pinned: Option<AxPinnedWindow>, op: &ClipboardOp) -> Result<Act
             Ok(ActionResult {
                 ok: true,
                 message: None,
-                data: Some(serde_json::json!({ "text": text })),
+                data: Some(serde_json::json!({
+                    "method": "pbpaste",
+                    "text": text,
+                })),
             })
         }
         ClipboardOp::Write { text } => {
             clipboard_write_text(text)?;
-            Ok(ActionResult::ok())
+            Ok(action_result_with_method("pbcopy"))
         }
-        ClipboardOp::Copy => act_press(pinned, "Cmd+C"),
-        ClipboardOp::Paste => act_press(pinned, "Cmd+V"),
+        ClipboardOp::Copy => {
+            let mut result = act_press(pinned, "Cmd+C")?;
+            result.data = Some(serde_json::json!({ "method": "keyboard-cmd-c" }));
+            Ok(result)
+        }
+        ClipboardOp::Paste => {
+            let mut result = act_press(pinned, "Cmd+V")?;
+            result.data = Some(serde_json::json!({ "method": "keyboard-cmd-v" }));
+            Ok(result)
+        }
     }
 }
 
@@ -1255,13 +1328,13 @@ fn state_matches(state: Checked, desired: bool) -> bool {
 
 fn act_type(pinned: Option<AxPinnedWindow>, text: &str) -> Result<ActionResult> {
     if text.is_empty() {
-        return Ok(ActionResult::ok());
+        return Ok(action_result_with_method("noop-empty-text"));
     }
     let app = app_for_keyboard(pinned, "type")?;
     let result = send_text(app, text);
     // SAFETY: `app_for_keyboard` returns a create-rule AX application object.
     unsafe { CFRelease(app.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("cg-keyboard-unicode"))
 }
 
 fn act_press(pinned: Option<AxPinnedWindow>, keys: &str) -> Result<ActionResult> {
@@ -1273,7 +1346,7 @@ fn act_press(pinned: Option<AxPinnedWindow>, keys: &str) -> Result<ActionResult>
     let result = send_chord(app, &chord, "press");
     // SAFETY: `app_for_keyboard` returns a create-rule AX application object.
     unsafe { CFRelease(app.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("cg-keyboard-chord"))
 }
 
 fn act_key(
@@ -1290,7 +1363,7 @@ fn act_key(
     let result = post_virtual_key(key_code, key_down, 0, action);
     // SAFETY: `app_for_keyboard` returns a create-rule AX application object.
     unsafe { CFRelease(app.cast::<c_void>()) };
-    result.map(|()| ActionResult::ok())
+    result.map(|()| action_result_with_method("cg-keyboard-virtual-key"))
 }
 
 fn resolve_element(
