@@ -11,6 +11,9 @@ use objc::{class, msg_send, sel, sel_impl};
 use accessibility_sys::{
     kAXButtonRole, kAXCellRole, kAXCheckBoxRole, kAXChildrenAttribute, kAXComboBoxRole,
     kAXDescriptionAttribute, kAXDialogSubrole, kAXDisclosureTriangleRole, kAXEnabledAttribute,
+    kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorAttributeUnsupported,
+    kAXErrorCannotComplete, kAXErrorFailure, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
+    kAXErrorNoValue, kAXErrorNotImplemented, kAXErrorParameterizedAttributeUnsupported,
     kAXErrorSuccess, kAXExpandedAttribute, kAXFocusedApplicationAttribute, kAXFocusedAttribute,
     kAXFocusedWindowAttribute, kAXGridRole, kAXGroupRole, kAXIdentifierAttribute, kAXImageRole,
     kAXListRole, kAXMenuBarItemRole, kAXMenuBarRole, kAXMenuButtonRole, kAXMenuItemRole,
@@ -298,7 +301,7 @@ pub(super) fn focus_window(id: &str) -> Result<AxPinnedWindow> {
     } else {
         Err(Error::Action {
             action: "focus_window".into(),
-            reason: format!("AXRaise failed with AX error {err}"),
+            reason: format!("AXRaise failed with {}", ax_error_message(err)),
         })
     }
 }
@@ -1758,6 +1761,66 @@ fn is_ref_target(role: &Role) -> bool {
     role.is_interactive() || role.is_content()
 }
 
+/// Translate an AX error code into "kAXErrorName (-NNNNN: short hint)" so
+/// the message in `Error::Action.reason` is something an agent or human
+/// can act on, instead of a bare integer like "AX error -25204". The hint
+/// is the same wording Apple uses in the AXError.h header.
+fn ax_error_message(code: i32) -> String {
+    // Pattern-matching against the camelCase accessibility-sys constants
+    // trips the non_upper_case_globals lint, so we compare via `if` arms.
+    let (name, hint) = if code == kAXErrorFailure {
+        ("kAXErrorFailure", "generic AX failure")
+    } else if code == kAXErrorIllegalArgument {
+        (
+            "kAXErrorIllegalArgument",
+            "argument is not legal for this attribute or action",
+        )
+    } else if code == kAXErrorInvalidUIElement {
+        (
+            "kAXErrorInvalidUIElement",
+            "the AXUIElement is no longer valid - re-snapshot",
+        )
+    } else if code == kAXErrorCannotComplete {
+        (
+            "kAXErrorCannotComplete",
+            "AX timed out talking to the target app",
+        )
+    } else if code == kAXErrorAttributeUnsupported {
+        (
+            "kAXErrorAttributeUnsupported",
+            "this element does not expose the requested attribute",
+        )
+    } else if code == kAXErrorActionUnsupported {
+        (
+            "kAXErrorActionUnsupported",
+            "this element does not implement the requested action",
+        )
+    } else if code == kAXErrorNotImplemented {
+        (
+            "kAXErrorNotImplemented",
+            "the target app's AX implementation does not handle this call",
+        )
+    } else if code == kAXErrorAPIDisabled {
+        (
+            "kAXErrorAPIDisabled",
+            "Accessibility is disabled for this process - check System Settings > Privacy & Security > Accessibility",
+        )
+    } else if code == kAXErrorNoValue {
+        (
+            "kAXErrorNoValue",
+            "attribute has no value - the element exists but the value is unset",
+        )
+    } else if code == kAXErrorParameterizedAttributeUnsupported {
+        (
+            "kAXErrorParameterizedAttributeUnsupported",
+            "the parameterized form of this attribute is not supported",
+        )
+    } else {
+        return format!("AX error {code}");
+    };
+    format!("{name} ({code}: {hint})")
+}
+
 fn perform_action(element: AXUIElementRef, ax_action: &str, action: &str) -> Result<()> {
     let action_ref = cf_string(ax_action)
         .ok_or_else(|| Error::Surface(format!("failed to allocate AX action {ax_action}")))?;
@@ -1770,7 +1833,10 @@ fn perform_action(element: AXUIElementRef, ax_action: &str, action: &str) -> Res
     } else {
         Err(Error::Action {
             action: action.into(),
-            reason: format!("AX action {ax_action} failed with AX error {err}"),
+            reason: format!(
+                "AX action {ax_action} failed with {}",
+                ax_error_message(err)
+            ),
         })
     }
 }
@@ -1788,7 +1854,10 @@ fn set_bool_attr(element: AXUIElementRef, attr: &str, action: &str) -> Result<()
     } else {
         Err(Error::Action {
             action: action.into(),
-            reason: format!("setting AX attribute {attr} failed with AX error {err}"),
+            reason: format!(
+                "setting AX attribute {attr} failed with {}",
+                ax_error_message(err)
+            ),
         })
     }
 }
@@ -1811,7 +1880,10 @@ fn set_string_attr(element: AXUIElementRef, attr: &str, value: &str, action: &st
     } else {
         Err(Error::Action {
             action: action.into(),
-            reason: format!("setting AX attribute {attr} failed with AX error {err}"),
+            reason: format!(
+                "setting AX attribute {attr} failed with {}",
+                ax_error_message(err)
+            ),
         })
     }
 }
