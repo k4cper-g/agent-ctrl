@@ -211,10 +211,20 @@ Framework notes:
 
 - **Native Cocoa** (AppKit, anything from Apple) is the most predictable
   and is what the fixture exercises. AXPress, AXValue, AXFocused all
-  behave per documentation.
+  behave per documentation. **Verified working:** Finder (sidebar
+  navigation, file lists), TextEdit (Open dialog, document area),
+  the deterministic fixture.
 - **Mac Catalyst** apps (apps from iPad ported via Catalyst) expose
   reasonable AX trees but some custom controls may not respond to
   AXPress. Expect `cg-click` fallbacks more often.
+- **Safari and other WebKit hosts** expose web page content as a real
+  AX tree (`AXWebArea`, `AXLink`, `AXHeading`, etc.). End-to-end flows
+  work: snapshot the page, find a link or button by name, fill the URL
+  bar with `fill`, press Enter. **Verified working:** anthropic.com
+  navigation through the URL bar (`@e7 text-field "smart search field"`
+  in the toolbar), 200+ refs captured for a typical content page.
+  Long pages with lots of `AXGroup` nesting can produce huge snapshots;
+  use `--depth`, role filters, or `find --in @eN` to scope.
 - **Electron / Chromium** apps expose a Chromium accessibility tree that
   is rich but uses a lot of `AXGroup` nesting. Use `--depth`, role
   filters, and `--first` to keep agent prompts compact. Identifiers are
@@ -222,9 +232,17 @@ Framework notes:
 - **Java / Swing / SWT** AX coverage is the weakest. Many controls are
   invisible to AX or report bogus bounds. Prefer screenshots and
   coordinate-based clicks for these.
-- **Web content inside Safari / Chrome** is exposed via the browser's
-  AX tree. Use the browser-specific surface (`agent-browser`) instead
-  for web flows; AX into rendered DOM is far less stable.
+- **Apple Notes** and a handful of other Apple system apps return zero
+  AX windows from `AXUIElementCreateApplication(pid)` even when they're
+  active with visible windows. The cause is the third TCC permission
+  (Automation): some apps gate AX visibility behind an explicit
+  *agent-ctrl can control Notes* grant. The grant prompt only fires
+  when an Apple-Event-style operation is attempted; if you've never
+  triggered it, the app shows no windows. Workaround: run any
+  AppleScript that targets the app once (e.g.
+  `osascript -e 'tell application "Notes" to count windows'`) to
+  trigger the prompt, then retry. Until macOS surfaces this in the
+  same pane as Accessibility, it's an opaque silent failure.
 
 ## Screenshots
 

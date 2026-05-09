@@ -9,16 +9,18 @@ use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 
 use accessibility_sys::{
-    kAXButtonRole, kAXCheckBoxRole, kAXChildrenAttribute, kAXComboBoxRole, kAXDescriptionAttribute,
-    kAXDialogSubrole, kAXEnabledAttribute, kAXErrorSuccess, kAXExpandedAttribute,
-    kAXFocusedApplicationAttribute, kAXFocusedAttribute, kAXFocusedWindowAttribute, kAXGroupRole,
-    kAXIdentifierAttribute, kAXImageRole, kAXMenuBarItemRole, kAXMenuBarRole, kAXMenuButtonRole,
-    kAXMenuItemRole, kAXMenuRole, kAXOutlineRole, kAXPopUpButtonRole, kAXPositionAttribute,
-    kAXPressAction, kAXRadioButtonRole, kAXRaiseAction, kAXRoleAttribute, kAXScrollAreaRole,
-    kAXSearchFieldSubrole, kAXSelectedAttribute, kAXSizeAttribute, kAXSliderRole,
-    kAXStaticTextRole, kAXSubroleAttribute, kAXTabGroupRole, kAXTableRole, kAXTextAreaRole,
-    kAXTextFieldRole, kAXTitleAttribute, kAXValueAttribute, kAXValueTypeCGPoint,
-    kAXValueTypeCGSize, kAXWindowsAttribute, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
+    kAXButtonRole, kAXCellRole, kAXCheckBoxRole, kAXChildrenAttribute, kAXComboBoxRole,
+    kAXDescriptionAttribute, kAXDialogSubrole, kAXDisclosureTriangleRole, kAXEnabledAttribute,
+    kAXErrorSuccess, kAXExpandedAttribute, kAXFocusedApplicationAttribute, kAXFocusedAttribute,
+    kAXFocusedWindowAttribute, kAXGridRole, kAXGroupRole, kAXIdentifierAttribute, kAXImageRole,
+    kAXListRole, kAXMenuBarItemRole, kAXMenuBarRole, kAXMenuButtonRole, kAXMenuItemRole,
+    kAXMenuRole, kAXOutlineRole, kAXPopUpButtonRole, kAXPopoverRole, kAXPositionAttribute,
+    kAXPressAction, kAXProgressIndicatorRole, kAXRadioButtonRole, kAXRaiseAction, kAXRoleAttribute,
+    kAXRowRole, kAXScrollAreaRole, kAXSearchFieldSubrole, kAXSelectedAttribute, kAXSheetRole,
+    kAXSizeAttribute, kAXSliderRole, kAXSplitGroupRole, kAXSplitterRole, kAXStaticTextRole,
+    kAXSubroleAttribute, kAXTabGroupRole, kAXTableRole, kAXTextAreaRole, kAXTextFieldRole,
+    kAXTitleAttribute, kAXToolbarRole, kAXValueAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize,
+    kAXWindowsAttribute, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication, AXUIElementCreateSystemWide, AXUIElementGetPid,
     AXUIElementPerformAction, AXUIElementRef, AXUIElementSetAttributeValue, AXValueGetValue,
     AXValueRef, CGKeyCode,
@@ -549,7 +551,11 @@ fn map_role(role: &str, subrole: Option<&str>) -> Role {
     }
 
     match role {
-        v if v == kAXButtonRole || v == kAXPopUpButtonRole || v == kAXMenuButtonRole => {
+        v if v == kAXButtonRole
+            || v == kAXPopUpButtonRole
+            || v == kAXMenuButtonRole
+            || v == kAXDisclosureTriangleRole =>
+        {
             Role::Button
         }
         v if v == kAXTextFieldRole || v == kAXTextAreaRole => Role::TextField,
@@ -565,9 +571,23 @@ fn map_role(role: &str, subrole: Option<&str>) -> Role {
         value if value == kAXTableRole => Role::Table,
         value if value == kAXOutlineRole => Role::Tree,
         value if value == kAXTabGroupRole => Role::TabList,
-        v if v == kAXScrollAreaRole || v == kAXGroupRole => Role::Group,
+        value if value == kAXRowRole => Role::Row,
+        value if value == kAXCellRole => Role::Cell,
+        value if value == kAXListRole => Role::List,
+        value if value == kAXGridRole => Role::Grid,
+        value if value == kAXToolbarRole => Role::Toolbar,
+        v if v == kAXSheetRole || v == kAXPopoverRole => Role::Dialog,
+        v if v == kAXProgressIndicatorRole || v == kAXSplitterRole => Role::Generic,
+        v if v == kAXScrollAreaRole || v == kAXGroupRole || v == kAXSplitGroupRole => Role::Group,
         "AXWindow" => Role::Window,
         "AXApplication" => Role::Application,
+        // Web content from Safari, Chromium, and other browsers exposes
+        // these as raw NSAccessibility role strings rather than the
+        // accessibility-sys constants. Map them directly so refs land
+        // on the right elements when driving in-page content.
+        "AXLink" => Role::Link,
+        "AXHeading" => Role::Heading,
+        "AXWebArea" => Role::Document,
         other => Role::Unknown(other.to_owned()),
     }
 }
