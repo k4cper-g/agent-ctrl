@@ -18,6 +18,9 @@ tracing.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility-sys = "0.2"
 core-foundation-sys = "0.8"
+png = "0.17"
+base64 = "0.22"
+serde_json.workspace = true
 
 [lints]
 workspace = true

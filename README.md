@@ -6,7 +6,7 @@
   OS automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
-> **Status (v0.1.1):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against the deterministic Win32 fixture. macOS Accessibility (AX) has an initial focused-window snapshot and window-focus preview, but element actions are still unsupported. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
+> **Status (v0.1.1):** **Windows is the supported platform today.** The Windows UI Automation surface is implemented and validated end-to-end against the deterministic Win32 fixture. macOS Accessibility (AX) has focused-window snapshots, window-focus preview, first element actions (`click`, `focus`, `fill`), checkable controls, and keyboard input, but it is not at UIA parity yet. Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
 >
 > **Browser automation is out of scope.** agent-ctrl drives native UI; for Chromium-via-CDP use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project. The two are designed to compose in the same agent loop.
 
@@ -46,7 +46,7 @@ npm install @agent-ctrl/client
 
 ### Requirements
 
-- **Windows 10/11** for UIA. Other OSes build cleanly; AX has a macOS snapshot preview, while Linux / Android / iOS are not implemented yet.
+- **Windows 10/11** for UIA. Other OSes build cleanly; AX has a partial macOS implementation, while Linux / Android / iOS are not implemented yet.
 - **Rust 1.85+** (workspace MSRV; rustup will install it from `rust-toolchain.toml`).
 - **Node.js 20+** only when using the TypeScript client.
 
@@ -107,10 +107,10 @@ agent-ctrl highlight @eN                 # move cursor to element for human debu
 ### Keyboard
 
 ```bash
-agent-ctrl type "hello"                  # synthetic Unicode keystrokes (ASCII reliable; no IME)
-agent-ctrl fill @eN "value"              # UIA ValuePattern.SetValue (best for non-ASCII / form fields)
+agent-ctrl type "hello"                  # synthetic Unicode keystrokes
+agent-ctrl fill @eN "value"              # native value setting where supported
 agent-ctrl clear @eN                     # clear an editable field
-agent-ctrl press "Ctrl+S"                # key chord - Enter, Tab, Ctrl+A, Ctrl+Shift+T, etc.
+agent-ctrl press "Ctrl+S"                # key chord - Enter, Tab, Ctrl+A, Cmd+A, etc.
 agent-ctrl key-down "Shift"              # hold a modifier
 agent-ctrl key-up "Shift"                # release it
 agent-ctrl clipboard read                # read clipboard text
@@ -342,7 +342,8 @@ The repository is a **dual workspace** - a Cargo workspace for the Rust engine a
 | [`crates/cli`](crates/cli) | The `agent-ctrl` binary - user-facing entrypoint. |
 | [`crates/surface-uia`](crates/surface-uia) | Windows UI Automation surface (Windows-only). |
 | [`crates/uia-fixture`](crates/uia-fixture) | Deterministic native Win32 fixture app for UIA reliability tests. |
-| [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (snapshot preview; macOS-only). |
+| [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (partial automation; macOS-only). |
+| [`crates/ax-fixture`](crates/ax-fixture) | Deterministic native Cocoa fixture app for AX reliability tests. |
 | [`packages/client`](packages/client) | `@agent-ctrl/client` - typed TypeScript wrapper over stdio JSON-RPC. |
 
 Surfaces gated by `target_os` compile to empty crates on other platforms, so the workspace builds on any host.
@@ -354,7 +355,7 @@ A **surface** is one accessibility protocol - UIA, AX, AT-SPI, etc. A **platform
 | Platform | Native surface | Status |
 |---|---|---|
 | Windows | [`surface-uia`](crates/surface-uia) - UI Automation | **ready** |
-| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | snapshot preview |
+| macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | partial |
 | Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | not started |
 | Android | _planned_ `surface-accessibility-service` (JNI) | not started |
 | iOS | _planned_ `surface-xcuitest` (WebDriverAgent) | not started |
@@ -396,6 +397,27 @@ cargo test -p agent-ctrl-cli --test windows_uia_fixture
 ```
 
 Successful UIA actions may print a method diagnostic such as `ok method=keyboard-space`, `ok method=selection-item-pattern`, or `ok method=toggle-pattern`. These are intended for agents and humans debugging cross-app behavior.
+
+macOS AX fixture:
+
+```bash
+cargo build -p agent-ctrl-cli -p agent-ctrl-ax-fixture
+target/debug/agent-ctrl-ax-fixture --ready-file /tmp/agent-ctrl-ax-fixture.ready &
+target/debug/agent-ctrl open ax --session fixture
+target/debug/agent-ctrl snapshot --session fixture --target-process agent-ctrl-ax-fixture
+```
+
+Opt-in AX fixture integration test:
+
+```bash
+cargo build -p agent-ctrl-ax-fixture
+RUN_AX_TESTS=1 cargo test -p agent-ctrl-cli --test macos_ax_fixture
+```
+
+The AX fixture covers the deterministic macOS loop for snapshots, `find`,
+`click`, `fill`, `check`, `uncheck`, `toggle`, and `window-list`. Keyboard
+actions exist, but are still validated manually because host focus and event-tap
+behavior can vary under the Rust test harness.
 
 TypeScript client:
 
@@ -450,7 +472,7 @@ prefer the generic loop above over app-specific assumptions.
 
 These are real today - the goal is to fix or document them as the project matures.
 
-- **Windows is the only action-ready surface.** AX can capture the focused macOS window and raise listed windows when Accessibility permission is granted, but element actions still return `Unsupported`; Linux / Android / iOS / browser flows are not implemented in this project yet.
+- **Windows is the only fully action-ready surface.** AX can capture the focused macOS window, raise listed windows, run first element actions (`click`, `focus`, `fill`), drive checkable controls, and send keyboard input when Accessibility permission is granted; Linux / Android / iOS / browser flows are not implemented in this project yet.
 - **Local TCP daemon auth is developer-machine scoped.** TCP session files include a random bearer token and the daemon rejects missing or incorrect tokens, but anyone who can read `~/.agent-ctrl/<session>.json` can still use that session. Treat sessions as a local developer-machine boundary, not a multi-user security sandbox.
 - **Refs are valid only against the snapshot that produced them.** If `wait-for` runs in parallel with another command on the same session (across two shells), the wait loop refreshes the cached refs on each poll, and a previously-issued ref may resolve to a different element. Sequential CLI usage in one shell - the realistic flow - doesn't trip this.
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.
