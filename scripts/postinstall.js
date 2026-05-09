@@ -3,60 +3,152 @@
 /**
  * Postinstall for agent-ctrl.
  *
- * For v0.1.x, only Windows x64 is supported.
- *  - On Windows: verify the native binary is present and (for global installs)
- *    rewrite npm's .cmd/.ps1 shims to invoke the .exe directly with zero
- *    overhead.
- *  - On other platforms: print a friendly notice and exit cleanly so npm
- *    install does not fail.
+ * The npm tarball does NOT bundle native binaries. On install we detect the
+ * platform/arch, download the matching prebuilt binary from this version's
+ * GitHub Release, drop it into bin/, chmod it on POSIX, and (for Windows
+ * global installs) rewrite npm's .cmd/.ps1 shims so the .exe runs directly
+ * with zero Node overhead.
  *
- * This script must never throw — postinstall failures break installs.
+ * Supported targets in v0.1.x: Windows x64, macOS arm64, macOS x64.
+ *
+ * The script must never throw - postinstall failures break installs.
  */
 
-import { existsSync, writeFileSync } from "fs"
+import {
+  chmodSync,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 import { platform, arch } from "os"
 import { execSync } from "child_process"
+import { get } from "https"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, "..")
 const binDir = join(projectRoot, "bin")
 
+const GITHUB_REPO = "k4cper-g/agent-ctrl"
+
+const packageJson = JSON.parse(
+  await import("fs").then((m) =>
+    m.readFileSync(join(projectRoot, "package.json"), "utf8"),
+  ),
+)
+const version = packageJson.version
+
+function getBinaryName() {
+  const os = platform()
+  const cpuArch = arch()
+
+  if (os === "win32" && cpuArch === "x64") return "agent-ctrl-win32-x64.exe"
+  if (os === "darwin" && cpuArch === "arm64") return "agent-ctrl-darwin-arm64"
+  if (os === "darwin" && cpuArch === "x64") return "agent-ctrl-darwin-x64"
+
+  return null
+}
+
 function noticeUnsupported() {
   console.log("")
   console.log("agent-ctrl: this platform is not supported in v0.1.x.")
   console.log(
-    `  Detected: ${platform()}-${arch()}. v0.1.x ships Windows x64 only.`,
+    `  Detected: ${platform()}-${arch()}.`,
   )
   console.log(
-    "  macOS and Linux are on the roadmap. The CLI wrapper will exit",
+    "  v0.1.x supports Windows x64, macOS arm64, and macOS x64.",
   )
-  console.log("  with a helpful message if you try to invoke agent-ctrl.")
+  console.log("  Linux/iOS/Android are on the roadmap.")
   console.log("")
 }
 
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = createWriteStream(dest)
+    const request = (currentUrl) => {
+      get(currentUrl, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
+          request(res.headers.location)
+          return
+        }
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode} for ${currentUrl}`))
+          return
+        }
+        res.pipe(file)
+        file.on("finish", () => file.close(() => resolve()))
+      }).on("error", (err) => {
+        try {
+          unlinkSync(dest)
+        } catch {}
+        reject(err)
+      })
+    }
+    request(url)
+  })
+}
+
 async function main() {
-  if (platform() !== "win32" || arch() !== "x64") {
+  const binaryName = getBinaryName()
+
+  if (!binaryName) {
     noticeUnsupported()
     return
   }
 
-  const binaryPath = join(binDir, "agent-ctrl-win32-x64.exe")
-  if (!existsSync(binaryPath)) {
-    console.log("agent-ctrl: native binary not present in package.")
-    console.log("  Build from source with: npm run build:native")
+  if (!existsSync(binDir)) {
+    mkdirSync(binDir, { recursive: true })
+  }
+
+  const binaryPath = join(binDir, binaryName)
+
+  if (existsSync(binaryPath)) {
+    if (platform() !== "win32") {
+      try {
+        chmodSync(binaryPath, 0o755)
+      } catch {}
+    }
+    console.log(`agent-ctrl: native binary already present (${binaryName}).`)
+    if (platform() === "win32") await fixWindowsShims(binaryName)
     return
   }
 
-  await fixWindowsShims()
+  const url = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`
+  console.log(`agent-ctrl: downloading ${binaryName} for v${version} ...`)
+  console.log(`  ${url}`)
+
+  try {
+    await downloadFile(url, binaryPath)
+    if (platform() !== "win32") {
+      chmodSync(binaryPath, 0o755)
+    }
+    console.log(`agent-ctrl: ready (${binaryName}).`)
+  } catch (err) {
+    console.warn(
+      `agent-ctrl: could not download native binary (${err.message}).`,
+    )
+    console.warn(
+      `  Install will still complete; running 'agent-ctrl' will fail until you`,
+    )
+    console.warn(
+      `  reinstall or run 'npm run build:native' from a source checkout.`,
+    )
+    return
+  }
+
+  if (platform() === "win32") {
+    await fixWindowsShims(binaryName)
+  }
 }
 
 /**
  * On global installs (npm i -g), npm generates .cmd/.ps1 shims that go through
- * /bin/sh — broken on Windows. Overwrite them to invoke the .exe directly.
+ * /bin/sh - broken on Windows. Overwrite them to invoke the .exe directly.
  */
-async function fixWindowsShims() {
+async function fixWindowsShims(binaryName) {
   let npmBinDir
   try {
     npmBinDir = execSync("npm prefix -g", { encoding: "utf8" }).trim()
@@ -67,14 +159,11 @@ async function fixWindowsShims() {
   const cmdShim = join(npmBinDir, "agent-ctrl.cmd")
   const ps1Shim = join(npmBinDir, "agent-ctrl.ps1")
 
-  // npm creates shims AFTER lifecycle scripts run for some installer paths,
-  // so a missing shim is not an error. The JS launcher handles all cases.
   if (!existsSync(cmdShim)) {
     return
   }
 
-  const relBinary =
-    "node_modules\\@agent-ctrl\\cli\\bin\\agent-ctrl-win32-x64.exe"
+  const relBinary = `node_modules\\@agent-ctrl\\cli\\bin\\${binaryName}`
   const absBinary = join(npmBinDir, relBinary)
   if (!existsSync(absBinary)) {
     return
@@ -100,6 +189,5 @@ async function fixWindowsShims() {
 }
 
 main().catch((err) => {
-  // Never fail npm install from postinstall.
   console.warn(`agent-ctrl postinstall warning: ${err.message}`)
 })

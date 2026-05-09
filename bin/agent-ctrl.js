@@ -3,9 +3,14 @@
 /**
  * Cross-platform CLI wrapper for agent-ctrl.
  *
- * For v0.1.x, only Windows x64 is supported. The wrapper enables npx on
- * Windows where shell scripts don't work; on global installs, postinstall.js
- * patches npm's shims to invoke the native binary directly with zero overhead.
+ * The wrapper detects platform/arch and spawns the matching native binary
+ * shipped by postinstall (`agent-ctrl-<os>-<arch>[.exe]` in this directory).
+ * It enables `npx @agent-ctrl/cli` on Windows where shell scripts don't work
+ * and lets the native binary run directly when postinstall has patched the
+ * global shims.
+ *
+ * Supported in v0.1.x: Windows x64, macOS arm64, macOS x64.
+ * Linux is on the roadmap but not in this release.
  */
 
 import { spawn } from "child_process"
@@ -20,10 +25,11 @@ function getBinaryName() {
   const os = platform()
   const cpuArch = arch()
 
-  if (os !== "win32") return null
-  if (cpuArch !== "x64") return null
+  if (os === "win32" && cpuArch === "x64") return "agent-ctrl-win32-x64.exe"
+  if (os === "darwin" && cpuArch === "arm64") return "agent-ctrl-darwin-arm64"
+  if (os === "darwin" && cpuArch === "x64") return "agent-ctrl-darwin-x64"
 
-  return "agent-ctrl-win32-x64.exe"
+  return null
 }
 
 function main() {
@@ -34,10 +40,10 @@ function main() {
       `agent-ctrl: ${platform()}-${arch()} is not yet supported.`,
     )
     console.error(
-      "v0.1.x supports Windows x64 only. macOS and Linux are on the roadmap;",
+      "v0.1.x supports Windows x64, macOS arm64, and macOS x64. Linux is",
     )
     console.error(
-      "see https://github.com/k4cper-g/agent-ctrl for current status.",
+      "on the roadmap; see https://github.com/k4cper-g/agent-ctrl",
     )
     process.exit(1)
   }

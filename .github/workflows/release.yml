@@ -31,13 +31,23 @@ jobs:
           Copy-Item README.md dist\README.md
           Copy-Item LICENSE dist\LICENSE
           Compress-Archive -Path dist\* -DestinationPath $asset -Force
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Raw binary alongside the archive, named so the npm launcher can
+          # download it directly without extraction.
+          Copy-Item target\release\agent-ctrl.exe agent-ctrl-win32-x64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-binary
-          path: agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+          path: |
+            agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+            agent-ctrl-win32-x64.exe
       - uses: softprops/action-gh-release@v2
         with:
-          files: agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+          files: |
+            agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+            agent-ctrl-win32-x64.exe
           generate_release_notes: true
 
   macos-binary:
@@ -68,12 +78,24 @@ jobs:
           cp README.md dist/README.md
           cp LICENSE dist/LICENSE
           tar -czf "$asset" -C dist .
+          # Raw binary alongside the archive, named so the npm launcher can
+          # download it directly without extraction.
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) raw=agent-ctrl-darwin-arm64 ;;
+            x86_64-apple-darwin)  raw=agent-ctrl-darwin-x64 ;;
+          esac
+          cp "target/${{ matrix.target }}/release/agent-ctrl" "$raw"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
+          echo "RAW=$raw" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-binary-${{ matrix.target }}
-          path: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.RAW }}
       - uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.RAW }}
           generate_release_notes: true

@@ -19,14 +19,14 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-ctrl-ax-fixture"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "objc",
 ]
 
 [[package]]
 name = "agent-ctrl-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "agent-ctrl-core",
  "agent-ctrl-daemon",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-ctrl-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "agent-ctrl-daemon"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "agent-ctrl-core",
  "agent-ctrl-surface-ax",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "agent-ctrl-surface-ax"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "accessibility-sys",
  "agent-ctrl-core",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "agent-ctrl-surface-uia"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "agent-ctrl-core",
  "anyhow",
@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "agent-ctrl-uia-fixture"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "windows",
 ]
