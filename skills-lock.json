@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "agent-ctrl": {
+      "source": "k4cper-g/agent-ctrl",
+      "sourceType": "github",
+      "skillPath": "skills/agent-ctrl/SKILL.md",
+      "computedHash": "f8d94a7490c587082e029230f14a55133a7a8d25a1827e92f027d9c915b57420"
+    }
+  }
+}

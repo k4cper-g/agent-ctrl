@@ -1,7 +1,38 @@
 {
-  "name": "agent-ctrl-monorepo",
-  "private": true,
-  "description": "Top-level workspace for the agent-ctrl TypeScript packages.",
+  "name": "@agent-ctrl/cli",
+  "version": "0.1.2",
+  "description": "Cross-platform computer-use framework for AI agents.",
+  "type": "module",
+  "files": [
+    "bin",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "agent-ctrl": "bin/agent-ctrl.js"
+  },
+  "scripts": {
+    "version:sync": "node scripts/sync-version.js",
+    "version": "npm run version:sync && git add Cargo.toml Cargo.lock",
+    "build:native": "npm run version:sync && cargo build --release -p agent-ctrl-cli && node scripts/copy-native.js",
+    "build:windows": "npm run build:native",
+    "release:dryrun": "npm run version:sync && npm run build:windows && npm publish --dry-run --access=public",
+    "release": "npm run version:sync && npm run build:windows && npm publish --access=public",
+    "postinstall": "node scripts/postinstall.js",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "keywords": [
+    "agent",
+    "automation",
+    "accessibility",
+    "uia",
+    "cli",
+    "windows",
+    "computer-use"
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -14,11 +45,6 @@
   "workspaces": [
     "packages/*"
   ],
-  "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present"
-  },
   "engines": {
     "node": ">=20"
   }

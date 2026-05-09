@@ -31,6 +31,15 @@ node_modules
 # Build artifacts
 /dist
 /bin/native
+# Per-platform CLI binaries copied here by `npm run build:native` for npm packaging.
+# Built fresh per release; not tracked.
+/bin/agent-ctrl-*
+
+# Next.js build output for the landing site
+**/.next
+
+# Per-machine skill installs (npx skills add ...)
+/.agents
 
 # OS
 Thumbs.db
