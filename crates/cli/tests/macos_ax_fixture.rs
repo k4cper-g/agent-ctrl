@@ -59,6 +59,7 @@ fn run_fixture_flow() {
     };
     run.open();
     run.snapshot();
+    run.exercise_identifier_capture();
     run.exercise_button_click();
     run.exercise_double_click();
     run.exercise_hover();
@@ -93,6 +94,38 @@ impl FixtureRun<'_> {
                 "agent-ctrl-ax-fixture",
             ],
         );
+    }
+
+    fn exercise_identifier_capture(&self) {
+        // Confirms that AXIdentifier is captured into NativeHandle::Ax during
+        // snapshot. The fast path in resolve_element uses this identifier
+        // to rediscover elements when (role, name, nth) would drift.
+        let snap = run_cli(
+            self.cli,
+            self.home,
+            [
+                "snapshot",
+                "--session",
+                "fixture",
+                "--target-process",
+                "agent-ctrl-ax-fixture",
+                "--json",
+            ],
+        );
+        let snap: serde_json::Value = serde_json::from_str(&snap).unwrap();
+        let identifiers = collect_identifiers(&snap["root"]);
+        for required in [
+            "fixture-status",
+            "fixture-text-field",
+            "fixture-increment-button",
+            "fixture-advanced-checkbox",
+            "fixture-fruit-popup",
+        ] {
+            assert!(
+                identifiers.contains(&required.to_string()),
+                "snapshot did not capture identifier {required:?}; got {identifiers:?}"
+            );
+        }
     }
 
     fn exercise_button_click(&self) {
@@ -370,6 +403,27 @@ impl FixtureRun<'_> {
                     "fixture",
                 ],
             )
+        }
+    }
+}
+
+fn collect_identifiers(node: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_identifiers(node, &mut out);
+    out
+}
+
+fn walk_identifiers(node: &serde_json::Value, out: &mut Vec<String>) {
+    if let Some(id) = node
+        .get("native")
+        .and_then(|n| n.get("identifier"))
+        .and_then(|v| v.as_str())
+    {
+        out.push(id.to_owned());
+    }
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for child in children {
+            walk_identifiers(child, out);
         }
     }
 }

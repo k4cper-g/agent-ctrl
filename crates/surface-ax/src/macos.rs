@@ -9,15 +9,16 @@ use accessibility_sys::{
     kAXButtonRole, kAXCheckBoxRole, kAXChildrenAttribute, kAXComboBoxRole, kAXDescriptionAttribute,
     kAXDialogSubrole, kAXEnabledAttribute, kAXErrorSuccess, kAXExpandedAttribute,
     kAXFocusedApplicationAttribute, kAXFocusedAttribute, kAXFocusedWindowAttribute, kAXGroupRole,
-    kAXImageRole, kAXMenuBarItemRole, kAXMenuBarRole, kAXMenuButtonRole, kAXMenuItemRole,
-    kAXMenuRole, kAXOutlineRole, kAXPopUpButtonRole, kAXPositionAttribute, kAXPressAction,
-    kAXRadioButtonRole, kAXRaiseAction, kAXRoleAttribute, kAXScrollAreaRole, kAXSearchFieldSubrole,
-    kAXSelectedAttribute, kAXSizeAttribute, kAXSliderRole, kAXStaticTextRole, kAXSubroleAttribute,
-    kAXTabGroupRole, kAXTableRole, kAXTextAreaRole, kAXTextFieldRole, kAXTitleAttribute,
-    kAXValueAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowsAttribute,
-    AXIsProcessTrusted, AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
-    AXUIElementCreateSystemWide, AXUIElementGetPid, AXUIElementPerformAction, AXUIElementRef,
-    AXUIElementSetAttributeValue, AXValueGetValue, AXValueRef, CGKeyCode,
+    kAXIdentifierAttribute, kAXImageRole, kAXMenuBarItemRole, kAXMenuBarRole, kAXMenuButtonRole,
+    kAXMenuItemRole, kAXMenuRole, kAXOutlineRole, kAXPopUpButtonRole, kAXPositionAttribute,
+    kAXPressAction, kAXRadioButtonRole, kAXRaiseAction, kAXRoleAttribute, kAXScrollAreaRole,
+    kAXSearchFieldSubrole, kAXSelectedAttribute, kAXSizeAttribute, kAXSliderRole,
+    kAXStaticTextRole, kAXSubroleAttribute, kAXTabGroupRole, kAXTableRole, kAXTextAreaRole,
+    kAXTextFieldRole, kAXTitleAttribute, kAXValueAttribute, kAXValueTypeCGPoint,
+    kAXValueTypeCGSize, kAXWindowsAttribute, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
+    AXUIElementCreateApplication, AXUIElementCreateSystemWide, AXUIElementGetPid,
+    AXUIElementPerformAction, AXUIElementRef, AXUIElementSetAttributeValue, AXValueGetValue,
+    AXValueRef, CGKeyCode,
 };
 use agent_ctrl_core::{
     Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error, MouseButton, MouseOp,
@@ -493,8 +494,10 @@ fn build_node(
         required: None,
     };
     let bounds = bounds(element);
+    let identifier = string_attr(element, kAXIdentifierAttribute).filter(|s| !s.is_empty());
     let native = Some(NativeHandle::Ax {
         element_ref: element as u64,
+        identifier,
     });
     let ref_id = if is_ref_target(&role) {
         let key = (role.clone(), name.clone());
@@ -1300,6 +1303,23 @@ fn resolve_element(
         reason: "no prior snapshot - call snapshot before act".into(),
     })?;
     let root = window_by_index(pinned.pid, pinned.index)?;
+    // Fast path: when the captured element carried an AXIdentifier the app
+    // had explicitly set, prefer that over the (role, name, nth) walk. The
+    // identifier is stable across tree mutations that would change the
+    // node's name or position (e.g., a Status label updating its text), so
+    // it lets us follow the same logical control even when the snapshot's
+    // labels have drifted from what's currently on screen.
+    if let Some(NativeHandle::Ax {
+        identifier: Some(id),
+        ..
+    }) = &entry.native
+    {
+        if let Some(element) = find_by_identifier(root, id) {
+            // SAFETY: `root` is returned by a copy-rule helper.
+            unsafe { CFRelease(root.cast::<c_void>()) };
+            return Ok(element);
+        }
+    }
     let mut nth_seen = HashMap::new();
     let element = find_element(root, &entry, &mut nth_seen);
     // SAFETY: `root` is returned by a copy-rule helper.
@@ -1311,6 +1331,31 @@ fn resolve_element(
             ref_id.0, entry.role, entry.name, entry.nth
         ),
     })
+}
+
+fn find_by_identifier(element: AXUIElementRef, identifier: &str) -> Option<AXUIElementRef> {
+    if string_attr(element, kAXIdentifierAttribute).as_deref() == Some(identifier) {
+        // SAFETY: retain the matched element so the caller can release.
+        unsafe { CFRetain(element.cast::<c_void>()) };
+        return Some(element);
+    }
+    let array = array_attr(element, kAXChildrenAttribute)?;
+    // SAFETY: array is a copy-rule CFArray.
+    let count = unsafe { CFArrayGetCount(array) };
+    let mut found = None;
+    for idx in 0..count {
+        // SAFETY: idx is in bounds.
+        let child = unsafe { CFArrayGetValueAtIndex(array, idx) };
+        if !child.is_null() {
+            if let Some(hit) = find_by_identifier(child as AXUIElementRef, identifier) {
+                found = Some(hit);
+                break;
+            }
+        }
+    }
+    // SAFETY: release the copy-rule array.
+    unsafe { CFRelease(array.cast::<c_void>()) };
+    found
 }
 
 fn app_for_keyboard(pinned: Option<AxPinnedWindow>, action: &str) -> Result<AXUIElementRef> {

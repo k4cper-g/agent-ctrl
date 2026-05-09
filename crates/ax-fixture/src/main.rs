@@ -137,17 +137,21 @@ mod macos_app {
     unsafe fn build_controls(content: Id, target: Id) {
         let status = label("Status: idle", rect(24.0, 292.0, 360.0, 24.0));
         STATUS_FIELD.store(status, Ordering::SeqCst);
+        set_identifier(status, "fixture-status");
         add_subview(content, status);
 
         let field = text_field("fixture text", rect(24.0, 244.0, 320.0, 28.0));
+        set_identifier(field, "fixture-text-field");
         add_subview(content, field);
 
         let button = button("Increment", rect(24.0, 188.0, 140.0, 34.0));
         let _: () = msg_send![button, setTarget: target];
         let _: () = msg_send![button, setAction: sel!(increment:)];
+        set_identifier(button, "fixture-increment-button");
         add_subview(content, button);
 
         let checkbox = checkbox("Enable advanced mode", rect(24.0, 150.0, 220.0, 24.0));
+        set_identifier(checkbox, "fixture-advanced-checkbox");
         add_subview(content, checkbox);
 
         let popup = popup_button(
@@ -156,6 +160,7 @@ mod macos_app {
         );
         let _: () = msg_send![popup, setTarget: target];
         let _: () = msg_send![popup, setAction: sel!(selectionChanged:)];
+        set_identifier(popup, "fixture-fruit-popup");
         add_subview(content, popup);
 
         let hint = label(
@@ -163,6 +168,11 @@ mod macos_app {
             rect(24.0, 104.0, 560.0, 24.0),
         );
         add_subview(content, hint);
+    }
+
+    unsafe fn set_identifier(view: Id, identifier: &str) {
+        let id = nsstring(identifier);
+        let _: () = msg_send![view, setAccessibilityIdentifier: id];
     }
 
     unsafe fn label(text: &str, frame: NSRect) -> Id {

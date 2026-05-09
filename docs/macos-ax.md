@@ -47,8 +47,13 @@ at Windows UIA parity.
   menu items inside a synthetic-show menu, so the surface drives the
   popup the same way a user would. Falls back to setting `AXValue` on
   other roles.
+- Captures `AXIdentifier` (AppKit `accessibilityIdentifier`) into
+  `NativeHandle::Ax::identifier` during snapshot and prefers it over the
+  `(role, name, nth)` triple when re-resolving refs at action time. This
+  is the AX equivalent of UIA's `AutomationId` fast path: it survives
+  tree mutations that rename or reorder the captured node.
 
-Richer stale-ref recovery and app switching are still unsupported for AX.
+App switching (`switch-app`) is still unsupported for AX.
 
 ## Permission
 

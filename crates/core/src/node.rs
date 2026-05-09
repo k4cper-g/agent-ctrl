@@ -66,8 +66,15 @@ pub enum NativeHandle {
     },
     /// macOS Accessibility handle.
     Ax {
-        /// Process-local pointer to the `AXUIElement`.
+        /// Process-local pointer to the `AXUIElement`. Treat as opaque -
+        /// `AXUIElement` references are only meaningful within the snapshot
+        /// that produced them.
         element_ref: u64,
+        /// `accessibilityIdentifier` (AppKit `AXIdentifier`) when set by the
+        /// app. The most stable identifier AX exposes; preferred over the
+        /// `(role, name, nth)` triple for rediscovery when the app sets it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identifier: Option<String>,
     },
     /// Android AccessibilityNodeInfo handle.
     Android {
