@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  OS automation CLI for AI agents. Fast native Rust CLI.
+  Desktop automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
 > **Browser automation is out of scope.** agent-ctrl drives native UI; for Chromium-via-CDP use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project. The two are designed to compose in the same agent loop.
