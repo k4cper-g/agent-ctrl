@@ -24,6 +24,25 @@ The installer downloads the latest `agent-ctrl.exe`, installs it under
 `%LOCALAPPDATA%\agent-ctrl\bin`, and adds that directory to the user PATH
 unless `-NoPath` is passed.
 
+### macOS binary
+
+For tagged releases, download the macOS tarball from GitHub Releases (one
+asset per arch: `aarch64-apple-darwin` for Apple Silicon, `x86_64-apple-darwin`
+for Intel) or run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/k4cper-g/agent-ctrl/main/scripts/install-macos.sh | bash
+```
+
+The installer detects the host arch, downloads the matching tarball, places
+`agent-ctrl` at `~/.local/bin/agent-ctrl`, and runs `agent-ctrl info` to
+verify. Pass `--install-dir <path>` to install elsewhere or `--no-path` to
+skip the PATH-update reminder.
+
+After install, grant Accessibility permission in *System Settings >
+Privacy & Security > Accessibility* (and Screen Recording in the same pane
+if you'll use `screenshot`). Run `agent-ctrl doctor` to verify.
+
 ### From source (recommended for v0.1)
 
 ```bash

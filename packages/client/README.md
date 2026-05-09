@@ -60,10 +60,12 @@ new AgentCtrl({
 ## Status
 
 `v0.1` - paired with the daemon's mock surface for protocol validation and
-the Windows UIA surface for real native-app automation. AX has an initial
-macOS snapshot preview; Linux, Android, and iOS are not implemented yet.
+both the Windows UIA surface and the macOS Accessibility (AX) surface for
+real native-app automation. Linux, Android, and iOS are not implemented yet.
+The client itself is platform-agnostic - it spawns whatever `agent-ctrl`
+binary is on PATH and talks to it over stdio JSON-RPC.
 
-## Real UIA Tests
+## Real UIA Tests (Windows)
 
 The default test suite uses the mock surface. The opt-in Windows UIA test uses
 the deterministic `agent-ctrl-uia-fixture`, not a built-in Windows app:
@@ -74,6 +76,22 @@ $env:RUN_UIA_TESTS = "1"
 npm run test --workspace=@agent-ctrl/client
 ```
 
+## Real AX Tests (macOS)
+
+The macOS counterpart uses `agent-ctrl-ax-fixture` (a Cocoa app) and
+runs through the Rust integration test rather than the npm suite,
+because it needs Accessibility + Screen Recording grants on the
+`agent-ctrl` binary running it:
+
+```bash
+cargo build -p agent-ctrl-cli -p agent-ctrl-ax-fixture
+RUN_AX_TESTS=1 cargo test -p agent-ctrl-cli --test macos_ax_fixture
+```
+
+The TypeScript surface itself is identical on Windows and macOS - same
+methods, same JSON shapes. See [`docs/macos-ax-reliability.md`](../../docs/macos-ax-reliability.md)
+for production notes specific to macOS (TCC permissions, sheets, IME).
+
 ## API Notes
 
 The client uses stdio daemon transport, so TCP session auth tokens are not
@@ -83,8 +101,9 @@ automatically.
 Main methods: `openSession`, `snapshot`, `act`, `find`, `get`, `is`,
 `waitFor`, `listWindows`, `batch`, `closeSession`, and `close`.
 
-Windows action types include check state actions, clipboard operations, raw
-mouse events, screenshot targets, and highlight requests. See
+Action types are shared across surfaces and include check-state actions,
+clipboard operations, raw mouse events, screenshot targets, drag, scroll,
+select, switch-app, and highlight requests. See
 [`src/types.ts`](src/types.ts) for the exact wire shapes.
 
 The TypeScript wire types in [`src/types.ts`](src/types.ts) are hand-maintained.

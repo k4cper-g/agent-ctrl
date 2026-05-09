@@ -39,3 +39,41 @@ jobs:
         with:
           files: agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
           generate_release_notes: true
+
+  macos-binary:
+    name: macOS binary (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p agent-ctrl-cli --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          asset="agent-ctrl-${tag}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/agent-ctrl" dist/agent-ctrl
+          cp README.md dist/README.md
+          cp LICENSE dist/LICENSE
+          tar -czf "$asset" -C dist .
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-binary-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true
