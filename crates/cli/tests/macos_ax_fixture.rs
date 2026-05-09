@@ -70,6 +70,7 @@ fn run_fixture_flow() {
     run.exercise_checkbox();
     run.exercise_window_list();
     run.exercise_screenshot();
+    run.exercise_switch_app();
 }
 
 struct FixtureRun<'a> {
@@ -368,6 +369,32 @@ impl FixtureRun<'_> {
         let on_disk = std::fs::metadata(&path).unwrap().len();
         assert_eq!(on_disk, bytes);
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn exercise_switch_app(&self) {
+        // Switch to Finder via bundle id (proves NSWorkspace path), then
+        // back to the fixture via executable name (proves the file-stem
+        // fallback). After the round trip, snapshot must still re-pin the
+        // fixture and a follow-up find must succeed.
+        run_cli(
+            self.cli,
+            self.home,
+            ["switch-app", "com.apple.finder", "--session", "fixture"],
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "switch-app",
+                "agent-ctrl-ax-fixture",
+                "--session",
+                "fixture",
+            ],
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        self.snapshot();
+        let _ = self.find("Increment", "button");
     }
 
     fn exercise_window_list(&self) {

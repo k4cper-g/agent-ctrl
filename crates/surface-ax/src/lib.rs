@@ -9,6 +9,10 @@
 //! not a Windows UIA parity implementation.
 
 #![cfg_attr(target_os = "macos", allow(unsafe_code))]
+#![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
+// `objc` 0.2 macros emit references to the historical `cargo-clippy` cfg in
+// generated code; the allow above suppresses the resulting clippy warnings
+// crate-wide so the workspace `-D warnings` lint stays clean.
 
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Error, Result, Snapshot, SnapshotOptions, Surface,
@@ -79,7 +83,8 @@ impl AxSurface {
                     .with("keyboard")
                     .with("mouse")
                     .with("drag")
-                    .with("screenshot"),
+                    .with("screenshot")
+                    .with("multi_app"),
                 pinned: Mutex::new(None),
                 last_snapshot: Mutex::new(None),
             })
@@ -146,6 +151,21 @@ impl Surface for AxSurface {
                     .pinned
                     .lock()
                     .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))? = Some(pinned);
+                *self
+                    .last_snapshot
+                    .lock()
+                    .map_err(|_| Error::Surface(SNAPSHOT_LOCK_ERR.into()))? = None;
+                return Ok(ActionResult::ok());
+            }
+            if let Action::SwitchApp { app_id } = action {
+                macos::switch_app(app_id)?;
+                // Activated app may not be ours; clear pinned state so the
+                // next snapshot rediscovers the foreground window for the
+                // app the agent just switched to.
+                *self
+                    .pinned
+                    .lock()
+                    .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))? = None;
                 *self
                     .last_snapshot
                     .lock()

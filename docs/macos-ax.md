@@ -52,8 +52,15 @@ at Windows UIA parity.
   `(role, name, nth)` triple when re-resolving refs at action time. This
   is the AX equivalent of UIA's `AutomationId` fast path: it survives
   tree mutations that rename or reorder the captured node.
+- Supports `switch-app` through `NSRunningApplication`/`NSWorkspace`. Accepts
+  either a bundle id (e.g., `com.apple.Safari`) or an executable file stem
+  (e.g., `agent-ctrl-ax-fixture`); the bundle-id path is preferred when both
+  match. After the activation, the surface clears its pinned window so the
+  next `snapshot` re-discovers the foreground window for the new app.
+- Snapshot's `app.id` reports the bundle identifier when the running app
+  exposes one, falling back to `pid:N` for binaries without an Info.plist.
 
-App switching (`switch-app`) is still unsupported for AX.
+Every action verb in the core vocabulary is now implemented for AX.
 
 ## Permission
 
@@ -112,6 +119,9 @@ retry from a new terminal.
 ## Roadmap
 
 1. Stabilize keyboard-action validation under the Rust test harness.
-2. Add richer stale-ref recovery using AX identifier/title/role/nth paths.
-3. Add `switch-app` through NSWorkspace bundle ids.
-4. Expand the fixture with scroll view and dialog controls.
+2. Replace `/bin/ps` shell-outs in `process_name` / `process_ids_by_name` with
+   `libproc` for lower latency and structured errors.
+3. Drive the surface against real apps (Safari, TextEdit, Finder, Mail) and
+   document the rough edges in `docs/macos-ax-reliability.md`.
+4. Expand the fixture with a scroll view and a sheet/dialog control so we
+   can deterministically test scroll-into-view and modal dialog handling.

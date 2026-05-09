@@ -5,6 +5,9 @@ use std::ffi::{c_char, c_void, CString};
 use std::process::Command;
 use std::time::SystemTime;
 
+use objc::runtime::Object;
+use objc::{class, msg_send, sel, sel_impl};
+
 use accessibility_sys::{
     kAXButtonRole, kAXCheckBoxRole, kAXChildrenAttribute, kAXComboBoxRole, kAXDescriptionAttribute,
     kAXDialogSubrole, kAXEnabledAttribute, kAXErrorSuccess, kAXExpandedAttribute,
@@ -83,6 +86,12 @@ const CG_SCROLL_UNIT_PIXEL: u32 = 0;
 
 // CGEventField indices.
 const CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
+
+// AppKit: pulls in NSWorkspace, NSRunningApplication, NSString. We don't call
+// any C functions from it directly, but the link directive forces AppKit to be
+// loaded so the Objective-C classes resolve when we msg_send! to them.
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -217,7 +226,7 @@ pub(super) fn snapshot(
             captured_at: SystemTime::now(),
             surface_kind: SurfaceKind::Ax,
             app: AppContext {
-                id: format!("pid:{pid}"),
+                id: bundle_id_for_pid(pid).unwrap_or_else(|| format!("pid:{pid}")),
                 name: process_name(pid).unwrap_or_else(|| format!("pid {pid}")),
             },
             window: Some(WindowContext {
@@ -2028,6 +2037,157 @@ fn process_name(pid: u32) -> Option<String> {
             .and_then(|name| name.to_str())
             .unwrap_or(path)
             .to_owned(),
+    )
+}
+
+// ---- switch-app and bundle-id helpers (NSWorkspace / NSRunningApplication) --
+
+/// Bring an application to the foreground by bundle id (e.g.
+/// `"com.apple.Safari"`) or by executable file stem (e.g.
+/// `"agent-ctrl-ax-fixture"`). Mirrors UIA's `switch_app` contract: the call
+/// only activates the app, it does not pin a window. The next `snapshot` is
+/// what re-pins the surface to whatever the activated app brought forward.
+pub(super) fn switch_app(app_id: &str) -> Result<()> {
+    if let Some(app) = running_app_by_bundle_id(app_id) {
+        return activate_running_app(app, app_id);
+    }
+    if let Some(app) = running_app_by_executable_name(app_id) {
+        return activate_running_app(app, app_id);
+    }
+    Err(Error::Action {
+        action: "switch_app".into(),
+        reason: format!(
+            "no running application matched {app_id:?} (tried bundle id and executable name)"
+        ),
+    })
+}
+
+const NS_APPLICATION_ACTIVATE_ALL_WINDOWS: u64 = 1 << 0;
+const NS_APPLICATION_ACTIVATE_IGNORING_OTHER_APPS: u64 = 1 << 1;
+
+fn activate_running_app(app: *mut Object, app_id: &str) -> Result<()> {
+    // SAFETY: app is a valid NSRunningApplication pointer returned by the
+    // helpers above; activateWithOptions: returns BOOL.
+    let activated: bool = unsafe {
+        let opts: u64 =
+            NS_APPLICATION_ACTIVATE_ALL_WINDOWS | NS_APPLICATION_ACTIVATE_IGNORING_OTHER_APPS;
+        msg_send![app, activateWithOptions: opts]
+    };
+    if activated {
+        Ok(())
+    } else {
+        Err(Error::Action {
+            action: "switch_app".into(),
+            reason: format!("activateWithOptions: returned NO for {app_id:?}"),
+        })
+    }
+}
+
+fn running_app_by_bundle_id(bundle_id: &str) -> Option<*mut Object> {
+    // SAFETY: NSWorkspace and NSRunningApplication are framework-provided
+    // singletons / class methods; `runningApplicationsWithBundleIdentifier:`
+    // returns an autoreleased NSArray<NSRunningApplication *>.
+    unsafe {
+        let id = ns_string(bundle_id);
+        if id.is_null() {
+            return None;
+        }
+        let cls = class!(NSRunningApplication);
+        let array: *mut Object = msg_send![cls, runningApplicationsWithBundleIdentifier: id];
+        if array.is_null() {
+            return None;
+        }
+        let count: usize = msg_send![array, count];
+        if count == 0 {
+            return None;
+        }
+        let app: *mut Object = msg_send![array, objectAtIndex: 0_usize];
+        (!app.is_null()).then_some(app)
+    }
+}
+
+fn running_app_by_executable_name(name: &str) -> Option<*mut Object> {
+    // SAFETY: NSWorkspace.sharedWorkspace is process-wide, runningApplications
+    // returns an autoreleased NSArray<NSRunningApplication *>.
+    unsafe {
+        let workspace_cls = class!(NSWorkspace);
+        let workspace: *mut Object = msg_send![workspace_cls, sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let apps: *mut Object = msg_send![workspace, runningApplications];
+        if apps.is_null() {
+            return None;
+        }
+        let count: usize = msg_send![apps, count];
+        let needle = name.to_ascii_lowercase();
+        for i in 0..count {
+            let app: *mut Object = msg_send![apps, objectAtIndex: i];
+            if app.is_null() {
+                continue;
+            }
+            let exec_url: *mut Object = msg_send![app, executableURL];
+            if exec_url.is_null() {
+                continue;
+            }
+            let path_ns: *mut Object = msg_send![exec_url, path];
+            if let Some(path) = ns_string_to_string(path_ns) {
+                let stem = std::path::Path::new(&path)
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&path)
+                    .to_ascii_lowercase();
+                if stem == needle {
+                    return Some(app);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Return the bundle identifier for the given pid, when the running
+/// application has one (most native apps do; bare Rust/CLI binaries don't).
+fn bundle_id_for_pid(pid: u32) -> Option<String> {
+    let pid = i32::try_from(pid).ok()?;
+    // SAFETY: NSRunningApplication classmethod, returns autoreleased pointer or nil.
+    unsafe {
+        let cls = class!(NSRunningApplication);
+        let app: *mut Object = msg_send![cls, runningApplicationWithProcessIdentifier: pid];
+        if app.is_null() {
+            return None;
+        }
+        let bundle: *mut Object = msg_send![app, bundleIdentifier];
+        ns_string_to_string(bundle).filter(|s| !s.is_empty())
+    }
+}
+
+/// Allocate an autoreleased NSString from a Rust `&str`.
+unsafe fn ns_string(value: &str) -> *mut Object {
+    let cls = class!(NSString);
+    let bytes = value.as_bytes();
+    let s: *mut Object = msg_send![
+        cls,
+        stringWithBytes: bytes.as_ptr()
+        length: bytes.len()
+        encoding: 4_u64 // NSUTF8StringEncoding
+    ];
+    s
+}
+
+/// Convert an NSString (or nil) to an owned Rust `String`.
+unsafe fn ns_string_to_string(ns: *mut Object) -> Option<String> {
+    if ns.is_null() {
+        return None;
+    }
+    let utf8: *const c_char = msg_send![ns, UTF8String];
+    if utf8.is_null() {
+        return None;
+    }
+    Some(
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned(),
     )
 }
 

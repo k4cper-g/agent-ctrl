@@ -81,6 +81,7 @@ dependencies = [
  "async-trait",
  "base64",
  "core-foundation-sys",
+ "objc",
  "png",
  "serde_json",
  "tracing",
