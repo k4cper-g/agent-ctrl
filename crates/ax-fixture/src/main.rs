@@ -150,6 +150,14 @@ mod macos_app {
         let checkbox = checkbox("Enable advanced mode", rect(24.0, 150.0, 220.0, 24.0));
         add_subview(content, checkbox);
 
+        let popup = popup_button(
+            &["Apple", "Banana", "Cherry"],
+            rect(24.0, 60.0, 200.0, 28.0),
+        );
+        let _: () = msg_send![popup, setTarget: target];
+        let _: () = msg_send![popup, setAction: sel!(selectionChanged:)];
+        add_subview(content, popup);
+
         let hint = label(
             "AX fixture ready: use snapshot, find, click, focus, fill, check, type, press",
             rect(24.0, 104.0, 560.0, 24.0),
@@ -193,6 +201,16 @@ mod macos_app {
         checkbox
     }
 
+    unsafe fn popup_button(items: &[&str], frame: NSRect) -> Id {
+        let popup: Id = msg_send![class!(NSPopUpButton), alloc];
+        let popup: Id = msg_send![popup, initWithFrame: frame pullsDown: NO];
+        for item in items {
+            let title = nsstring(item);
+            let _: () = msg_send![popup, addItemWithTitle: title];
+        }
+        popup
+    }
+
     unsafe fn add_subview(content: Id, view: Id) {
         let _: () = msg_send![content, addSubview: view];
     }
@@ -203,6 +221,10 @@ mod macos_app {
             decl.add_method(
                 sel!(increment:),
                 increment as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(selectionChanged:),
+                selection_changed as extern "C" fn(&Object, Sel, Id),
             );
             decl.register()
         } else if let Some(class) = Class::get("AgentCtrlAxFixtureTarget") {
@@ -222,6 +244,28 @@ mod macos_app {
         }
         unsafe {
             let value = nsstring(&format!("Status: count {count}"));
+            let _: () = msg_send![field, setStringValue: value];
+        }
+    }
+
+    extern "C" fn selection_changed(_this: &Object, _cmd: Sel, sender: Id) {
+        let field = STATUS_FIELD.load(Ordering::SeqCst);
+        if field.is_null() || sender.is_null() {
+            return;
+        }
+        unsafe {
+            let title: Id = msg_send![sender, titleOfSelectedItem];
+            if title.is_null() {
+                return;
+            }
+            let utf8: *const std::os::raw::c_char = msg_send![title, UTF8String];
+            if utf8.is_null() {
+                return;
+            }
+            let chosen = std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned();
+            let value = nsstring(&format!("Status: chose {chosen}"));
             let _: () = msg_send![field, setStringValue: value];
         }
     }

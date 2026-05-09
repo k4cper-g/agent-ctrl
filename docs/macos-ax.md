@@ -40,9 +40,15 @@ at Windows UIA parity.
   `scroll-into-view` (`AXScrollToVisible` on the resolved element), and
   `clipboard` read/write through `pbpaste`/`pbcopy` plus copy/paste through
   the platform `Cmd+C` / `Cmd+V` chord.
+- Supports `select` for `AXPopUpButton`, `AXMenuButton`, and `AXComboBox`
+  by simulating a real user click on the popup, locating the matching
+  `AXMenuItem` in the resulting AXMenu by title, and posting a CGEvent
+  click on the item's center. AX-press paths return inert when fired on
+  menu items inside a synthetic-show menu, so the surface drives the
+  popup the same way a user would. Falls back to setting `AXValue` on
+  other roles.
 
-Combo-box / popup `select`, richer stale-ref recovery, and app switching are
-still unsupported for AX.
+Richer stale-ref recovery and app switching are still unsupported for AX.
 
 ## Permission
 
@@ -101,7 +107,6 @@ retry from a new terminal.
 ## Roadmap
 
 1. Stabilize keyboard-action validation under the Rust test harness.
-2. Add `select` (popup-button / combo-box) through AX menu traversal.
-3. Add richer stale-ref recovery using AX identifier/title/role/nth paths.
-4. Add `switch-app` through NSWorkspace bundle ids.
-5. Expand the fixture with popup-button, scroll view, and dialog controls.
+2. Add richer stale-ref recovery using AX identifier/title/role/nth paths.
+3. Add `switch-app` through NSWorkspace bundle ids.
+4. Expand the fixture with scroll view and dialog controls.

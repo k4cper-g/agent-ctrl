@@ -313,6 +313,7 @@ pub(super) fn act(
         Action::KeyUp { key } => act_key(pinned, key, false, "key_up"),
         Action::Drag { from, to } => act_drag(pinned, refs, from, to),
         Action::Mouse { op } => act_mouse(*op),
+        Action::Select { ref_id, value } => act_select(pinned, refs, ref_id, value),
         Action::SelectAll { ref_id } => act_select_all(pinned, refs, ref_id.as_ref()),
         Action::Clear { ref_id } => act_clear(pinned, refs, ref_id),
         Action::Clipboard { op } => act_clipboard(pinned, op),
@@ -877,6 +878,176 @@ fn act_select_all(
         unsafe { CFRelease(element.cast::<c_void>()) };
     }
     act_press(pinned, "Cmd+A")
+}
+
+fn act_select(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+    value: &str,
+) -> Result<ActionResult> {
+    let element = resolve_element(pinned, refs, ref_id, "select")?;
+    let role = string_attr(element, kAXRoleAttribute);
+    let result = match role.as_deref() {
+        Some(role)
+            if role == kAXPopUpButtonRole
+                || role == kAXMenuButtonRole
+                || role == kAXComboBoxRole =>
+        {
+            select_via_menu(element, value)
+        }
+        _ => set_string_attr(element, kAXValueAttribute, value, "select"),
+    };
+    // SAFETY: `resolve_element` returns a retained AX element.
+    unsafe { CFRelease(element.cast::<c_void>()) };
+    result.map(|()| ActionResult::ok())
+}
+
+fn select_via_menu(button: AXUIElementRef, value: &str) -> Result<()> {
+    // AXPress on a popup button opens its menu, but the menu enters a
+    // synthetic-show state where AppKit ignores subsequent AX presses on
+    // menu items. Real mouse events sent through the HID event tap, on the
+    // other hand, are tracked by NSMenu's normal modal loop just like a
+    // user click. So drive the popup the same way a user would: real mouse
+    // click on the popup to open the menu, then real mouse click on the
+    // matching item to commit the selection.
+    let popup_bounds = bounds(button).ok_or_else(|| Error::Action {
+        action: "select".into(),
+        reason: "popup has no AX bounds".into(),
+    })?;
+    let popup_center = CGPoint {
+        x: popup_bounds.x + popup_bounds.w / 2.0,
+        y: popup_bounds.y + popup_bounds.h / 2.0,
+    };
+    post_mouse(
+        CG_EVENT_MOUSE_MOVED,
+        popup_center,
+        CG_MOUSE_BUTTON_LEFT,
+        None,
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_DOWN,
+        popup_center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_UP,
+        popup_center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    // Give AppKit time to open the menu and set up its modal event tracking.
+    // A tight AX poll loop here would serialize through the target's main
+    // loop and starve the menu's setup, so we use a fixed sleep instead.
+    // The wait also has to be longer than the system double-click threshold
+    // (~250ms) so the next click below isn't coalesced with the popup click.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let menu = find_descendant_role(button, kAXMenuRole).ok_or_else(|| Error::Action {
+        action: "select".into(),
+        reason: "popup menu did not appear after click".into(),
+    })?;
+    let item = find_menu_item(menu, value);
+    // SAFETY: `wait_for_menu` returns a retained AX element.
+    unsafe { CFRelease(menu.cast::<c_void>()) };
+    let item = item.ok_or_else(|| Error::Action {
+        action: "select".into(),
+        reason: format!("no menu item titled {value:?}"),
+    })?;
+    let result = click_menu_item(item);
+    // SAFETY: `find_menu_item` returns a retained AX element.
+    unsafe { CFRelease(item.cast::<c_void>()) };
+    result?;
+    // Give AppKit time to dispatch the NSEvent on its main loop, commit the
+    // selection, fire the popup's target/action, and dismiss the menu.
+    // Polling AX from this thread serializes through the same main loop and
+    // would starve the event dispatch, so a fixed sleep is the right tool.
+    // 300ms is enough headroom that callers running back-to-back commands
+    // (e.g. select then snapshot) don't see a stale tree.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(())
+}
+
+fn click_menu_item(item: AXUIElementRef) -> Result<()> {
+    let logical = bounds(item).ok_or_else(|| Error::Action {
+        action: "select".into(),
+        reason: "menu item has no AX bounds".into(),
+    })?;
+    let center = CGPoint {
+        x: logical.x + logical.w / 2.0,
+        y: logical.y + logical.h / 2.0,
+    };
+    post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_DOWN,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_UP,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    Ok(())
+}
+
+fn find_descendant_role(element: AXUIElementRef, role: &str) -> Option<AXUIElementRef> {
+    if string_attr(element, kAXRoleAttribute).as_deref() == Some(role) {
+        // SAFETY: retain the matched element so the caller can release.
+        unsafe { CFRetain(element.cast::<c_void>()) };
+        return Some(element);
+    }
+    let array = array_attr(element, kAXChildrenAttribute)?;
+    // SAFETY: array is a copy-rule CFArray.
+    let count = unsafe { CFArrayGetCount(array) };
+    let mut found = None;
+    for idx in 0..count {
+        // SAFETY: idx is in bounds.
+        let child = unsafe { CFArrayGetValueAtIndex(array, idx) };
+        if !child.is_null() {
+            if let Some(hit) = find_descendant_role(child as AXUIElementRef, role) {
+                found = Some(hit);
+                break;
+            }
+        }
+    }
+    // SAFETY: release the copy-rule array.
+    unsafe { CFRelease(array.cast::<c_void>()) };
+    found
+}
+
+fn find_menu_item(menu: AXUIElementRef, value: &str) -> Option<AXUIElementRef> {
+    let array = array_attr(menu, kAXChildrenAttribute)?;
+    // SAFETY: array is a copy-rule CFArray.
+    let count = unsafe { CFArrayGetCount(array) };
+    let mut found = None;
+    for idx in 0..count {
+        // SAFETY: idx is in bounds.
+        let child_raw = unsafe { CFArrayGetValueAtIndex(array, idx) };
+        if child_raw.is_null() {
+            continue;
+        }
+        let child = child_raw as AXUIElementRef;
+        let role = string_attr(child, kAXRoleAttribute);
+        let is_menu_item = role
+            .as_deref()
+            .is_some_and(|role| role == kAXMenuItemRole || role == kAXMenuBarItemRole);
+        if !is_menu_item {
+            continue;
+        }
+        let title = string_attr(child, kAXTitleAttribute).unwrap_or_default();
+        if title == value {
+            // SAFETY: retain the matched element so the caller can release.
+            unsafe { CFRetain(child.cast::<c_void>()) };
+            found = Some(child);
+            break;
+        }
+    }
+    // SAFETY: release the copy-rule array.
+    unsafe { CFRelease(array.cast::<c_void>()) };
+    found
 }
 
 fn act_clear(

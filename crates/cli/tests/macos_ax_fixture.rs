@@ -65,6 +65,7 @@ fn run_fixture_flow() {
     run.exercise_fill();
     run.exercise_clear();
     run.exercise_clipboard();
+    run.exercise_select();
     run.exercise_checkbox();
     run.exercise_window_list();
     run.exercise_screenshot();
@@ -193,7 +194,7 @@ impl FixtureRun<'_> {
         // After clear, AXValue is empty. The snapshot omits an empty value
         // when it matches the (now also empty) name, so `value` may be null
         // or "". Either is a successful clear.
-        let cleared = value["value"].as_str().map_or(true, |s| s.is_empty());
+        let cleared = value["value"].as_str().is_none_or(str::is_empty);
         assert!(
             cleared,
             "text-field value after clear should be null or empty, got {:?}",
@@ -230,6 +231,30 @@ impl FixtureRun<'_> {
             out.trim() == needle,
             "clipboard round trip mismatched, got {:?}",
             out.trim()
+        );
+    }
+
+    fn exercise_select(&self) {
+        // The fixture's NSPopUpButton starts with "Apple" selected. Picking
+        // "Banana" fires `selectionChanged:` on the target which updates the
+        // status field.
+        let popup = self.find("Apple", "button");
+        run_cli(
+            self.cli,
+            self.home,
+            ["select", popup.trim(), "Banana", "--session", "fixture"],
+        );
+        self.snapshot();
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "find",
+                "Status: chose Banana",
+                "--first",
+                "--session",
+                "fixture",
+            ],
         );
     }
 
