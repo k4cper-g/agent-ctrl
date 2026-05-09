@@ -37,6 +37,11 @@ struct InfoReport {
     surfaces: Vec<SurfaceInfo>,
     agent_ctrl_home: String,
     active_sessions: usize,
+    /// macOS-only: whether this binary has been granted Accessibility
+    /// permission. `None` on non-macOS hosts. Always cheap to read - it
+    /// just calls `AXIsProcessTrusted` which is a process-local lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    macos_accessibility: Option<&'static str>,
 }
 
 /// Run the `info` command. `json = true` emits the [`InfoReport`] as
@@ -68,7 +73,27 @@ fn build_report() -> InfoReport {
         surfaces,
         agent_ctrl_home: session_file::discovery_dir().display().to_string(),
         active_sessions: session_file::list_alive().len(),
+        macos_accessibility: macos_accessibility_status(),
     }
+}
+
+// The two arms have different return types in spirit (always-Some on macOS,
+// always-None elsewhere), but the public Option signature is what makes the
+// macos_accessibility field omittable from the JSON shape on non-macOS hosts.
+#[allow(clippy::unnecessary_wraps)]
+#[cfg(target_os = "macos")]
+fn macos_accessibility_status() -> Option<&'static str> {
+    use agent_ctrl_surface_ax::{accessibility_trust_status, AxTrustStatus};
+    Some(match accessibility_trust_status() {
+        AxTrustStatus::Trusted => "trusted",
+        AxTrustStatus::NotTrusted => "not-trusted",
+        AxTrustStatus::Unavailable => "unavailable",
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_accessibility_status() -> Option<&'static str> {
+    None
 }
 
 /// Per-OS default surface for "I just want to drive this machine".
@@ -89,6 +114,10 @@ fn print_text(r: &InfoReport) {
     println!("recommended surface: {}", r.recommended_surface);
     println!("home: {}", r.agent_ctrl_home);
     println!("active sessions: {}", r.active_sessions);
+    if let Some(status) = r.macos_accessibility {
+        let marker = if status == "trusted" { "✓" } else { "✗" };
+        println!("macOS Accessibility: {marker} {status}");
+    }
     println!();
     println!("surfaces:");
     for s in &r.surfaces {
