@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev --turbopack -p 2137",
     "build": "next build",
-    "start": "next start -p 2137",
+    "start": "next start",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit"
