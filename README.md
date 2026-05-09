@@ -6,8 +6,6 @@
   OS automation CLI for AI agents. Fast native Rust CLI.
 </p>
 
-> **Status (v0.1.1):** **Windows and macOS are both supported.** The Windows UI Automation surface and the macOS Accessibility (AX) surface implement the full action vocabulary - click, double-click, right-click, hover, drag, scroll, type, press, fill, check/uncheck/toggle, select, select-all, clear, clipboard, scroll-into-view, screenshot, switch-app, focus-window - and each is validated against a deterministic native fixture. macOS additionally has identifier-based ref recovery (AX equivalent of UIA's AutomationId fast path) and method diagnostics in the action result. Real-app validation is in progress and partial: Finder, TextEdit, and Safari (including end-to-end URL navigation) work today; Apple Notes is gated behind macOS's Automation TCC permission and is documented in [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md). Linux AT-SPI, Android, and iOS are planned surfaces and are not implemented yet. Filling them in is the v0.x roadmap.
->
 > **Browser automation is out of scope.** agent-ctrl drives native UI; for Chromium-via-CDP use the sibling [agent-browser](https://github.com/vercel-labs/agent-browser) project. The two are designed to compose in the same agent loop.
 
 ## Installation
