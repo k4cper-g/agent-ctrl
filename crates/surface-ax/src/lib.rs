@@ -77,6 +77,8 @@ impl AxSurface {
                     .with("snapshot")
                     .with("windows")
                     .with("keyboard")
+                    .with("mouse")
+                    .with("drag")
                     .with("screenshot"),
                 pinned: Mutex::new(None),
                 last_snapshot: Mutex::new(None),

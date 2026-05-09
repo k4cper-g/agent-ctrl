@@ -20,9 +20,9 @@ use accessibility_sys::{
     AXUIElementSetAttributeValue, AXValueGetValue, AXValueRef, CGKeyCode,
 };
 use agent_ctrl_core::{
-    Action, ActionResult, AppContext, Bounds, Checked, Error, NativeHandle, Node, RefEntry, RefId,
-    RefMap, Region, Result, Role, ScreenshotTarget, Snapshot, SnapshotOptions, State, SurfaceKind,
-    WindowContext, WindowInfo, WindowTarget,
+    Action, ActionResult, AppContext, Bounds, Checked, Error, MouseButton, MouseOp, NativeHandle,
+    Node, RefEntry, RefId, RefMap, Region, Result, Role, ScreenshotTarget, Snapshot,
+    SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
 };
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 use core_foundation_sys::base::{kCFAllocatorDefault, CFGetTypeID, CFRelease, CFRetain, CFTypeRef};
@@ -65,6 +65,24 @@ const CG_BITMAP_BYTE_ORDER_MASK: u32 = 0x7000;
 const CG_BITMAP_BYTE_ORDER_32_LITTLE: u32 = 2 << 12;
 const CG_IMAGE_ALPHA_INFO_MASK: u32 = 0x1F;
 
+const CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
+const CG_EVENT_LEFT_MOUSE_UP: u32 = 2;
+const CG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
+const CG_EVENT_RIGHT_MOUSE_UP: u32 = 4;
+const CG_EVENT_MOUSE_MOVED: u32 = 5;
+const CG_EVENT_LEFT_MOUSE_DRAGGED: u32 = 6;
+const CG_EVENT_OTHER_MOUSE_DOWN: u32 = 25;
+const CG_EVENT_OTHER_MOUSE_UP: u32 = 26;
+
+const CG_MOUSE_BUTTON_LEFT: u32 = 0;
+const CG_MOUSE_BUTTON_RIGHT: u32 = 1;
+const CG_MOUSE_BUTTON_CENTER: u32 = 2;
+
+const CG_SCROLL_UNIT_PIXEL: u32 = 0;
+
+// CGEventField indices.
+const CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
+
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn CGEventCreateKeyboardEvent(
@@ -79,6 +97,25 @@ extern "C" {
     );
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
     fn CGEventPost(tap: u32, event: CGEventRef);
+
+    fn CGEventCreateMouseEvent(
+        source: *const c_void,
+        mouseType: u32,
+        position: CGPoint,
+        mouseButton: u32,
+    ) -> CGEventRef;
+    fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
+
+    // Apple's ARM64 ABI passes variadic args in registers same as fixed args
+    // (unlike standard AArch64), so a 5-arg fixed-arity declaration is safe on
+    // both x86_64 and aarch64 macOS, the only platforms this surface targets.
+    fn CGEventCreateScrollWheelEvent(
+        source: *const c_void,
+        units: u32,
+        wheelCount: u32,
+        wheel1: i32,
+        wheel2: i32,
+    ) -> CGEventRef;
 
     fn CGWindowListCopyWindowInfo(option: u32, relativeToWindow: u32) -> CFArrayRef;
     fn CGWindowListCreateImage(
@@ -262,6 +299,9 @@ pub(super) fn act(
     let refs = snapshot.map(|s| &s.refs);
     match action {
         Action::Click { ref_id } => act_click(pinned, refs, ref_id),
+        Action::DoubleClick { ref_id } => act_double_click(pinned, refs, ref_id),
+        Action::RightClick { ref_id } => act_right_click(pinned, refs, ref_id),
+        Action::Hover { ref_id } => act_hover(pinned, refs, ref_id),
         Action::Focus { ref_id } => act_focus(pinned, refs, ref_id),
         Action::Fill { ref_id, value } => act_fill(pinned, refs, ref_id, value),
         Action::Check { ref_id } => act_check(pinned, refs, ref_id, true),
@@ -271,6 +311,13 @@ pub(super) fn act(
         Action::Press { keys } => act_press(pinned, keys),
         Action::KeyDown { key } => act_key(pinned, key, true, "key_down"),
         Action::KeyUp { key } => act_key(pinned, key, false, "key_up"),
+        Action::Drag { from, to } => act_drag(pinned, refs, from, to),
+        Action::Mouse { op } => act_mouse(*op),
+        Action::Highlight {
+            ref_id,
+            duration_ms,
+        } => act_highlight(pinned, refs, ref_id, *duration_ms),
+        Action::Scroll { ref_id, dx, dy } => act_scroll(pinned, refs, ref_id.as_ref(), *dx, *dy),
         Action::Screenshot {
             region,
             target,
@@ -612,6 +659,283 @@ fn act_toggle(
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
     result.map(|()| ActionResult::ok())
+}
+
+fn act_double_click(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+) -> Result<ActionResult> {
+    let center = element_center(pinned, refs, ref_id, "double_click")?;
+    raise_pinned_app(pinned);
+    post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_DOWN,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_UP,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_DOWN,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(2),
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_UP,
+        center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(2),
+    )?;
+    Ok(ActionResult::ok())
+}
+
+fn act_right_click(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+) -> Result<ActionResult> {
+    let center = element_center(pinned, refs, ref_id, "right_click")?;
+    raise_pinned_app(pinned);
+    post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_RIGHT, None)?;
+    post_mouse(
+        CG_EVENT_RIGHT_MOUSE_DOWN,
+        center,
+        CG_MOUSE_BUTTON_RIGHT,
+        Some(1),
+    )?;
+    post_mouse(
+        CG_EVENT_RIGHT_MOUSE_UP,
+        center,
+        CG_MOUSE_BUTTON_RIGHT,
+        Some(1),
+    )?;
+    Ok(ActionResult::ok())
+}
+
+fn act_hover(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+) -> Result<ActionResult> {
+    let center = element_center(pinned, refs, ref_id, "hover")?;
+    raise_pinned_app(pinned);
+    post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
+    Ok(ActionResult::ok())
+}
+
+fn act_highlight(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+    duration_ms: Option<u64>,
+) -> Result<ActionResult> {
+    let center = element_center(pinned, refs, ref_id, "highlight")?;
+    raise_pinned_app(pinned);
+    post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
+    let duration = duration_ms.unwrap_or(800);
+    if duration > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(duration));
+    }
+    Ok(ActionResult {
+        ok: true,
+        message: Some("highlighted via cursor hover".into()),
+        data: None,
+    })
+}
+
+fn act_drag(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    from: &RefId,
+    to: &RefId,
+) -> Result<ActionResult> {
+    let from_center = element_center(pinned, refs, from, "drag")?;
+    let to_center = element_center(pinned, refs, to, "drag")?;
+    raise_pinned_app(pinned);
+    post_mouse(
+        CG_EVENT_MOUSE_MOVED,
+        from_center,
+        CG_MOUSE_BUTTON_LEFT,
+        None,
+    )?;
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_DOWN,
+        from_center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    // Interpolate a few drag positions so apps that need motion (e.g. selection
+    // handles) see a smooth path rather than a single teleport.
+    let steps = 8_i32;
+    for step in 1..=steps {
+        let t = f64::from(step) / f64::from(steps);
+        let interp = CGPoint {
+            x: from_center.x + (to_center.x - from_center.x) * t,
+            y: from_center.y + (to_center.y - from_center.y) * t,
+        };
+        post_mouse(
+            CG_EVENT_LEFT_MOUSE_DRAGGED,
+            interp,
+            CG_MOUSE_BUTTON_LEFT,
+            Some(1),
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    post_mouse(
+        CG_EVENT_LEFT_MOUSE_UP,
+        to_center,
+        CG_MOUSE_BUTTON_LEFT,
+        Some(1),
+    )?;
+    Ok(ActionResult::ok())
+}
+
+fn act_mouse(op: MouseOp) -> Result<ActionResult> {
+    match op {
+        MouseOp::Move { x, y } => {
+            post_mouse(
+                CG_EVENT_MOUSE_MOVED,
+                point_from(x, y),
+                CG_MOUSE_BUTTON_LEFT,
+                None,
+            )?;
+        }
+        MouseOp::Down { x, y, button } => {
+            let (event, btn) = mouse_button_down(button);
+            post_mouse(event, point_from(x, y), btn, Some(1))?;
+        }
+        MouseOp::Up { x, y, button } => {
+            let (event, btn) = mouse_button_up(button);
+            post_mouse(event, point_from(x, y), btn, Some(1))?;
+        }
+        MouseOp::Wheel { x, y, dx, dy } => {
+            post_scroll(point_from(x, y), dx, dy)?;
+        }
+    }
+    Ok(ActionResult::ok())
+}
+
+fn act_scroll(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: Option<&RefId>,
+    dx: f64,
+    dy: f64,
+) -> Result<ActionResult> {
+    raise_pinned_app(pinned);
+    let position = if let Some(ref_id) = ref_id {
+        let center = element_center(pinned, refs, ref_id, "scroll")?;
+        post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
+        center
+    } else {
+        // No target ref: scroll wherever the cursor already is. CGEvent scroll
+        // wheels are screen-global so we just need a position to anchor to.
+        CGPoint { x: 0.0, y: 0.0 }
+    };
+    let horizontal = round_to_i32(dx);
+    let vertical = round_to_i32(dy);
+    post_scroll(position, horizontal, vertical)?;
+    Ok(ActionResult::ok())
+}
+
+fn element_center(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+    action: &str,
+) -> Result<CGPoint> {
+    let element = resolve_element(pinned, refs, ref_id, action)?;
+    let logical = bounds(element);
+    // SAFETY: `resolve_element` returns a retained AX element.
+    unsafe { CFRelease(element.cast::<c_void>()) };
+    let logical = logical.ok_or_else(|| Error::Action {
+        action: action.into(),
+        reason: format!("ref {} has no AX bounds", ref_id.0),
+    })?;
+    Ok(CGPoint {
+        x: logical.x + logical.w / 2.0,
+        y: logical.y + logical.h / 2.0,
+    })
+}
+
+fn point_from(x: i32, y: i32) -> CGPoint {
+    CGPoint {
+        x: f64::from(x),
+        y: f64::from(y),
+    }
+}
+
+fn mouse_button_down(button: MouseButton) -> (u32, u32) {
+    match button {
+        MouseButton::Left => (CG_EVENT_LEFT_MOUSE_DOWN, CG_MOUSE_BUTTON_LEFT),
+        MouseButton::Right => (CG_EVENT_RIGHT_MOUSE_DOWN, CG_MOUSE_BUTTON_RIGHT),
+        MouseButton::Middle => (CG_EVENT_OTHER_MOUSE_DOWN, CG_MOUSE_BUTTON_CENTER),
+    }
+}
+
+fn mouse_button_up(button: MouseButton) -> (u32, u32) {
+    match button {
+        MouseButton::Left => (CG_EVENT_LEFT_MOUSE_UP, CG_MOUSE_BUTTON_LEFT),
+        MouseButton::Right => (CG_EVENT_RIGHT_MOUSE_UP, CG_MOUSE_BUTTON_RIGHT),
+        MouseButton::Middle => (CG_EVENT_OTHER_MOUSE_UP, CG_MOUSE_BUTTON_CENTER),
+    }
+}
+
+fn post_mouse(
+    event_type: u32,
+    position: CGPoint,
+    button: u32,
+    click_state: Option<i64>,
+) -> Result<()> {
+    // SAFETY: null source asks CG for the default event source.
+    let event = unsafe { CGEventCreateMouseEvent(std::ptr::null(), event_type, position, button) };
+    if event.is_null() {
+        return Err(Error::Action {
+            action: "mouse".into(),
+            reason: "CGEventCreateMouseEvent returned null".into(),
+        });
+    }
+    if let Some(state) = click_state {
+        // SAFETY: event is a valid CGEvent.
+        unsafe { CGEventSetIntegerValueField(event, CG_MOUSE_EVENT_CLICK_STATE, state) };
+    }
+    post_event(event);
+    Ok(())
+}
+
+fn post_scroll(_anchor: CGPoint, dx: i32, dy: i32) -> Result<()> {
+    // Apple's macOS variadic ABI passes args in registers same as fixed args,
+    // so calling with wheelCount=2 and two i32 deltas through this fixed-arity
+    // declaration matches what the C variadic call would emit. wheel1 is the
+    // vertical axis, wheel2 is horizontal.
+    // SAFETY: null source asks CG for the default event source.
+    let event =
+        unsafe { CGEventCreateScrollWheelEvent(std::ptr::null(), CG_SCROLL_UNIT_PIXEL, 2, dy, dx) };
+    if event.is_null() {
+        return Err(Error::Action {
+            action: "scroll".into(),
+            reason: "CGEventCreateScrollWheelEvent returned null".into(),
+        });
+    }
+    post_event(event);
+    Ok(())
+}
+
+fn raise_pinned_app(pinned: Option<AxPinnedWindow>) {
+    // Mouse events go to whatever window is under the cursor at the OS level,
+    // not to a particular AXUIElement. To make actions on the pinned window
+    // deterministic we raise it first; ignore failures because the frontmost
+    // app may already be us.
+    if let Some(pinned) = pinned {
+        let _ = focus_window(&window_id(pinned));
+    }
 }
 
 fn press_until_checked(element: AXUIElementRef, desired: bool, action: &str) -> Result<()> {

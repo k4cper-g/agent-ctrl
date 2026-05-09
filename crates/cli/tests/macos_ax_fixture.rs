@@ -60,6 +60,8 @@ fn run_fixture_flow() {
     run.open();
     run.snapshot();
     run.exercise_button_click();
+    run.exercise_double_click();
+    run.exercise_hover();
     run.exercise_fill();
     run.exercise_checkbox();
     run.exercise_window_list();
@@ -102,6 +104,33 @@ impl FixtureRun<'_> {
             self.cli,
             self.home,
             ["find", "Status: count 1", "--first", "--session", "fixture"],
+        );
+    }
+
+    fn exercise_double_click(&self) {
+        // exercise_button_click left the count at 1. A double-click on the
+        // NSButton fires its action twice (count 1 -> 3), proving the CGEvent
+        // path actually drives the target window.
+        let button = self.find("Increment", "button");
+        run_cli(
+            self.cli,
+            self.home,
+            ["double-click", button.trim(), "--session", "fixture"],
+        );
+        self.snapshot();
+        run_cli(
+            self.cli,
+            self.home,
+            ["find", "Status: count 3", "--first", "--session", "fixture"],
+        );
+    }
+
+    fn exercise_hover(&self) {
+        let button = self.find("Increment", "button");
+        run_cli(
+            self.cli,
+            self.home,
+            ["hover", button.trim(), "--session", "fixture"],
         );
     }
 

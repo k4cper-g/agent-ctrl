@@ -32,9 +32,13 @@ at Windows UIA parity.
 - Captures `screenshot` for `--target window` (default), `--target desktop`,
   `--target region`, and `--target ref` through `CGWindowListCreateImage`,
   including `--annotated` overlays driven by the cached snapshot bounds.
+- Drives `double-click`, `right-click`, `hover`, `highlight`, `drag`,
+  `scroll`, and raw `mouse move/down/up/wheel` through CoreGraphics events.
+  These actions raise the pinned window first, then post the event at the
+  element's center (or the supplied screen coordinates).
 
-Selection, scrolling, richer stale-ref recovery, mouse fallbacks, and app
-switching are still unsupported for AX.
+Selection, richer stale-ref recovery, and app switching are still unsupported
+for AX.
 
 ## Permission
 
@@ -93,7 +97,7 @@ retry from a new terminal.
 ## Roadmap
 
 1. Stabilize keyboard-action validation under the Rust test harness.
-2. Add mouse coordinate fallbacks.
-3. Add select and scroll actions through AX where available.
-4. Add richer stale-ref recovery using AX identifier/title/role/nth paths.
-5. Expand the fixture with select, scroll, and dialog controls.
+2. Add `select` (popup-button / combo-box) through AX menu traversal.
+3. Add richer stale-ref recovery using AX identifier/title/role/nth paths.
+4. Add `switch-app` through NSWorkspace bundle ids.
+5. Expand the fixture with select, scroll view, and dialog controls.
