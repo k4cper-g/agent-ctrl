@@ -63,6 +63,8 @@ fn run_fixture_flow() {
     run.exercise_double_click();
     run.exercise_hover();
     run.exercise_fill();
+    run.exercise_clear();
+    run.exercise_clipboard();
     run.exercise_checkbox();
     run.exercise_window_list();
     run.exercise_screenshot();
@@ -160,6 +162,74 @@ impl FixtureRun<'_> {
                 "--session",
                 "fixture",
             ],
+        );
+    }
+
+    fn exercise_clear(&self) {
+        // exercise_fill leaves the field with "fixture edited"; clear should
+        // empty AXValue, and the next snapshot's value-derived name should be
+        // empty (the field has no AXTitle/AXDescription).
+        let field = self.find("fixture edited", "text-field");
+        run_cli(
+            self.cli,
+            self.home,
+            ["clear", field.trim(), "--session", "fixture"],
+        );
+        self.snapshot();
+        let field = self.find("", "text-field");
+        let value = run_cli(
+            self.cli,
+            self.home,
+            [
+                "get",
+                "value",
+                field.trim(),
+                "--json",
+                "--session",
+                "fixture",
+            ],
+        );
+        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+        // After clear, AXValue is empty. The snapshot omits an empty value
+        // when it matches the (now also empty) name, so `value` may be null
+        // or "". Either is a successful clear.
+        let cleared = value["value"].as_str().map_or(true, |s| s.is_empty());
+        assert!(
+            cleared,
+            "text-field value after clear should be null or empty, got {:?}",
+            value["value"]
+        );
+        // Restore the original value so downstream assertions stay stable.
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "fill",
+                field.trim(),
+                "fixture edited",
+                "--session",
+                "fixture",
+            ],
+        );
+        self.snapshot();
+    }
+
+    fn exercise_clipboard(&self) {
+        let needle = "ax-clip-roundtrip-marker";
+        run_cli(
+            self.cli,
+            self.home,
+            ["clipboard", "write", needle, "--session", "fixture"],
+        );
+        let out = run_cli(
+            self.cli,
+            self.home,
+            ["clipboard", "read", "--session", "fixture"],
+        );
+        assert!(
+            out.trim() == needle,
+            "clipboard round trip mismatched, got {:?}",
+            out.trim()
         );
     }
 

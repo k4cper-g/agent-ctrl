@@ -20,8 +20,8 @@ use accessibility_sys::{
     AXUIElementSetAttributeValue, AXValueGetValue, AXValueRef, CGKeyCode,
 };
 use agent_ctrl_core::{
-    Action, ActionResult, AppContext, Bounds, Checked, Error, MouseButton, MouseOp, NativeHandle,
-    Node, RefEntry, RefId, RefMap, Region, Result, Role, ScreenshotTarget, Snapshot,
+    Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error, MouseButton, MouseOp,
+    NativeHandle, Node, RefEntry, RefId, RefMap, Region, Result, Role, ScreenshotTarget, Snapshot,
     SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
 };
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
@@ -313,6 +313,10 @@ pub(super) fn act(
         Action::KeyUp { key } => act_key(pinned, key, false, "key_up"),
         Action::Drag { from, to } => act_drag(pinned, refs, from, to),
         Action::Mouse { op } => act_mouse(*op),
+        Action::SelectAll { ref_id } => act_select_all(pinned, refs, ref_id.as_ref()),
+        Action::Clear { ref_id } => act_clear(pinned, refs, ref_id),
+        Action::Clipboard { op } => act_clipboard(pinned, op),
+        Action::ScrollIntoView { ref_id } => act_scroll_into_view(pinned, refs, ref_id),
         Action::Highlight {
             ref_id,
             duration_ms,
@@ -843,6 +847,110 @@ fn act_scroll(
     let vertical = round_to_i32(dy);
     post_scroll(position, horizontal, vertical)?;
     Ok(ActionResult::ok())
+}
+
+fn act_scroll_into_view(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+) -> Result<ActionResult> {
+    let element = resolve_element(pinned, refs, ref_id, "scroll_into_view")?;
+    // `kAXScrollToVisibleAction` is not exposed by accessibility-sys, but the
+    // string constant is stable across macOS versions. Containers (scroll
+    // areas, table rows) implement it; on plain controls the AX call returns
+    // an error which we surface unchanged.
+    let result = perform_action(element, "AXScrollToVisible", "scroll_into_view");
+    // SAFETY: `resolve_element` returns a retained AX element.
+    unsafe { CFRelease(element.cast::<c_void>()) };
+    result.map(|()| ActionResult::ok())
+}
+
+fn act_select_all(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: Option<&RefId>,
+) -> Result<ActionResult> {
+    if let Some(ref_id) = ref_id {
+        let element = resolve_element(pinned, refs, ref_id, "select_all")?;
+        let _ = set_bool_attr(element, kAXFocusedAttribute, "select_all");
+        // SAFETY: `resolve_element` returns a retained AX element.
+        unsafe { CFRelease(element.cast::<c_void>()) };
+    }
+    act_press(pinned, "Cmd+A")
+}
+
+fn act_clear(
+    pinned: Option<AxPinnedWindow>,
+    refs: Option<&RefMap>,
+    ref_id: &RefId,
+) -> Result<ActionResult> {
+    let element = resolve_element(pinned, refs, ref_id, "clear")?;
+    let _ = set_bool_attr(element, kAXFocusedAttribute, "clear");
+    let result = set_string_attr(element, kAXValueAttribute, "", "clear");
+    // SAFETY: `resolve_element` returns a retained AX element.
+    unsafe { CFRelease(element.cast::<c_void>()) };
+    result.map(|()| ActionResult::ok())
+}
+
+fn act_clipboard(pinned: Option<AxPinnedWindow>, op: &ClipboardOp) -> Result<ActionResult> {
+    match op {
+        ClipboardOp::Read => {
+            let text = clipboard_read_text()?;
+            Ok(ActionResult {
+                ok: true,
+                message: None,
+                data: Some(serde_json::json!({ "text": text })),
+            })
+        }
+        ClipboardOp::Write { text } => {
+            clipboard_write_text(text)?;
+            Ok(ActionResult::ok())
+        }
+        ClipboardOp::Copy => act_press(pinned, "Cmd+C"),
+        ClipboardOp::Paste => act_press(pinned, "Cmd+V"),
+    }
+}
+
+fn clipboard_read_text() -> Result<String> {
+    // Shelling out to pbpaste avoids pulling Cocoa/objc into surface-ax just
+    // for two clipboard verbs. pbpaste ships with every macOS install.
+    let output = Command::new("/usr/bin/pbpaste")
+        .output()
+        .map_err(Error::Io)?;
+    if !output.status.success() {
+        return Err(Error::Action {
+            action: "clipboard_read".into(),
+            reason: format!("pbpaste exited with {:?}", output.status.code()),
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|err| Error::Action {
+        action: "clipboard_read".into(),
+        reason: format!("clipboard text was not valid UTF-8: {err}"),
+    })
+}
+
+fn clipboard_write_text(text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("/usr/bin/pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(Error::Io)?;
+    {
+        let stdin = child.stdin.as_mut().ok_or_else(|| Error::Action {
+            action: "clipboard_write".into(),
+            reason: "pbcopy stdin was unavailable".into(),
+        })?;
+        stdin.write_all(text.as_bytes()).map_err(Error::Io)?;
+    }
+    let status = child.wait().map_err(Error::Io)?;
+    if !status.success() {
+        return Err(Error::Action {
+            action: "clipboard_write".into(),
+            reason: format!("pbcopy exited with {:?}", status.code()),
+        });
+    }
+    Ok(())
 }
 
 fn element_center(

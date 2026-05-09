@@ -36,9 +36,13 @@ at Windows UIA parity.
   `scroll`, and raw `mouse move/down/up/wheel` through CoreGraphics events.
   These actions raise the pinned window first, then post the event at the
   element's center (or the supplied screen coordinates).
+- Supports `select-all` (focus + `Cmd+A`), `clear` (focus + `AXValue=""`),
+  `scroll-into-view` (`AXScrollToVisible` on the resolved element), and
+  `clipboard` read/write through `pbpaste`/`pbcopy` plus copy/paste through
+  the platform `Cmd+C` / `Cmd+V` chord.
 
-Selection, richer stale-ref recovery, and app switching are still unsupported
-for AX.
+Combo-box / popup `select`, richer stale-ref recovery, and app switching are
+still unsupported for AX.
 
 ## Permission
 
@@ -100,4 +104,4 @@ retry from a new terminal.
 2. Add `select` (popup-button / combo-box) through AX menu traversal.
 3. Add richer stale-ref recovery using AX identifier/title/role/nth paths.
 4. Add `switch-app` through NSWorkspace bundle ids.
-5. Expand the fixture with select, scroll view, and dialog controls.
+5. Expand the fixture with popup-button, scroll view, and dialog controls.
