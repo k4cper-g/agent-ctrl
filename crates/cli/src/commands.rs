@@ -1024,8 +1024,20 @@ fn run_close(session: &str, json_output: bool) -> Result<()> {
 /// from a short-lived shell and expect the spawned app to outlive that
 /// shell. On Windows we set `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
 /// so the child's stdout/stderr aren't tied to ours and Ctrl-C in the
-/// parent shell doesn't take it down.
+/// parent shell doesn't take it down. On Unix we put the child in its
+/// own process group via `process_group(0)` (the std equivalent of
+/// `setsid`), so closing the spawning terminal doesn't SIGHUP the child.
+///
+/// On macOS, paths ending in `.app` are routed through `/usr/bin/open
+/// -na`, which delegates to LaunchServices the same way Finder does.
+/// Trying to exec `Foo.app` directly would fail because `.app` bundles
+/// are directories, not Mach-O binaries.
 fn run_launch(args: &LaunchArgs) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if is_macos_app_bundle(&args.path) {
+        return launch_macos_app_bundle(args);
+    }
+
     let mut cmd = ProcessCommand::new(&args.path);
     cmd.args(&args.args)
         .stdin(std::process::Stdio::null())
@@ -1055,6 +1067,60 @@ fn run_launch(args: &LaunchArgs) -> Result<()> {
         }))?;
     } else {
         println!("ok pid={pid}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_app_bundle(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    if path.extension().and_then(|e| e.to_str()) == Some("app") {
+        return true;
+    }
+    // Catch the case where someone passed the bundle dir without the
+    // `.app` extension (rare but legal): if `Contents/MacOS` exists
+    // beneath, it's a bundle.
+    path.is_dir() && path.join("Contents").join("MacOS").is_dir()
+}
+
+#[cfg(target_os = "macos")]
+fn launch_macos_app_bundle(args: &LaunchArgs) -> Result<()> {
+    // `open -n` asks for a new instance even if one is already running;
+    // `-a` treats the argument as an app bundle. `--args` passes the
+    // remaining argv to the launched app. The `open` helper exits
+    // immediately after the app is on its way, so its child pid is
+    // useless to the caller; we omit it from the JSON.
+    let mut cmd = ProcessCommand::new("/usr/bin/open");
+    cmd.arg("-na")
+        .arg(&args.path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    if !args.args.is_empty() {
+        cmd.arg("--args").args(&args.args);
+    }
+    let output = cmd
+        .output()
+        .with_context(|| format!("running /usr/bin/open -na {:?}", args.path))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "/usr/bin/open exited with status {:?}: {}",
+            output.status.code(),
+            stderr.trim()
+        );
+    }
+    if args.wait > 0 {
+        std::thread::sleep(Duration::from_millis(args.wait));
+    }
+    if args.json {
+        print_json(&json!({
+            "ok": true,
+            "path": &args.path,
+            "via": "open",
+        }))?;
+    } else {
+        println!("ok via=open path={}", args.path);
     }
     Ok(())
 }
@@ -2013,6 +2079,12 @@ fn spawn_detached_child(cmd: &mut ProcessCommand) -> std::io::Result<Child> {
 
 #[cfg(not(windows))]
 fn spawn_detached_child(cmd: &mut ProcessCommand) -> std::io::Result<Child> {
+    use std::os::unix::process::CommandExt;
+    // process_group(0) puts the child in a fresh process group, so a
+    // SIGHUP delivered to the spawning terminal's group doesn't take
+    // the child down with it. This is the std-stable equivalent of
+    // calling `setsid` from a `pre_exec` closure.
+    cmd.process_group(0);
     cmd.spawn()
 }
 
