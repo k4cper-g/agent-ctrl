@@ -119,9 +119,10 @@ retry from a new terminal.
 ## Roadmap
 
 1. Stabilize keyboard-action validation under the Rust test harness.
-2. Replace `/bin/ps` shell-outs in `process_name` / `process_ids_by_name` with
-   `libproc` for lower latency and structured errors.
-3. Drive the surface against real apps (Safari, TextEdit, Finder, Mail) and
-   document the rough edges in `docs/macos-ax-reliability.md`.
+2. Replace `/bin/ps` shell-outs in `process_name` / `process_ids_by_name`
+   with `libproc` for lower latency and structured errors.
+3. Drive the surface against real apps (Safari, TextEdit, Finder, Mail)
+   and feed the findings back into
+   [docs/macos-ax-reliability.md](macos-ax-reliability.md).
 4. Expand the fixture with a scroll view and a sheet/dialog control so we
    can deterministically test scroll-into-view and modal dialog handling.

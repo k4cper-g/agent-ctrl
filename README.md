@@ -364,8 +364,9 @@ For browsers, run agent-ctrl alongside [agent-browser](https://github.com/vercel
 
 Acronyms in one line: **UIA** = Microsoft UI Automation, **AX** = macOS Accessibility, **AT-SPI** = the Linux GNOME accessibility bus, **XCUITest** = Apple's UI test framework.
 
-AX preview notes live in [docs/macos-ax.md](docs/macos-ax.md). Windows
-production guidance lives in [docs/windows-reliability.md](docs/windows-reliability.md).
+AX feature coverage is in [docs/macos-ax.md](docs/macos-ax.md); production
+guidance for macOS lives in [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md).
+Windows production guidance lives in [docs/windows-reliability.md](docs/windows-reliability.md).
 
 ## Build
 
