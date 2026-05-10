@@ -115,11 +115,14 @@ agent-ctrl snapshot                              # capture pinned window's a11y 
 agent-ctrl snapshot --target-process <name>      # pin by process executable name
 agent-ctrl snapshot --target-pid <pid>           # pin by PID
 agent-ctrl snapshot --target-title <substring>   # pin by window title (locale-dependent)
+agent-ctrl snapshot --settle                     # re-snapshot until the tree stabilizes
 agent-ctrl snapshot --json                       # full JSON for programmatic consumption
 agent-ctrl snapshot --compact false              # disable compact-tree filtering
 ```
 
 The first `snapshot` after `open` pins the session to a target window. Subsequent actions on the session target that window until a `focus-window` re-pins it.
+
+`--settle` re-snapshots (every 200ms, ~8s cap) until the tree's structural signature holds steady, then prints it. Use it right after `launch` / `switch-app` against a Chromium/Electron app (Slack, Teams, VS Code, ...), whose accessibility tree is populated lazily on the first query - so the first plain `snapshot` often shows only the window frame.
 
 ### Pointer / focus
 
@@ -224,10 +227,12 @@ Three reliability tiers. Use `--stable` after a click to let the UI settle befor
 agent-ctrl window-list                            # all top-level windows owned by the pinned process
 agent-ctrl window-list --first-other              # bare hex id of the first non-pinned window
 agent-ctrl focus-window <hex_id>                  # bring a window to the foreground; re-pins the session
-agent-ctrl switch-app <app_id>                    # foreground by app id (path or bare exe name)
+agent-ctrl switch-app <app_id>                    # foreground an app by id (path or bare exe name); re-pins
 ```
 
 When a file dialog, confirmation dialog, or popup appears as a sibling top-level window, `window-list` is how you find it. `focus-window` re-pins so subsequent `snapshot` / `find` / actions target the dialog. Mirrors agent-browser's `tab_list` / `tab_switch`.
+
+`switch-app` and `focus-window` un-minimize their target (a window only minimized to the taskbar) before bringing it forward. They do **not** un-hide a window the app has hidden to the system tray (Slack, Teams, Discord and friends "close to tray") - tray apps re-hide a window shown out from under them. If `snapshot --target-process X` reports the process is running but its window is hidden, bring it forward through the app's own channels: click its tray icon, or `agent-ctrl launch <path>` (launching a packaged/Store app's exe still routes through the activation broker, which resumes and shows it correctly).
 
 ```bash
 agent-ctrl press "Ctrl+S"                                 # may open a sibling dialog HWND
@@ -481,21 +486,32 @@ For consistent results, add to your project or global instructions:
 Use `agent-ctrl` for native UI automation on Windows and macOS. Core workflow:
 
 1. `agent-ctrl open uia` (Windows) or `agent-ctrl open ax` (macOS) - spawn a daemon
-2. `agent-ctrl snapshot --target-process <name>` - pin to the app and capture refs
-3. `agent-ctrl find "Save" --role button --first` - discover refs by name/role
-4. `agent-ctrl click @eN` / `fill @eN "text"` / `press "Ctrl+S"` (or `Cmd+S` on macOS) - interact
-5. `agent-ctrl wait-for --stable` - let the UI settle before the next action
-6. `agent-ctrl window-list` + `focus-window <id>` - switch to dialogs / popups
-7. Re-`snapshot` after the tree changes
+2. Bring the app forward: `agent-ctrl switch-app <name>` (un-minimizes it too) if it has a visible
+   window; `agent-ctrl launch <path>` if it isn't running or is parked in the system tray
+3. `agent-ctrl snapshot --target-process <name>` - pin to the app and capture refs.
+   Add `--settle` for Chromium/Electron apps (Slack, Teams, VS Code) - their tree
+   is built lazily, so the first plain snapshot is often just the window frame
+4. `agent-ctrl find "Save" --role button --first` - discover refs by name/role
+5. `agent-ctrl click @eN` / `fill @eN "text"` / `type "text"` / `press "Ctrl+S"` (or `Cmd+S` on macOS) - interact.
+   Prefer `type` over `fill` for web-based / Chromium text boxes that need real key events
+6. `agent-ctrl wait-for --stable` - let the UI settle before the next action
+7. Before anything hard to undo (send a message, hit OK, delete): re-`snapshot`,
+   confirm the field shows your input and the submit control is enabled, then `press "Enter"`
+8. `agent-ctrl window-list` + `focus-window <id>` - switch to dialogs / popups
+9. Re-`snapshot` after the tree changes
 ```
 
-### Example flow
+### Example flows
 
-The recommended pattern is app-agnostic: launch or focus the target, snapshot by
-process/window, find by role/name, act, wait for stability, and re-snapshot after
-the tree changes. A concrete Notepad walkthrough is available in
-[examples/notepad-tour.sh](examples/notepad-tour.sh), but production agents should
-prefer the generic loop above over app-specific assumptions.
+The recommended pattern is app-agnostic: bring the target forward, snapshot
+(with `--settle` for Chromium-based apps), find by role/name, act, wait for
+stability, **re-snapshot to verify before any irreversible step**, then commit.
+Concrete walkthroughs:
+
+- [examples/notepad-tour.sh](examples/notepad-tour.sh) - a simple Win32 app
+- [examples/chat-dm.sh](examples/chat-dm.sh) - the quick-switcher -> compose -> verify -> send flow for a Slack/Teams-style chat app
+
+Production agents should prefer the generic loop over app-specific assumptions.
 
 ## Known limitations
 

@@ -12,6 +12,40 @@ agent-ctrl wait-for --stable
 agent-ctrl screenshot
 ```
 
+## Reaching The App
+
+`snapshot --target-process X` pins to the first *visible* top-level window
+owned by a process named `X`. Two common ways that fails, and the fix:
+
+- **The app is parked in the system tray.** Slack, Teams, Discord, and many
+  others "close to tray" - the process keeps running but the window is hidden
+  (`ShowWindow(SW_HIDE)`'d). `snapshot --target-process` errors and says so:
+  *"it is running with a hidden window; bring it forward through its own
+  tray/taskbar icon or Start menu entry (or `agent-ctrl launch <path>`)"*.
+  Use the app's own channels: click its tray icon, or `agent-ctrl launch
+  <path>` (for a packaged/Store app, launching its exe still routes through
+  the activation broker, which resumes/shows it correctly). Do **not** try to
+  un-hide a tray window by hand (`focus-window` on it, etc.) - tray apps
+  re-hide a window shown out from under them, leaving it unusable. (`switch-app`
+  and `focus-window` *will* un-minimize a window that's only minimized to the
+  taskbar; that case is safe.)
+
+- **The app is Chromium/Electron and its accessibility tree isn't built
+  yet.** Chromium populates the UIA tree lazily, on the first query - so the
+  *first* `snapshot` right after the window appears often shows only the
+  window frame (a handful of refs, one big `document`/`generic` child). Use
+  `agent-ctrl snapshot --settle` (re-snapshots until the tree's signature
+  holds steady, ~8s cap), or chain `agent-ctrl wait-for --stable` then a
+  fresh `snapshot`. After that the tree is fully populated.
+
+So the robust opening for a tray-parked Electron app (Slack, say) is:
+
+```bash
+agent-ctrl open uia
+agent-ctrl launch "C:\...\Slack.exe"            # or click the tray icon
+agent-ctrl snapshot --settle --target-process Slack
+```
+
 ## Deterministic Fixture
 
 Use `agent-ctrl-uia-fixture` for repeatable real-UIA testing. It is a small
@@ -115,6 +149,20 @@ IME and keyboard layout caveats:
   unsupported. Restore the clipboard yourself if the calling agent needs to
   preserve user clipboard state.
 
+Chromium/Electron text boxes (Slack composer, Teams, Discord) are
+`contenteditable` elements with their own React-style input handlers:
+
+- Prefer `type` over `fill` for these. `fill` sets the DOM value directly via
+  `ValuePattern.SetValue` and does *not* fire the `input` event the app
+  listens for, so the app may not register the text (the Send button stays
+  disabled, Enter sends nothing). Synthetic keystrokes (`type`) drive the
+  handlers the way a human does.
+- An *empty* `contenteditable` reports `value = "\n"`, not `""`. A "is this
+  box empty?" check should treat `""` and `"\n"` the same, and `"\n"` is not
+  stray content you need to clear.
+- Before submitting (sending a message, hitting OK), re-`snapshot` and verify
+  the field shows your text and the submit control is enabled. Then `Enter`.
+
 ## App Framework Quirks
 
 Win32, WPF, WinUI, Electron, Chromium, and Office expose different UIA trees.
@@ -131,10 +179,12 @@ Framework notes:
 
 - Win32 common controls are the most predictable and are covered by the
   fixture.
-- WinUI and XAML apps can populate their UIA tree lazily. Snapshot, wait for a
-  role/name predicate, then act.
-- Electron and Chromium apps often expose large document-like subtrees. Use
-  `--depth`, role filters, and `--first` to keep agent prompts compact.
+- WinUI and XAML apps can populate their UIA tree lazily. `snapshot --settle`
+  (or `wait-for --stable` then `snapshot`), then act.
+- Electron and Chromium apps build their UIA tree lazily on first query, so
+  the first `snapshot` after the window appears is usually just the frame -
+  use `snapshot --settle`. The settled tree is large and document-like; lean
+  on `find`, role filters, and `--first` to keep agent prompts compact.
 - Office apps may expose rich but deeply nested trees. Prefer named controls
   and stable waits over index-based flows.
 - Custom-rendered canvases may appear as opaque regions. Use screenshots for
