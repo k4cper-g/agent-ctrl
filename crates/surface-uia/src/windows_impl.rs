@@ -91,8 +91,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_RESTORE,
 };
 
 use agent_ctrl_core::{
@@ -2026,6 +2027,35 @@ fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResul
 
 // ---------- Window / process targeting ----------
 
+/// `ShowWindow(SW_RESTORE)` on a window we're about to drive *if it is
+/// minimized* - restoring it to its previous (normal/maximized) state so the
+/// snapshot/actions land on a real window rather than a taskbar button. We
+/// deliberately do *not* touch hidden (`ShowWindow(SW_HIDE)`'d) windows here:
+/// tray-parked apps like Slack re-hide a window that's shown out from under
+/// them, so a window left hidden by the app is not ours to un-hide - the
+/// caller should bring it forward through the app's own channels (Start menu,
+/// taskbar/tray icon, or `agent-ctrl launch <path>`, which goes through the
+/// proper activation broker).
+fn restore_if_minimized(hwnd: HWND) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    // SAFETY: `IsIconic` / `ShowWindow` accept any HWND; cross-process is supported.
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+    }
+}
+
+/// Append a recovery hint to a "no visible window" error when the process is
+/// running but its window is hidden (parked in the system tray).
+fn hidden_window_hint(process_name: &str) -> &'static str {
+    if find_restorable_window_by_process_name(process_name).is_some() {
+        " - it is running with a hidden window; bring it forward through its own tray/taskbar icon or Start menu entry (or `agent-ctrl launch <path>`, which goes through the proper activation broker), then re-snapshot"
+    } else {
+        ""
+    }
+}
+
 /// Bring the app identified by `app_id` to the foreground, and re-pin
 /// future actions on its window.
 ///
@@ -2035,6 +2065,12 @@ fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResul
 /// schema consistent: the agent can pass the `app.id` it received from a
 /// snapshot, or just the short name like `"Notepad"`.
 ///
+/// Operates on the app's first *visible* top-level window (un-minimizing it if
+/// needed). If the app has no visible window (it is parked in the system
+/// tray) this errors with a hint to bring it forward through the app's own
+/// channels; we don't try to un-hide it ourselves, because tray apps re-hide
+/// a window shown out from under them.
+///
 /// After the switch, `state.last_hwnd` points to the new window and
 /// `state.last_refs` is cleared - refs from a previous snapshot can no
 /// longer resolve, so the agent must take a fresh snapshot before its next
@@ -2043,8 +2079,12 @@ fn act_switch_app(state: &mut WorkerState, app_id: &str) -> Result<ActionResult>
     let process_name = process_name_from_app_id(app_id);
     let hwnd = find_window_by_process_name(process_name).ok_or_else(|| Error::Action {
         action: "switch_app".into(),
-        reason: format!("no visible top-level window owned by app {app_id:?}"),
+        reason: format!(
+            "no visible top-level window owned by app {app_id:?}{}",
+            hidden_window_hint(process_name)
+        ),
     })?;
+    restore_if_minimized(hwnd);
     bring_window_to_foreground(hwnd);
     state.last_hwnd = Some(hwnd);
     state.last_refs = RefMap::new();
@@ -2053,10 +2093,9 @@ fn act_switch_app(state: &mut WorkerState, app_id: &str) -> Result<ActionResult>
 }
 
 /// Bring a specific top-level window forward by its `window_id` (the same
-/// hex-formatted HWND `WindowContext` carries). When the window supports
-/// `WindowPattern`, restore from minimized first via
-/// `SetWindowVisualState(Normal)`. Then run the AttachThreadInput-backed
-/// foreground bringer.
+/// hex-formatted HWND `WindowContext` carries). Un-minimizes it first
+/// (`ShowWindow(SW_RESTORE)` when iconic, plus `WindowPattern.SetWindowVisualState`
+/// when supported), then runs the AttachThreadInput-backed foreground bringer.
 ///
 /// Like `SwitchApp`, this re-pins `state.last_hwnd` and clears `last_refs`.
 fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionResult> {
@@ -2073,9 +2112,10 @@ fn act_focus_window(state: &mut WorkerState, window_id: &str) -> Result<ActionRe
         });
     }
 
-    // Best-effort restore. Windows whose pattern doesn't support the call,
-    // or which aren't minimized, just skip this - Set/Bring foreground does
-    // the rest.
+    restore_if_minimized(hwnd);
+    // Best-effort restore via the pattern too. Windows whose pattern doesn't
+    // support the call, or which aren't minimized, just skip this - Set/Bring
+    // foreground does the rest.
     // SAFETY: `automation` is a valid COM interface; `hwnd` may be invalid,
     // in which case `ElementFromHandle` returns Err and we skip the restore.
     if let Ok(elem) = unsafe { state.automation.ElementFromHandle(hwnd) } {
@@ -3100,7 +3140,8 @@ fn resolve_target_hwnd(target: &WindowTarget) -> Result<HWND> {
         }),
         WindowTarget::ProcessName { name } => find_window_by_process_name(name).ok_or_else(|| {
             Error::Snapshot(format!(
-                "no visible top-level window owned by a process named {name:?}"
+                "no visible top-level window owned by a process named {name:?}{}",
+                hidden_window_hint(name)
             ))
         }),
     }
@@ -3246,6 +3287,66 @@ fn collect_windows_for_pid(target_pid: u32) -> Vec<HWND> {
     // lifetime exceeds the EnumWindows call (this fn blocks until done).
     let _ = unsafe { EnumWindows(Some(collect_windows_proc), lparam) };
     state.out
+}
+
+/// Picks the best hidden-or-minimized top-level window of a process - used by
+/// `switch-app` to un-park apps that close to the system tray. Scans *all*
+/// top-level windows (no visibility filter) owned by a process whose
+/// executable file stem matches `target`, ranking each `(has_title, area)`:
+/// the real main window has a title bar and is the largest, so it wins over
+/// notification toasts and hidden helper windows.
+struct RestorableState {
+    target: String,
+    best: Option<(HWND, bool, i64)>,
+}
+
+extern "system" fn restorable_window_proc(
+    hwnd: HWND,
+    lparam: LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    // SAFETY: `lparam` was set by the caller to a `*mut RestorableState` valid
+    // for the duration of `EnumWindows` (the calling fn blocks until done).
+    let state = unsafe { &mut *(lparam.0 as *mut RestorableState) };
+    let mut pid: u32 = 0;
+    // SAFETY: `hwnd` is valid (provided by EnumWindows); writing to a local u32 via raw ptr is sound.
+    let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
+    if pid == 0 {
+        return windows::Win32::Foundation::BOOL(1);
+    }
+    let Ok((_path, name)) = process_info(pid) else {
+        return windows::Win32::Foundation::BOOL(1);
+    };
+    if name.to_ascii_lowercase() != state.target {
+        return windows::Win32::Foundation::BOOL(1);
+    }
+    let has_title = read_window_title(hwnd).is_some();
+    let mut rect = RECT::default();
+    // SAFETY: `hwnd` is valid; `GetWindowRect` writes to a local RECT. A hidden
+    // window keeps its size, so the area is still meaningful.
+    let area = if unsafe { GetWindowRect(hwnd, &raw mut rect) }.is_ok() {
+        i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top)
+    } else {
+        0
+    };
+    let better = state.best.is_none_or(|(_, best_has_title, best_area)| {
+        (has_title, area) > (best_has_title, best_area)
+    });
+    if better {
+        state.best = Some((hwnd, has_title, area));
+    }
+    windows::Win32::Foundation::BOOL(1) // continue enumeration
+}
+
+fn find_restorable_window_by_process_name(target_name: &str) -> Option<HWND> {
+    let mut state = RestorableState {
+        target: target_name.to_ascii_lowercase(),
+        best: None,
+    };
+    let lparam = LPARAM(std::ptr::from_mut::<RestorableState>(&mut state) as isize);
+    // SAFETY: callback is `extern "system"`; `lparam` points to `state` whose
+    // lifetime exceeds the EnumWindows call (this fn blocks until done).
+    let _ = unsafe { EnumWindows(Some(restorable_window_proc), lparam) };
+    state.best.map(|(hwnd, _, _)| hwnd)
 }
 
 /// Read a window's title text. Returns `None` for windows with no title or
