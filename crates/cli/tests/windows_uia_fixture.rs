@@ -59,6 +59,7 @@ fn run_fixture_flow() {
     };
     run.open();
     run.snapshot();
+    run.exercise_ref_round_trip();
     run.exercise_json_outputs();
     run.exercise_button_click();
     run.exercise_text_field();
@@ -90,6 +91,71 @@ impl FixtureRun<'_> {
                 "agent-ctrl-uia-fixture",
             ],
         );
+    }
+
+    /// Every ref the snapshot emitted must round-trip through the action path.
+    ///
+    /// `screenshot --target ref` resolves the ref via `resolve_element` (the
+    /// same AutomationId -> RuntimeId -> (role, name, nth) ladder every action
+    /// uses) and is otherwise a pure read. Running it for every ref in one
+    /// batch is a regression guard for the most delicate invariant in the UIA
+    /// surface: the predicate deciding which elements get a ref at snapshot
+    /// time must exactly match the one the action-time walk uses to count
+    /// `nth`; if they drift, some refs stop resolving and this fails, naming
+    /// the offending `(ref_id, role, name)`.
+    fn exercise_ref_round_trip(&self) {
+        let snapshot = run_cli(
+            self.cli,
+            self.home,
+            [
+                "snapshot",
+                "--session",
+                "fixture",
+                "--target-process",
+                "agent-ctrl-uia-fixture",
+                "--json",
+            ],
+        );
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        let mut refs: Vec<(String, String, String)> = Vec::new();
+        collect_refs(&snapshot["root"], &mut refs);
+        assert!(
+            refs.len() >= 5,
+            "expected the fixture snapshot to emit several refs, got {}",
+            refs.len()
+        );
+
+        let steps: Vec<serde_json::Value> = refs
+            .iter()
+            .map(|(ref_id, _, _)| {
+                serde_json::json!({
+                    "op": "act",
+                    "action": { "kind": "screenshot", "target": { "kind": "ref", "ref_id": ref_id } }
+                })
+            })
+            .collect();
+        let steps_json = serde_json::to_string(&steps).unwrap();
+        let out = run_cli_vec(
+            self.cli,
+            self.home,
+            &["batch", &steps_json, "--session", "fixture"],
+        );
+        let outcomes: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let outcomes = outcomes.as_array().expect("batch outcomes array");
+        assert_eq!(
+            outcomes.len(),
+            refs.len(),
+            "batch returned {} outcomes for {} refs",
+            outcomes.len(),
+            refs.len()
+        );
+        for (outcome, (ref_id, role, name)) in outcomes.iter().zip(&refs) {
+            assert_eq!(
+                outcome["ok"], true,
+                "ref {ref_id} (role={role} name={name:?}) failed to re-resolve: {}",
+                outcome["error"]
+            );
+        }
     }
 
     fn exercise_button_click(&self) {
@@ -462,6 +528,27 @@ impl FixtureRun<'_> {
         full_args.push(path.to_str().expect("screenshot path must be UTF-8"));
         full_args.extend(args.iter().copied().skip(1));
         run_cli_vec(self.cli, self.home, &full_args)
+    }
+}
+
+/// Depth-first collect `(ref_id, role, name)` for every node carrying a ref.
+fn collect_refs(node: &serde_json::Value, out: &mut Vec<(String, String, String)>) {
+    if let Some(ref_id) = node.get("ref_id").and_then(serde_json::Value::as_str) {
+        let role = node
+            .get("role")
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let name = node
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        out.push((ref_id.to_string(), role, name));
+    }
+    if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+        for child in children {
+            collect_refs(child, out);
+        }
     }
 }
 
