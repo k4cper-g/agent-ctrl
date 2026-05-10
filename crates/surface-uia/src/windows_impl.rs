@@ -15,6 +15,7 @@
 #![cfg(target_os = "windows")]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
@@ -48,18 +49,22 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded,
     ExpandCollapseState_LeafNode, ExpandCollapseState_PartiallyExpanded, IUIAutomation,
-    IUIAutomationCondition, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
-    IUIAutomationInvokePattern, IUIAutomationScrollItemPattern, IUIAutomationSelectionItemPattern,
+    IUIAutomationCacheRequest, IUIAutomationCondition, IUIAutomationElement,
+    IUIAutomationElementArray, IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
+    IUIAutomationScrollItemPattern, IUIAutomationSelectionItemPattern,
     IUIAutomationSelectionPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
     IUIAutomationValuePattern, IUIAutomationWindowPattern, ToggleState_Indeterminate,
-    ToggleState_Off, ToggleState_On, TreeScope, TreeScope_Subtree, UIA_AutomationIdPropertyId,
+    ToggleState_Off, ToggleState_On, TreeScope, TreeScope_Children, TreeScope_Element,
+    TreeScope_Subtree, UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId,
     UIA_ButtonControlTypeId, UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId,
-    UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
-    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId, UIA_HeaderControlTypeId,
+    UIA_ClassNamePropertyId, UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId,
+    UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ExpandCollapsePatternId,
+    UIA_GroupControlTypeId, UIA_HasKeyboardFocusPropertyId, UIA_HeaderControlTypeId,
     UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
-    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
-    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+    UIA_InvokePatternId, UIA_IsEnabledPropertyId, UIA_IsOffscreenPropertyId,
+    UIA_IsRequiredForFormPropertyId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_NamePropertyId,
     UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
     UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_SelectionItemPatternId,
     UIA_SelectionPatternId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
@@ -69,8 +74,11 @@ use windows::Win32::UI::Accessibility::{
     UIA_TitleBarControlTypeId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
     UIA_ToolTipControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
     UIA_WindowControlTypeId, UIA_WindowPatternId, WindowVisualState_Normal, UIA_CONTROLTYPE_ID,
+    UIA_PROPERTY_ID,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{
+    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
@@ -82,10 +90,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-    SetForegroundWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN,
+    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use agent_ctrl_core::{
@@ -95,6 +102,14 @@ use agent_ctrl_core::{
 };
 
 // ---------- Worker thread ----------
+
+/// How long to wait for a single UIA worker job before declaring the session
+/// wedged. A normal snapshot is well under a second; even a heavy app's tree
+/// walk is a handful of seconds. If a job hasn't finished in this long the
+/// target application is almost certainly not pumping messages (not
+/// responding), and the cross-process COM call inside the worker will never
+/// return - so we give up on the session rather than hang the daemon forever.
+const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// A unit of work to run on the UIA worker thread. The closure receives the
 /// worker's mutable state and is responsible for shipping its own result back
@@ -114,6 +129,13 @@ enum WorkerCmd {
 /// re-resolution.
 struct WorkerState {
     automation: IUIAutomation,
+    /// Pre-built cache request describing the properties and patterns the
+    /// snapshot walk needs. `BuildUpdatedCache` with this fetches a whole
+    /// window subtree in one cross-process call, after which every per-node
+    /// read (`Cached*` getters, cached pattern accessors) is in-process.
+    /// Without it, a snapshot is O(nodes x properties) COM round-trips, which
+    /// is seconds of latency on Outlook/Excel-scale trees.
+    cache_request: IUIAutomationCacheRequest,
     /// `RefMap` from the most recent successful snapshot. Replaced wholesale
     /// each time `snapshot()` runs, so action-time resolution can never use
     /// stale entries from older snapshots.
@@ -130,10 +152,17 @@ struct WorkerState {
 /// Owns the worker thread that holds the live UIA session.
 ///
 /// Drop sends a `Shutdown` and waits for the worker to exit. If the worker
-/// has already died the drop is effectively a no-op.
+/// has already died the drop is effectively a no-op. If the session has been
+/// poisoned (a prior call timed out, so the worker is presumed stuck inside an
+/// unresponsive app's COM call) Drop does *not* join - the thread would never
+/// return - and instead detaches it so the daemon can move on.
 pub(crate) struct UiaInner {
     sender: Mutex<mpsc::Sender<WorkerCmd>>,
     worker: Option<JoinHandle<()>>,
+    /// Set once a worker job exceeds [`CALL_TIMEOUT`]. After that, every call
+    /// fails fast instead of queueing behind the stuck job, and the session
+    /// must be closed and re-opened.
+    poisoned: AtomicBool,
 }
 
 impl UiaInner {
@@ -145,6 +174,15 @@ impl UiaInner {
         let worker = thread::Builder::new()
             .name("agent-ctrl-uia".into())
             .spawn(move || {
+                // Become Per-Monitor-DPI-V2 aware before any window/coordinate
+                // calls. Without this, UIA's physical-pixel `BoundingRectangle`
+                // values would be mixed with DPI-virtualized `GetSystemMetrics`
+                // results, so cursor positioning and screenshots would be wrong
+                // on scaled displays. Process-wide and idempotent; we ignore the
+                // result (FALSE means it was already set, or the OS predates the
+                // API - in which case the host is older than our stated minimum).
+                set_dpi_awareness();
+
                 // SAFETY: `CoInitializeEx` is sound to call once per thread. We
                 // pass `None` for the reserved pointer (documented usage) and
                 // `COINIT_MULTITHREADED` because UIA supports MTA and we never
@@ -169,10 +207,21 @@ impl UiaInner {
                         }
                     };
 
+                let cache_request = match build_cache_request(&automation) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        // SAFETY: paired with the successful `CoInitializeEx` above.
+                        unsafe { CoUninitialize() };
+                        return;
+                    }
+                };
+
                 let _ = ready_tx.send(Ok(()));
 
                 let mut state = WorkerState {
                     automation,
+                    cache_request,
                     last_refs: RefMap::new(),
                     last_hwnd: None,
                     last_snapshot: None,
@@ -180,7 +229,22 @@ impl UiaInner {
 
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
-                        WorkerCmd::Run(job) => job(&mut state),
+                        WorkerCmd::Run(job) => {
+                            // A panic inside one job must not take down the
+                            // whole session - the caller of that job already
+                            // sees an error (its reply channel was dropped
+                            // during the unwind); the next job runs normally.
+                            // `WorkerState` is plain data plus a COM pointer
+                            // that COM calls leave in a consistent state, so
+                            // asserting unwind-safety is sound here.
+                            let outcome =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    job(&mut state);
+                                }));
+                            if outcome.is_err() {
+                                tracing::error!("UIA worker job panicked; session continues");
+                            }
+                        }
                         WorkerCmd::Shutdown => break,
                     }
                 }
@@ -199,6 +263,7 @@ impl UiaInner {
             Ok(Ok(())) => Ok(Self {
                 sender: Mutex::new(cmd_tx),
                 worker: Some(worker),
+                poisoned: AtomicBool::new(false),
             }),
             Ok(Err(e)) => Err(Error::Surface(format!("UIA initialization failed: {e}"))),
             Err(RecvTimeoutError::Timeout) => Err(Error::Surface(
@@ -210,18 +275,40 @@ impl UiaInner {
         }
     }
 
-    /// Run a closure on the UIA worker thread and await its result.
+    /// Run a closure on the UIA worker thread and await its result, with the
+    /// default [`CALL_TIMEOUT`].
+    async fn run<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut WorkerState) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.run_with_timeout(CALL_TIMEOUT, f).await
+    }
+
+    /// Run a closure on the UIA worker thread and await its result, giving up
+    /// after `timeout`.
     ///
     /// The closure receives a mutable reference to [`WorkerState`], giving it
     /// access to the live `IUIAutomation` and the most recent snapshot's refs.
     /// COM safety: the closure runs *on* the worker thread, so it can use
     /// `!Send` UIA types freely. Only the returned `R` (which must be `Send`)
     /// crosses thread boundaries.
-    async fn run<F, R>(&self, f: F) -> Result<R>
+    ///
+    /// If the worker doesn't reply within `timeout` the session is poisoned:
+    /// the in-flight job is abandoned (it is presumed stuck in a COM call to an
+    /// unresponsive app and will never return), every subsequent call fails
+    /// fast, and the caller must close and re-open the session.
+    async fn run_with_timeout<F, R>(&self, timeout: Duration, f: F) -> Result<R>
     where
         F: FnOnce(&mut WorkerState) -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(Error::Surface(
+                "UIA session is wedged - a prior call to an unresponsive app timed out; close and re-open this session".into(),
+            ));
+        }
+
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let job: WorkerJob = Box::new(move |state| {
             let _ = reply_tx.send(f(state));
@@ -236,9 +323,16 @@ impl UiaInner {
             return Err(Error::Surface("UIA worker is no longer running".into()));
         }
 
-        match reply_rx.await {
-            Ok(result) => result,
-            Err(_) => Err(Error::Surface("UIA worker dropped reply channel".into())),
+        match tokio::time::timeout(timeout, reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(Error::Surface("UIA worker dropped reply channel".into())),
+            Err(_elapsed) => {
+                self.poisoned.store(true, Ordering::Release);
+                Err(Error::Surface(format!(
+                    "UIA call timed out after {}s - the target application is not responding; close and re-open this session",
+                    timeout.as_secs()
+                )))
+            }
         }
     }
 
@@ -251,7 +345,15 @@ impl UiaInner {
 
     /// Execute an action against the most recent snapshot's refs.
     pub(crate) async fn act(&self, action: Action) -> Result<ActionResult> {
-        self.run(move |state| act_dispatch(state, &action)).await
+        // `Action::Wait { ms }` deliberately blocks the worker for `ms`, so its
+        // call budget is the requested sleep plus the usual headroom; every
+        // other action gets the default.
+        let timeout = match action {
+            Action::Wait { ms } => Duration::from_millis(ms).saturating_add(CALL_TIMEOUT),
+            _ => CALL_TIMEOUT,
+        };
+        self.run_with_timeout(timeout, move |state| act_dispatch(state, &action))
+            .await
     }
 
     /// Enumerate all visible top-level windows owned by the same process as
@@ -266,19 +368,71 @@ impl Drop for UiaInner {
         if let Ok(sender) = self.sender.lock() {
             let _ = sender.send(WorkerCmd::Shutdown);
         }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        if self.poisoned.load(Ordering::Acquire) {
+            // The worker is stuck in a COM call that will never return; joining
+            // would hang this thread too. Detach it (dropping the handle) and
+            // let the OS reap it when the process exits.
+            drop(worker);
+            return;
         }
+        let _ = worker.join();
     }
 }
 
 // ---------- Snapshot pieces ----------
 
+/// Element properties fetched in bulk by [`build_cache_request`]; every one is
+/// then read per node via a `Cached*` getter with no COM round-trip. Must be
+/// kept in sync with the `Cached*` reads in [`build_node`].
+const CACHED_PROPERTIES: [UIA_PROPERTY_ID; 9] = [
+    UIA_ControlTypePropertyId,
+    UIA_NamePropertyId,
+    UIA_ClassNamePropertyId,
+    UIA_AutomationIdPropertyId,
+    UIA_IsEnabledPropertyId,
+    UIA_IsOffscreenPropertyId,
+    UIA_HasKeyboardFocusPropertyId,
+    UIA_BoundingRectanglePropertyId,
+    UIA_IsRequiredForFormPropertyId,
+];
+
+/// Build the per-session [`IUIAutomationCacheRequest`]. `BuildUpdatedCache`
+/// with this fetches a whole window subtree's properties in one cross-process
+/// call; afterwards the snapshot walk reads everything via in-process `Cached*`
+/// getters. The tree filter mirrors the Control view so `GetCachedChildren`
+/// returns the same node set `ControlViewWalker` would (see docs §9). The tree
+/// scope is set per-snapshot from [`SnapshotOptions::depth`].
+fn build_cache_request(automation: &IUIAutomation) -> WinResult<IUIAutomationCacheRequest> {
+    // SAFETY: `automation` is a valid COM interface; these are config calls
+    // with no out-of-band pointers.
+    let req = unsafe { automation.CreateCacheRequest() }?;
+    let control_view = unsafe { automation.ControlViewCondition() }?;
+    unsafe { req.SetTreeFilter(&control_view) }?;
+    for prop in CACHED_PROPERTIES {
+        unsafe { req.AddProperty(prop) }?;
+    }
+    Ok(req)
+}
+
+/// Pick the cache scope that fetches just enough of the tree for `depth`.
+/// `Some(0)` -> the root only; `Some(1)` -> root plus direct children; deeper
+/// or unbounded -> the whole subtree (the walk then trims to `depth`).
+const fn cache_scope_for_depth(depth: Option<usize>) -> TreeScope {
+    match depth {
+        Some(0) => TreeScope_Element,
+        Some(1) => TreeScope_Children,
+        _ => TreeScope_Subtree,
+    }
+}
+
 /// Build a [`Snapshot`] for the targeted window and store its refs + HWND
 /// on the [`WorkerState`] for subsequent action-time re-resolution.
 fn capture_foreground(state: &mut WorkerState, opts: &SnapshotOptions) -> Result<Snapshot> {
     let hwnd = resolve_target_hwnd(&opts.target)?;
-    let snap = capture_with_options(&state.automation, opts, hwnd)?;
+    let snap = capture_with_options(&state.automation, &state.cache_request, opts, hwnd)?;
     state.last_refs = snap.refs.clone();
     state.last_hwnd = Some(hwnd);
     state.last_snapshot = Some(snap.clone());
@@ -287,6 +441,7 @@ fn capture_foreground(state: &mut WorkerState, opts: &SnapshotOptions) -> Result
 
 fn capture_with_options(
     automation: &IUIAutomation,
+    cache_request: &IUIAutomationCacheRequest,
     opts: &SnapshotOptions,
     hwnd: HWND,
 ) -> Result<Snapshot> {
@@ -299,10 +454,13 @@ fn capture_with_options(
     // bounds since they all live in the same window. See docs §6.
     let dpi_scale = window_dpi_scale(hwnd);
 
-    // The Control view walker is the right tradeoff for agents (see docs §9):
-    // skips the lowest-level rendering noise without hiding interactive controls.
-    let walker: IUIAutomationTreeWalker = unsafe { automation.ControlViewWalker() }
-        .map_err(|e| Error::Snapshot(format!("ControlViewWalker: {e}")))?;
+    // Pull the whole (Control-view-filtered) subtree into a local cache in one
+    // round-trip; every `Cached*` read below is then in-process. See docs §9.
+    // SAFETY: `cache_request` and `root_element` are valid COM interfaces.
+    unsafe { cache_request.SetTreeScope(cache_scope_for_depth(opts.depth)) }
+        .map_err(|e| Error::Snapshot(format!("CacheRequest::SetTreeScope: {e}")))?;
+    let root_element = unsafe { root_element.BuildUpdatedCache(cache_request) }
+        .map_err(|e| Error::Snapshot(format!("BuildUpdatedCache: {e}")))?;
 
     let mut refs = RefMap::new();
     // `nth_seen` tracks `(role, name) → count` *globally* across the whole
@@ -324,15 +482,7 @@ fn capture_with_options(
         );
         root.ref_id = Some(id);
     }
-    root.children = walk_children(
-        &walker,
-        &root_element,
-        &mut refs,
-        &mut nth_seen,
-        1,
-        opts,
-        dpi_scale,
-    )?;
+    root.children = walk_children(&root_element, &mut refs, &mut nth_seen, 1, opts, dpi_scale)?;
 
     let window_title = if root.name.is_empty() {
         None
@@ -364,13 +514,15 @@ fn capture_with_options(
     })
 }
 
-/// Walk every Control-view child of `parent` and emit `Node`s.
+/// Walk every cached child of `parent` and emit `Node`s.
 ///
-/// Pre-order DFS. `nth_seen` is the *global* per-snapshot counter described
-/// in `capture_with_options`. Honors `opts.compact` (drop unnamed `Generic`
-/// nodes; their children are hoisted into the caller's list) and `opts.depth`.
+/// Pre-order DFS over the local cache populated by `BuildUpdatedCache`, so the
+/// per-node reads in `build_node` are in-process. `nth_seen` is the *global*
+/// per-snapshot counter described in `capture_with_options`. Honors
+/// `opts.compact` (drop unnamed `Generic` nodes; their children are hoisted
+/// into the caller's list) and `opts.depth` (the cache scope already bounds
+/// depths 0 and 1; this trims deeper requests).
 fn walk_children(
-    walker: &IUIAutomationTreeWalker,
     parent: &IUIAutomationElement,
     refs: &mut RefMap,
     nth_seen: &mut HashMap<(Role, String), usize>,
@@ -386,10 +538,7 @@ fn walk_children(
 
     let mut result: Vec<Node> = Vec::new();
 
-    // SAFETY: `parent` is a valid COM interface; walker methods return Err
-    // (which we treat as "no more children") when there are no more siblings.
-    let mut maybe_child = unsafe { walker.GetFirstChildElement(parent) }.ok();
-    while let Some(child) = maybe_child {
+    for child in cached_children(parent) {
         let (mut node, has_editable_value) = build_node(&child, Some(parent), dpi_scale);
 
         // Allocate ref BEFORE recursing so `nth` follows pre-order DFS.
@@ -411,7 +560,7 @@ fn walk_children(
             node.ref_id = Some(id);
         }
 
-        node.children = walk_children(walker, &child, refs, nth_seen, depth + 1, opts, dpi_scale)?;
+        node.children = walk_children(&child, refs, nth_seen, depth + 1, opts, dpi_scale)?;
 
         if opts.compact && is_compactable(&node) {
             // Hoist the children into our caller's list - the empty Generic
@@ -420,12 +569,32 @@ fn walk_children(
         } else {
             result.push(node);
         }
-
-        // SAFETY: `child` is a valid COM interface obtained from the walker.
-        maybe_child = unsafe { walker.GetNextSiblingElement(&child) }.ok();
     }
 
     Ok(result)
+}
+
+/// Collect the cached children of `parent` (those that were within the cache
+/// request's tree scope). Returns an empty vec when the element has no cached
+/// children or the cache array can't be read.
+fn cached_children(parent: &IUIAutomationElement) -> Vec<IUIAutomationElement> {
+    // SAFETY: `parent` is a valid COM interface obtained from the cache; this
+    // returns `Err` (no cached children) or a valid array we index into.
+    let Ok(array): WinResult<IUIAutomationElementArray> = (unsafe { parent.GetCachedChildren() })
+    else {
+        return Vec::new();
+    };
+    let Ok(len) = (unsafe { array.Length() }) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(usize::try_from(len.max(0)).unwrap_or(0));
+    for i in 0..len {
+        // SAFETY: `i` is in `0..Length()`.
+        if let Ok(elem) = unsafe { array.GetElement(i) } {
+            out.push(elem);
+        }
+    }
+    out
 }
 
 /// Roles that may carry an editable value via UIA's `ValuePattern`. We only
@@ -459,39 +628,45 @@ fn read_value_pattern(element: &IUIAutomationElement) -> Option<(String, bool)> 
     Some((value, read_only))
 }
 
-/// Map an [`IUIAutomationElement`] to a [`Node`] (no children populated).
+/// Map an [`IUIAutomationElement`] (from the cache built by `BuildUpdatedCache`)
+/// to a [`Node`] (no children populated).
 ///
-/// Returns `(node, has_editable_value)`. Each property read is best-effort:
-/// if a particular UIA call fails (some controls just don't implement them
-/// all), we substitute a defensible default rather than failing the whole
-/// node. `has_editable_value` is `true` when the element exposes a
-/// non-read-only `ValuePattern`; the caller uses it to decide whether to
-/// allocate a `RefId` even when the role isn't ARIA-interactive (the typical
-/// case for Win11 Notepad's `Document`-typed edit area).
+/// Returns `(node, has_editable_value)`. The nine plain element properties
+/// come from the local cache (`Cached*` getters - no COM round-trip); the
+/// pattern-derived state (`value`, `checked`, `expanded`, `selected`) and the
+/// runtime-id handle are read live, but only for roles that plausibly carry
+/// them, so a tree of structural nodes still costs roughly one round-trip per
+/// node. Each read is best-effort: a missing/unsupported value yields a
+/// defensible default rather than failing the whole node. `has_editable_value`
+/// is `true` when the element exposes a non-read-only `ValuePattern`; the
+/// caller uses it to decide whether to allocate a `RefId` even when the role
+/// isn't ARIA-interactive (the typical case for Win11 Notepad's `Document`-
+/// typed edit area).
 fn build_node(
     element: &IUIAutomationElement,
     parent: Option<&IUIAutomationElement>,
     dpi_scale: f64,
 ) -> (Node, bool) {
-    // SAFETY: each Current* getter dereferences only the COM `this` pointer
-    // (the receiver), which is valid for the lifetime of `element`.
-    let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
-    let class_name = unsafe { element.CurrentClassName() }
+    // SAFETY: each getter dereferences only the COM `this` pointer (the
+    // receiver), which is valid for the lifetime of `element`. The `Cached*`
+    // variants read from the local cache populated by `BuildUpdatedCache`.
+    let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+    let class_name = unsafe { element.CachedClassName() }
         .ok()
         .map(|b| b.to_string())
         .unwrap_or_default();
     let role = promoted_role(element, control_type, &class_name, parent);
 
-    let name = unsafe { element.CurrentName() }
+    let name = unsafe { element.CachedName() }
         .ok()
         .map(|b| b.to_string())
         .unwrap_or_default();
 
-    let is_enabled = unsafe { element.CurrentIsEnabled() }.is_ok_and(BOOL::as_bool);
-    let is_offscreen = unsafe { element.CurrentIsOffscreen() }.is_ok_and(BOOL::as_bool);
-    let has_focus = unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(BOOL::as_bool);
+    let is_enabled = unsafe { element.CachedIsEnabled() }.is_ok_and(BOOL::as_bool);
+    let is_offscreen = unsafe { element.CachedIsOffscreen() }.is_ok_and(BOOL::as_bool);
+    let has_focus = unsafe { element.CachedHasKeyboardFocus() }.is_ok_and(BOOL::as_bool);
 
-    let bounds = unsafe { element.CurrentBoundingRectangle() }
+    let bounds = unsafe { element.CachedBoundingRectangle() }
         .ok()
         .map(|r| Bounds {
             x: f64::from(r.left) / dpi_scale,
@@ -660,8 +835,9 @@ fn read_selection_state(element: &IUIAutomationElement) -> Option<bool> {
 /// role gate keeps us from paying for it on elements that are never
 /// form-required (panels, separators, etc.).
 fn read_required_for_form(element: &IUIAutomationElement) -> Option<bool> {
-    // SAFETY: `element` is a valid COM interface.
-    let required = unsafe { element.CurrentIsRequiredForForm() }.ok()?;
+    // SAFETY: `element` is a valid cached COM interface; this reads the value
+    // from the local cache populated by `BuildUpdatedCache`.
+    let required = unsafe { element.CachedIsRequiredForForm() }.ok()?;
     // Most apps never set this - only emit `Some(true)` to avoid littering
     // every form field with `required: false`.
     if required.as_bool() {
@@ -692,9 +868,10 @@ fn build_native_handle(element: &IUIAutomationElement) -> Option<NativeHandle> {
 }
 
 /// Pull the UIA `RuntimeId` out of an element and pack it as little-endian
-/// bytes (4 bytes per `i32` slot). RuntimeIds are unstable across UIA
-/// sessions but stable within one; we expose them so downstream code (and a
-/// future fast-path resolver) can compare elements without re-walking.
+/// bytes (4 bytes per `i32` slot). RuntimeIds are unstable across UIA sessions
+/// but unique within one, so [`find_by_runtime_id`] uses these bytes as a
+/// mid-tier action-time resolver, and downstream code can compare elements
+/// without re-walking. Works on both cached and live elements.
 fn extract_runtime_id(element: &IUIAutomationElement) -> Option<Vec<u8>> {
     // SAFETY: `element` is a valid COM interface; `GetRuntimeId` returns a
     // SAFEARRAY pointer we own and must destroy.
@@ -714,13 +891,13 @@ fn extract_runtime_id(element: &IUIAutomationElement) -> Option<Vec<u8>> {
     }
 }
 
-/// Read the `AutomationId` property. Most Win32 controls don't set it; WPF
-/// and WinUI controls do. Empty strings are normalized to `None` so a present
-/// `Some("")` never tricks the fast-path resolver into matching the wrong
-/// element.
+/// Read the `AutomationId` property from the local cache. Most Win32 controls
+/// don't set it; WPF and WinUI controls do. Empty strings are normalized to
+/// `None` so a present `Some("")` never tricks the fast-path resolver into
+/// matching the wrong element.
 fn extract_automation_id(element: &IUIAutomationElement) -> Option<String> {
-    // SAFETY: `element` is a valid COM interface.
-    let bstr = unsafe { element.CurrentAutomationId() }.ok()?;
+    // SAFETY: `element` is a valid cached COM interface.
+    let bstr = unsafe { element.CachedAutomationId() }.ok()?;
     let s = bstr.to_string();
     if s.is_empty() {
         None
@@ -932,6 +1109,19 @@ fn promote_class_name(class_name: &str) -> Role {
         "systreeview32" => Role::Tree,
         _ => Role::Unknown(class_name.to_string()),
     }
+}
+
+/// Opt the process into Per-Monitor-DPI-V2 awareness so UIA's physical-pixel
+/// rectangles, `GetSystemMetrics` virtual-screen sizes, and `SendInput`
+/// absolute coordinates all agree. Best-effort: a `FALSE` return means the
+/// awareness was already set (fine) or the API is unavailable on a host older
+/// than our stated minimum (also fine - we just fall back to whatever the
+/// process default is).
+fn set_dpi_awareness() {
+    // SAFETY: `SetProcessDpiAwarenessContext` takes a well-known context
+    // constant and has no out-parameters; it is sound to call from any thread
+    // before the process creates windows.
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
 /// Returns the DPI scale factor (1.0 = 96 DPI) for the monitor hosting `hwnd`.
@@ -2258,12 +2448,18 @@ struct CapturedImage {
     pixels: Vec<u8>,
 }
 
-/// Capture a window's client area. We intentionally use `GetWindowDC` +
-/// `BitBlt` rather than `PrintWindow` - BitBlt always produces a current
-/// pixel snapshot, while PrintWindow defers to the app's WM_PRINT handler
-/// and some apps return blank or partial frames. The trade-off is that the
-/// captured window must be visible (not occluded), which is consistent with
-/// the rest of the surface's expectations.
+/// Capture the full bounds of a top-level window. We intentionally use
+/// `GetWindowDC` + `BitBlt` rather than `PrintWindow` - BitBlt always produces
+/// a current pixel snapshot, while PrintWindow defers to the app's WM_PRINT
+/// handler and some apps return blank or partial frames. The trade-off is that
+/// the captured window must be visible (not occluded), which is consistent
+/// with the rest of the surface's expectations.
+///
+/// `GetWindowDC` gives a DC whose origin is the top-left of the *whole* window
+/// (frame included), so we size the blit with `GetWindowRect` rather than
+/// `GetClientRect` - that captures the entire window and keeps the captured
+/// origin aligned with `window_origin`, which the annotated-screenshot overlay
+/// relies on.
 fn capture_window(hwnd: HWND) -> Result<CapturedImage> {
     if hwnd.0.is_null() {
         return Err(Error::Action {
@@ -2272,13 +2468,13 @@ fn capture_window(hwnd: HWND) -> Result<CapturedImage> {
         });
     }
 
-    // SAFETY: `hwnd` is non-null per the check above. `GetClientRect`
+    // SAFETY: `hwnd` is non-null per the check above. `GetWindowRect`
     // accepts any HWND and writes to a local RECT; we propagate any error
     // (e.g. window destroyed) as a clean action error.
     let mut rect = RECT::default();
-    unsafe { GetClientRect(hwnd, &raw mut rect) }.map_err(|e| Error::Action {
+    unsafe { GetWindowRect(hwnd, &raw mut rect) }.map_err(|e| Error::Action {
         action: "screenshot".into(),
-        reason: format!("GetClientRect: {e}"),
+        reason: format!("GetWindowRect: {e}"),
     })?;
     let width = (rect.right - rect.left).max(1);
     let height = (rect.bottom - rect.top).max(1);
@@ -3144,9 +3340,16 @@ fn list_windows_inner(state: &mut WorkerState) -> Result<Vec<WindowInfo>> {
 ///    its own indexed structures, which avoids cross-process COM round-trips
 ///    per node and is what makes WPF/WinUI apps with thousands of controls
 ///    snappy to drive.
-/// 2. Fall back to a `(role, name, nth)` walk of the Control view, mirroring
-///    the snapshot's pre-order DFS. This is the durable path that survives
-///    UIA tree mutations like virtualization realising/unrealising rows.
+/// 2. Mid tier: if the entry carries a `RuntimeId`, walk the Control view and
+///    return the element whose `RuntimeId` still equals it. RuntimeIds are
+///    unique on the desktop at any instant, so a match is unambiguous - this
+///    recovers refs whose name or role changed since the snapshot (e.g. a
+///    button relabelled "Connect" -> "Disconnect") as long as the element
+///    itself persists. RuntimeIds are only meaningful within the session that
+///    minted them, which is exactly our case (one `IUIAutomation` per session).
+/// 3. Durable fallback: a `(role, name, nth)` walk of the Control view,
+///    mirroring the snapshot's pre-order DFS. Survives UIA tree mutations like
+///    virtualization realising/unrealising rows.
 fn resolve_element(
     automation: &IUIAutomation,
     hwnd: HWND,
@@ -3181,6 +3384,14 @@ fn resolve_element(
         reason: format!("ControlViewWalker: {e}"),
     })?;
 
+    if let Some(NativeHandle::Uia { runtime_id, .. }) = &target.native {
+        if !runtime_id.is_empty() {
+            if let Some(elem) = find_by_runtime_id(&walker, &root, runtime_id, &target.role) {
+                return Ok(elem);
+            }
+        }
+    }
+
     find_in_tree(&walker, &root, target).ok_or_else(|| Error::Action {
         action: "resolve".into(),
         reason: format!(
@@ -3188,6 +3399,59 @@ fn resolve_element(
             target.role, target.name, target.nth
         ),
     })
+}
+
+/// Mid-tier resolver: pre-order DFS for the element whose packed `RuntimeId`
+/// equals `runtime_id`. A RuntimeId is unique on the desktop at any instant,
+/// so the first match is the element - but ids *can* be recycled once the
+/// original element is destroyed, so we apply the same role sanity check the
+/// `AutomationId` fast path uses. (RuntimeId matches but role mismatches -> we
+/// found a recycled id, not our element; fall through to the `(role, name,
+/// nth)` walk. The parent-aware `ListItem` -> `Option` promotion can't run
+/// here either, so `Option` refs deliberately miss this tier, exactly as they
+/// miss the `AutomationId` one.)
+fn find_by_runtime_id(
+    walker: &IUIAutomationTreeWalker,
+    root: &IUIAutomationElement,
+    runtime_id: &[u8],
+    expected_role: &Role,
+) -> Option<IUIAutomationElement> {
+    let element = first_element_with_runtime_id(walker, root, runtime_id)?;
+    // SAFETY: `element` is valid; failed reads fall back to a sentinel role.
+    let ct = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+    let class = unsafe { element.CurrentClassName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    if &promoted_role(&element, ct, &class, None) == expected_role {
+        Some(element)
+    } else {
+        None
+    }
+}
+
+/// Pre-order DFS returning the first element (including `root`) whose
+/// `RuntimeId`, packed the way [`extract_runtime_id`] packs it, equals
+/// `runtime_id`. Stops at the first hit since RuntimeIds are unique.
+fn first_element_with_runtime_id(
+    walker: &IUIAutomationTreeWalker,
+    root: &IUIAutomationElement,
+    runtime_id: &[u8],
+) -> Option<IUIAutomationElement> {
+    if extract_runtime_id(root).as_deref() == Some(runtime_id) {
+        return Some(root.clone());
+    }
+    // SAFETY: `root` is valid; walker.Get*ChildElement returns Err for
+    // "no more children", which we treat as the end of iteration.
+    let mut maybe_child = unsafe { walker.GetFirstChildElement(root) }.ok();
+    while let Some(child) = maybe_child {
+        if let Some(found) = first_element_with_runtime_id(walker, &child, runtime_id) {
+            return Some(found);
+        }
+        // SAFETY: `child` is a valid COM interface obtained from the walker.
+        maybe_child = unsafe { walker.GetNextSiblingElement(&child) }.ok();
+    }
+    None
 }
 
 /// Fast-path resolver: ask UIA for the subtree element with this
