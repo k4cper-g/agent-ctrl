@@ -13,7 +13,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command as ProcessCommand};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent_ctrl_core::{
     Action, ClipboardOp, FindQuery, GetField, MouseButton, MouseOp, RefId, Region, Role,
@@ -277,6 +277,9 @@ pub(crate) struct ListArgs {
 }
 
 #[derive(Debug, Args)]
+// A clap flag struct: these bools are independent `--options`, not a state
+// machine - a two-variant enum per flag would be noise here.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SnapshotArgs {
     #[arg(long, default_value = DEFAULT_SESSION)]
     session: String,
@@ -307,6 +310,20 @@ pub(crate) struct SnapshotArgs {
     /// Drop redundant intermediate nodes from the printed tree.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     compact: bool,
+
+    /// Re-snapshot until the tree stabilizes before printing. Useful right
+    /// after launching or switching to a Chromium/Electron app (Slack, Teams,
+    /// VS Code, ...), whose accessibility tree is populated lazily on the
+    /// first query - so the first plain `snapshot` often shows only the
+    /// window frame. Best-effort: gives up after ~8s and prints whatever it
+    /// last saw.
+    #[arg(long)]
+    settle: bool,
+
+    /// With `--settle`, the quiet period in milliseconds the tree's signature
+    /// must hold to count as settled.
+    #[arg(long, default_value_t = 500, requires = "settle")]
+    settle_idle_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -1169,19 +1186,22 @@ fn run_snapshot(args: SnapshotArgs) -> Result<()> {
         ..SnapshotOptions::default()
     };
 
-    let resp = client::send(
-        &info,
-        RequestOp::Snapshot {
-            session: session_id,
-            opts,
-        },
-    )
-    .context("sending snapshot request")?;
-
-    let snapshot = match resp.body {
-        ResponseBody::Snapshot { snapshot } => snapshot,
-        ResponseBody::Error { message } => bail!("snapshot failed: {message}"),
-        other => bail!("unexpected response: {other:?}"),
+    let snapshot = if args.settle {
+        settle_snapshot(&info, session_id, &opts, args.settle_idle_ms)?
+    } else {
+        let resp = client::send(
+            &info,
+            RequestOp::Snapshot {
+                session: session_id,
+                opts,
+            },
+        )
+        .context("sending snapshot request")?;
+        match resp.body {
+            ResponseBody::Snapshot { snapshot } => snapshot,
+            ResponseBody::Error { message } => bail!("snapshot failed: {message}"),
+            other => bail!("unexpected response: {other:?}"),
+        }
     };
 
     if args.json {
@@ -1190,6 +1210,57 @@ fn run_snapshot(args: SnapshotArgs) -> Result<()> {
         print_snapshot_tree(&snapshot);
     }
     Ok(())
+}
+
+/// Re-take the snapshot until the tree's structural signature has been
+/// unchanged for `idle_ms`, or a fixed timeout elapses. Returns the last
+/// snapshot either way - settling is a convenience, not a guarantee.
+fn settle_snapshot(
+    info: &SessionFile,
+    session: SessionId,
+    opts: &SnapshotOptions,
+    idle_ms: u64,
+) -> Result<Box<agent_ctrl_core::Snapshot>> {
+    const POLL: Duration = Duration::from_millis(200);
+    const TIMEOUT: Duration = Duration::from_secs(8);
+    let idle = Duration::from_millis(idle_ms);
+
+    let started = Instant::now();
+    let mut last_sig: Option<u64> = None;
+    let mut stable_since: Option<Instant> = None;
+
+    loop {
+        let resp = client::send(
+            info,
+            RequestOp::Snapshot {
+                session,
+                opts: opts.clone(),
+            },
+        )
+        .context("sending snapshot request")?;
+        let snapshot = match resp.body {
+            ResponseBody::Snapshot { snapshot } => snapshot,
+            ResponseBody::Error { message } => bail!("snapshot failed: {message}"),
+            other => bail!("unexpected response: {other:?}"),
+        };
+
+        let sig = agent_ctrl_core::tree_signature(&snapshot);
+        if last_sig == Some(sig) {
+            let since = *stable_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= idle {
+                return Ok(snapshot);
+            }
+        } else {
+            last_sig = Some(sig);
+            stable_since = None;
+        }
+
+        if started.elapsed() >= TIMEOUT {
+            // Time's up - hand back the latest tree we have rather than error.
+            return Ok(snapshot);
+        }
+        std::thread::sleep(POLL);
+    }
 }
 
 // ---------- Find ----------
