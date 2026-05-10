@@ -2382,9 +2382,10 @@ fn parse_surface(s: &str) -> Result<SurfaceKind> {
         "mock" => Ok(SurfaceKind::Mock),
         "uia" => Ok(SurfaceKind::Uia),
         "ax" => Ok(SurfaceKind::Ax),
+        "atspi" => Ok(SurfaceKind::AtSpi),
         "android" => Ok(SurfaceKind::Android),
         "ios" => Ok(SurfaceKind::Ios),
-        other => bail!("unknown surface {other:?} (expected: mock, uia, ax, android, ios)"),
+        other => bail!("unknown surface {other:?} (expected: mock, uia, ax, atspi, android, ios)"),
     }
 }
 

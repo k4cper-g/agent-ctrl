@@ -18,6 +18,7 @@ const ALL_SURFACES: &[SurfaceKind] = &[
     SurfaceKind::Mock,
     SurfaceKind::Uia,
     SurfaceKind::Ax,
+    SurfaceKind::AtSpi,
     SurfaceKind::Android,
     SurfaceKind::Ios,
 ];

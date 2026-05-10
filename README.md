@@ -389,7 +389,7 @@ A **surface** is one accessibility protocol - UIA, AX, AT-SPI, etc. A **platform
 |---|---|---|
 | Windows | [`surface-uia`](crates/surface-uia) - UI Automation | **ready** |
 | macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | **ready** |
-| Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | not started |
+| Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | design + headless test harness in place ([`docs/atspi-mapping.md`](docs/atspi-mapping.md), [`docker/linux-dev/`](docker/linux-dev), [`crates/atspi-fixture/`](crates/atspi-fixture)); implementation pending |
 | Android | _planned_ `surface-accessibility-service` (JNI) | not started |
 | iOS | _planned_ `surface-xcuitest` (WebDriverAgent) | not started |
 

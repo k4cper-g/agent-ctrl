@@ -76,6 +76,18 @@ pub enum NativeHandle {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identifier: Option<String>,
     },
+    /// Linux AT-SPI handle.
+    AtSpi {
+        /// The owning application's unique D-Bus name (e.g. `":1.42"`).
+        bus_name: String,
+        /// The accessible object's D-Bus object path. A toolkit keeps a
+        /// widget's path while the widget exists, so it's stable within a
+        /// session and serves as the fast-path hint at action-time
+        /// re-resolution (the analog of UIA's `RuntimeId`). Not stable across
+        /// app restarts; the `(role, name, nth)` triple in the `RefMap` is the
+        /// source of truth.
+        path: String,
+    },
     /// Android AccessibilityNodeInfo handle.
     Android {
         /// Window id assigned by the Android AccessibilityService.

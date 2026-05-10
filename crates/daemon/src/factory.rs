@@ -76,6 +76,20 @@ pub fn surface_status(kind: SurfaceKind) -> SurfaceStatus {
             }
         }
 
+        SurfaceKind::AtSpi => {
+            #[cfg(target_os = "linux")]
+            {
+                // The design (docs/atspi-mapping.md) and the headless test
+                // harness (docker/linux-dev/, crates/atspi-fixture/) are in
+                // place; the `surface-atspi` implementation is not yet.
+                SurfaceStatus::NotImplemented
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                SurfaceStatus::WrongOs
+            }
+        }
+
         SurfaceKind::Android | SurfaceKind::Ios => SurfaceStatus::NotImplemented,
     }
 }
@@ -107,6 +121,15 @@ pub async fn open_surface(kind: SurfaceKind) -> Result<Box<dyn Surface>> {
         #[cfg(not(target_os = "macos"))]
         SurfaceKind::Ax => Err(Error::PermissionDenied(
             "AX surface is only available on macOS".into(),
+        )),
+
+        #[cfg(target_os = "linux")]
+        SurfaceKind::AtSpi => Err(Error::Surface(
+            "AT-SPI surface not yet implemented (design: docs/atspi-mapping.md)".into(),
+        )),
+        #[cfg(not(target_os = "linux"))]
+        SurfaceKind::AtSpi => Err(Error::PermissionDenied(
+            "AT-SPI surface is only available on Linux".into(),
         )),
 
         SurfaceKind::Android => Err(Error::Surface("Android surface not yet implemented".into())),

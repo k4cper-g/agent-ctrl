@@ -61,6 +61,11 @@ pub enum SurfaceKind {
     Uia,
     /// macOS Accessibility (AX).
     Ax,
+    /// Linux AT-SPI (the freedesktop desktop accessibility bus).
+    // `kebab-case` would render this `"at-spi"`; keep it `"atspi"` to match
+    // the no-hyphen convention of the other surface names (`uia`, `ax`).
+    #[serde(rename = "atspi")]
+    AtSpi,
     /// Android AccessibilityService.
     Android,
     /// iOS via XCUITest / WebDriverAgent.
@@ -77,6 +82,7 @@ impl SurfaceKind {
         match self {
             Self::Uia => "uia",
             Self::Ax => "ax",
+            Self::AtSpi => "atspi",
             Self::Android => "android",
             Self::Ios => "ios",
             Self::Mock => "mock",
