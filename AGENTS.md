@@ -20,6 +20,16 @@ Reference repo: `agent-browser/` at the workspace root is a clone of [vercel-lab
 - No em-dashes (the U+2014 character) anywhere in the project's text - code comments, rustdoc, README, CHANGELOG, examples, CLI output. Use ASCII hyphens (`-`) or restructure the sentence.
 - Format: `cargo fmt --all`. Lint: `cargo clippy --workspace --all-targets`.
 
+## Commits
+
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): summary`.
+
+- **Types:** `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`.
+- **Scope** is optional but encouraged - the crate or area, e.g. `surface-uia`, `daemon`, `cli`, `core`, `client`, `release`. Example: `fix(surface-uia): capture full window rect in screenshot`.
+- **Summary** is imperative mood, lower-case, no trailing period, <= 72 chars.
+- Breaking changes: append `!` after the type/scope (`feat(core)!: ...`) and explain in the body.
+- Body (optional) explains the *why*, wrapped at ~72 cols, separated from the summary by a blank line.
+
 ## Architecture rules
 
 - **The `Surface` trait is the contract.** Anything platform-specific lives behind it. The daemon, CLI, and any consumer code must talk only to `Surface` and the types in `agent-ctrl-core`.
