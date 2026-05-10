@@ -129,29 +129,39 @@ For each action we accept, the UIA call we make. Falls back to synthetic
 
 | `Action`            | UIA call                                                           | Fallback |
 |---|---|---|
-| `Click`             | `InvokePattern.Invoke()` if present                                | Move cursor to centre of `BoundingRectangle`, send mouse left-down/up. |
-| `DoubleClick`       | _Deferred to v0.2_                                                 | SendInput double-click. |
-| `RightClick`        | _Deferred to v0.2_                                                 | SendInput right-click. |
-| `Hover`             | _Deferred to v0.2_                                                 | Move cursor only. |
+| `Click`             | `InvokePattern.Invoke()` if present; for `Button` roles also `SetFocus` + Space before the pointer fallback | Move cursor to centre of `BoundingRectangle`, send mouse left-down/up. |
+| `DoubleClick`       | SendInput double left-click at the element's centre               | n/a |
+| `RightClick`        | SendInput secondary-button click at the element's centre          | n/a |
+| `Hover`             | Move cursor to the element's centre                                | n/a |
+| `Highlight`         | Same as `Hover`, optionally held for a duration                    | n/a |
 | `Focus`             | `SetFocus()` on the element                                        | n/a |
-| `Type`              | `SendInput` keyboard events for each character at current focus    | n/a |
-| `Fill`              | `ValuePattern.SetValue(value)` if pattern is read-write            | `Focus` → `SelectAll` (`Ctrl+A`) → `SendInput` characters. |
+| `Type`              | `SendInput` `KEYEVENTF_UNICODE` events at current focus           | n/a |
+| `Fill`              | `ValuePattern.SetValue(value)` if pattern is read-write            | none automatic - use `clipboard write` + `clipboard paste`, or `type`, for controls without a writable `ValuePattern`. |
+| `Clear`             | `ValuePattern.SetValue("")` (verified), else `SetFocus` + `Ctrl+A` + `Delete` (verified) | n/a |
 | `Press`             | `SendInput` key chord                                              | n/a |
 | `KeyDown` / `KeyUp` | `SendInput` half-events                                            | n/a |
-| `Scroll`            | `ScrollPattern.Scroll(...)` or `ScrollPattern.SetScrollPercent(...)` | SendInput mouse wheel. |
+| `Scroll`            | `SendInput` mouse wheel at the cursor (positioned over the ref's centre when one is given) | n/a (`ScrollPattern.SetScrollPercent` positioning deferred). |
 | `ScrollIntoView`    | `ScrollItemPattern.ScrollIntoView()`                               | n/a |
-| `Select`            | `SelectionItemPattern.Select()` (or `AddToSelection` for multi-select) | n/a |
-| `SelectAll`         | `SendInput` `Ctrl+A`                                               | n/a |
-| `Drag`              | _Deferred to v0.2_                                                 | SendInput mouse-down on `from`, move to `to`, mouse-up. |
-| `Wait`              | `tokio::time::sleep`                                               | n/a |
-| `SwitchApp`         | `SetForegroundWindow(hwnd_of_app)`; we'll need a process→hwnd lookup | n/a |
-| `FocusWindow`       | `WindowPattern.SetWindowVisualState(Normal)` + `SetFocus`          | `SetForegroundWindow`. |
-| `Screenshot`        | `BitBlt` of the desktop or of the window's HWND                    | n/a |
+| `Select`            | `SelectionItemPattern.Select()` on the ref, or on the first named `SelectionItem` descendant when the ref is the container | n/a |
+| `SelectAll`         | `SetFocus` (when a ref is given) + `SendInput` `Ctrl+A`            | n/a |
+| `Check` / `Uncheck` | `TogglePattern.Toggle()` until `ToggleState` matches (bounded retries) | n/a |
+| `Toggle`            | `TogglePattern.Toggle()`                                          | n/a |
+| `Clipboard`         | Win32 clipboard for read/write; `Ctrl+C` / `Ctrl+V` for copy/paste | n/a |
+| `Mouse`             | `SendInput` raw move / button / wheel in screen coordinates        | n/a |
+| `Drag`              | `SendInput` mouse-down on `from`, interpolated moves to `to`, mouse-up | n/a |
+| `Wait`              | `std::thread::sleep` on the worker (`wait-for` is the better primitive) | n/a |
+| `SwitchApp`         | `SetForegroundWindow` of the first visible top-level window owned by the app; re-pins the session | n/a |
+| `FocusWindow`       | `WindowPattern.SetWindowVisualState(Normal)` (best-effort) + the `AttachThreadInput` foreground bringer; re-pins the session | n/a |
+| `Screenshot`        | `GetWindowDC` + `BitBlt` for the pinned window, screen DC for desktop / region / element-ref targets, optional cached-ref annotations | n/a |
 
-**Decision:** for v0.1, `surface-uia` advertises `snapshot`, `keyboard`,
-`mouse`, `multi_app`. Drag, double/right-click, hover, screenshot are wired
-in v0.2. The `CapabilitySet` returned from `UiaSurface::open()` will reflect
-this and the daemon won't dispatch anything unsupported.
+**Decision:** `surface-uia` advertises `snapshot`, `screenshot`, `keyboard`,
+`mouse`, `drag`, `multi_app`. Click / double-click / right-click / hover,
+drag, and screenshot (window / region / element-ref / desktop, with optional
+`@eN` annotations) are all wired. The `CapabilitySet` returned from
+`UiaSurface::open()` reflects this and the daemon won't dispatch anything
+unsupported. Synthetic input (`SendInput`) requires the pinned window to be
+foreground; the surface brings it forward first and reports a clear error if
+UIPI/UAC blocks injection.
 
 ## 5. App and window context
 
@@ -185,10 +195,16 @@ target another.
 UIA's `BoundingRectangle` is in **physical pixels**. Our [`Bounds`](../crates/core/src/node.rs)
 is documented as logical / DPI-normalized.
 
-**Decision:** at session open we capture the DPI of the monitor the
-foreground window is on (`GetDpiForWindow`) and divide all `BoundingRectangle`
-values by `dpi / 96.0` before populating `Bounds`. Multi-monitor setups with
-mixed DPI are edge-cased to the foreground monitor for v0.1.
+**Decision:** the UIA worker thread calls
+`SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`
+before any window or COM call, so `BoundingRectangle` (physical),
+`GetSystemMetrics(SM_*VIRTUALSCREEN)` (used to map screen points into
+`MOUSEEVENTF_ABSOLUTE` coordinates), and `SendInput` cursor positioning all
+share one coordinate space. For each snapshot we then read the DPI of the
+monitor hosting the pinned window (`GetDpiForWindow`) and divide every
+`BoundingRectangle` by `dpi / 96.0` before populating `Bounds`. Multi-monitor
+setups with mixed DPI where one window spans monitors are edge-cased to the
+pinned window's monitor.
 
 ## 7. `NativeHandle::Uia`
 
@@ -226,6 +242,21 @@ UIA has three views: `Raw` (everything), `Control` (only control-typed), and
 `Content` (only content-bearing). We use **`Control` view as the default** -
 `Raw` is too noisy for agents and `Content` drops buttons.
 
+**Snapshots are cache-backed.** A naive walk is O(nodes x properties)
+cross-process COM round-trips, which is seconds of latency on Outlook/Excel-
+scale trees. Instead, `snapshot` builds an `IUIAutomationCacheRequest` (the
+plain element properties, with a Control-view tree filter), calls
+`IUIAutomationElement::BuildUpdatedCache` once to pull the whole window
+subtree into a local cache, then walks via `GetCachedChildren` reading every
+plain property with in-process `Cached*` getters. Pattern-derived state
+(`value`, `checked`, `expanded`, `selected`) and `RuntimeId` are still read
+live, but only for roles that plausibly carry them, so a tree of structural
+nodes costs roughly one round-trip per node. `SnapshotOptions::depth` of 0 or
+1 narrows the cache scope (`TreeScope_Element` / `TreeScope_Children`);
+deeper or unbounded requests cache the full subtree and trim during emission.
+The **action path** (re-resolving a `RefId`) still uses live `ControlViewWalker`
+calls - it stops at the target node, so the per-node cost matters less there.
+
 **`Generic` nodes are emitted by default.** They carry contextual labels
 (group headers, sections, panels) that an agent often needs to disambiguate
 controls that share names. To keep the tree small for token-budgeted agents,
@@ -256,6 +287,8 @@ UIA is a COM API. Calls into UIA from a thread that hasn't called
 - Initialize each UIA-using thread with `CoInitializeEx(COINIT_MULTITHREADED)`.
 - Do **not** marshal UIA elements across threads - re-resolve via the patterns above.
 - All `Surface` trait methods take `&self` so they can be called concurrently from the daemon, but each call internally pins itself to a single worker thread for COM safety.
+- A worker job that panics is caught (`catch_unwind`); the caller sees an error and the session continues.
+- A worker job that doesn't return within ~45s (a COM call to an unresponsive target will never come back) times out: the session is marked wedged, every later call on it fails fast, and the stuck thread is abandoned rather than joined. Recover by closing and re-opening the session.
 
 ## 11. Gaps and intentional drops
 
@@ -267,6 +300,8 @@ Things UIA exposes that we are deliberately not surfacing in v0.1:
 - **Drag-and-drop** - `DragPattern` / `DropTargetPattern`. Deferred.
 - **Custom annotation properties** - UIA lets apps expose arbitrary string properties. Skip until a concrete use case appears.
 - **Direct MSAA path.** Older Win32 apps with no native UIA support fall through Windows' built-in UIA→MSAA bridge, which gives reduced-fidelity trees but is "good enough" for v0.1. If a critical real app needs more, we add a parallel `IAccessible` walker; until then, we trust the bridge.
+- **Cached action-time resolution.** Snapshots are cache-backed (§9), but re-resolving a `RefId` for an action still walks the Control view with live calls. It stops at the target so the per-node cost is bounded, but a future iteration could share a `BuildUpdatedCache` pass with the snapshot when an action immediately follows it.
+- **`ScrollPattern` positioning.** `Scroll` only emits wheel events at the cursor; scrolling to a specific position via `ScrollPattern.SetScrollPercent` is deferred.
 
 ## 12. Resolved decisions (was: open questions)
 

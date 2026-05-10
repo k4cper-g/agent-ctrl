@@ -507,6 +507,7 @@ These are real today - the goal is to fix or document them as the project mature
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.
 - **`type` bypasses IME.** Synthetic Unicode keystrokes via `SendInput` are reliable for ASCII; CJK with IME composition is not supported yet. `fill` (UIA `ValuePattern`) is the right escape hatch for non-ASCII text input.
 - **HWND recycling.** Windows reassigns numeric HWNDs after a window closes; `window-list` shows whatever currently holds an id, with no UIA-runtime-id verification. Theoretical, never observed in practice.
+- **An unresponsive target wedges the UIA session.** UIA calls are cross-process COM calls; if the target app stops pumping messages, a snapshot or action can't return. After ~45s the call times out, the session is marked wedged, and every subsequent call on it fails fast - run `agent-ctrl close` then `agent-ctrl open uia` to start a fresh one. (The stuck worker thread is abandoned, so the daemon and other sessions keep working.)
 
 ## License
 
