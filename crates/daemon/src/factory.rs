@@ -79,10 +79,13 @@ pub fn surface_status(kind: SurfaceKind) -> SurfaceStatus {
         SurfaceKind::AtSpi => {
             #[cfg(target_os = "linux")]
             {
-                // The design (docs/atspi-mapping.md) and the headless test
-                // harness (docker/linux-dev/, crates/atspi-fixture/) are in
-                // place; the `surface-atspi` implementation is not yet.
-                SurfaceStatus::NotImplemented
+                // `snapshot` and `list_windows` are implemented and verified
+                // against the GTK fixture (docs/atspi-mapping.md,
+                // docker/linux-dev/, crates/atspi-fixture/). The action
+                // vocabulary is a follow-up, so this is `Stub`, not `Ready` -
+                // `recommended_surface` only ever picks a `Ready` surface, so
+                // an agent is never steered to a surface it cannot act on.
+                SurfaceStatus::Stub
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -124,9 +127,10 @@ pub async fn open_surface(kind: SurfaceKind) -> Result<Box<dyn Surface>> {
         )),
 
         #[cfg(target_os = "linux")]
-        SurfaceKind::AtSpi => Err(Error::Surface(
-            "AT-SPI surface not yet implemented (design: docs/atspi-mapping.md)".into(),
-        )),
+        SurfaceKind::AtSpi => {
+            let surface = agent_ctrl_surface_atspi::AtSpiSurface::open().await?;
+            Ok(Box::new(surface))
+        }
         #[cfg(not(target_os = "linux"))]
         SurfaceKind::AtSpi => Err(Error::PermissionDenied(
             "AT-SPI surface is only available on Linux".into(),

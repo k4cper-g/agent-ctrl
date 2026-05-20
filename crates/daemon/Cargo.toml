@@ -27,5 +27,8 @@ agent-ctrl-surface-uia.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 agent-ctrl-surface-ax.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+agent-ctrl-surface-atspi.workspace = true
+
 [lints]
 workspace = true

@@ -6,6 +6,7 @@ members = [
     "crates/cli",
     "crates/surface-uia",
     "crates/surface-ax",
+    "crates/surface-atspi",
     "crates/uia-fixture",
     "crates/ax-fixture",
 ]
@@ -25,6 +26,7 @@ agent-ctrl-core = { path = "crates/core", version = "0.1.1" }
 agent-ctrl-daemon = { path = "crates/daemon", version = "0.1.1" }
 agent-ctrl-surface-uia = { path = "crates/surface-uia", version = "0.1.1" }
 agent-ctrl-surface-ax = { path = "crates/surface-ax", version = "0.1.1" }
+agent-ctrl-surface-atspi = { path = "crates/surface-atspi", version = "0.1.1" }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "io-std", "process", "signal", "net"] }
 async-trait = "0.1"

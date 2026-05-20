@@ -145,6 +145,7 @@ mod tests {
         assert!(kinds.contains(&"mock"));
         assert!(kinds.contains(&"uia"));
         assert!(kinds.contains(&"ax"));
+        assert!(kinds.contains(&"atspi"));
         assert!(kinds.contains(&"android"));
         assert!(kinds.contains(&"ios"));
     }

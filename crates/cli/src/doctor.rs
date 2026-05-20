@@ -140,6 +140,7 @@ fn check_environment(out: &mut Vec<Check>) {
         SurfaceKind::Mock,
         SurfaceKind::Uia,
         SurfaceKind::Ax,
+        SurfaceKind::AtSpi,
         SurfaceKind::Android,
         SurfaceKind::Ios,
     ] {
@@ -573,12 +574,13 @@ mod tests {
     fn environment_check_emits_one_entry_per_surface() {
         let mut out = Vec::new();
         check_environment(&mut out);
-        // Five surfaces + the version info line.
+        // Six surfaces + the version info line.
         let surface_checks = out
             .iter()
             .filter(|c| c.id.starts_with("env.surface."))
             .count();
-        assert_eq!(surface_checks, 5);
+        assert_eq!(surface_checks, 6);
         assert!(out.iter().any(|c| c.id == "env.version"));
+        assert!(out.iter().any(|c| c.id == "env.surface.atspi"));
     }
 }

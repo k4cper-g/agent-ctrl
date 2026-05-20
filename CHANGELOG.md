@@ -10,6 +10,21 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 - AX window listing and `focus-window` preview using session-oriented
   `pid:<pid>:window:<index>` ids and AX `AXRaise`.
+- **Linux AT-SPI surface (`agent-ctrl-surface-atspi`), snapshot-read path.**
+  `open atspi` connects to the freedesktop accessibility bus, walks the
+  `org.a11y.atspi.Registry` tree, and maps AT-SPI roles, states, and geometry
+  into the shared schema. `snapshot` (with `--target-process` / `--target-pid`
+  / `--target-title` / foreground targeting), `find`, the `get` / `is` inspect
+  commands, and `window-list` all work; the action vocabulary returns
+  `Unsupported` for now and is a follow-up.
+  - Opening the surface sets `org.a11y.Status.IsEnabled` so GTK/Qt apps that
+    gate their accessibility tree on it expose it to agent-ctrl.
+  - `surface-atspi` is target-gated to Linux and compiles to a stub elsewhere,
+    so the workspace still builds on every host.
+  - Opt-in `linux_atspi_fixture` integration test (`RUN_ATSPI_TESTS=1`) and a
+    deterministic GTK4 fixture verified in the `docker/linux-dev/` container.
+  - `agent-ctrl info` / `doctor` report `atspi` as `stub` on Linux (snapshot
+    works, actions do not) and `wrong-os` elsewhere.
 
 ## [0.1.1] - 2026-05-06
 

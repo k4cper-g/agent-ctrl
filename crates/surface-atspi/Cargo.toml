@@ -1,0 +1,30 @@
+[package]
+name = "agent-ctrl-surface-atspi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Linux AT-SPI (freedesktop accessibility bus) surface for agent-ctrl."
+publish = false
+
+[dependencies]
+agent-ctrl-core.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+# AT-SPI is a D-Bus protocol; the `atspi` crate wraps it over `zbus`. Both are
+# Linux-only here, so the dependency is target-gated: on other hosts this crate
+# compiles to a stub (see lib.rs), keeping the workspace cross-platform.
+#
+# - `tokio` routes zbus onto the tokio reactor, so the daemon's existing tokio
+#   runtime drives the bus (no second runtime).
+# - `zbus` re-exports the exact zbus the proxies were generated against, so we
+#   build proxies through `atspi::zbus` and never risk a version skew.
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi = { version = "0.30", features = ["tokio", "zbus"] }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

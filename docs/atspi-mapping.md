@@ -7,9 +7,12 @@ The structural analog of [`docs/uia-mapping.md`](uia-mapping.md); read that
 first for the cross-platform invariants (the `Surface` trait, the `RefMap`
 `(role, name, nth)` rediscovery scheme, `SnapshotOptions`, etc.).
 
-**Scope:** v0.1 of `surface-atspi`. Goal is a working `snapshot` + `click` +
-`focus` + `fill` against a GTK app (the `crates/atspi-fixture/` fixture, then
-real GTK/Qt apps). Items marked *deferred* are not implemented in v0.1.
+**Scope:** the first `surface-atspi` PR ships the **snapshot-read path** -
+`snapshot`, `find`, the `get` / `is` inspect commands, and `list_windows` -
+against a GTK app (the `crates/atspi-fixture/` fixture, then real GTK/Qt apps).
+The action vocabulary (`click`, `focus`, `fill`, ...) returns `Unsupported` and
+is a follow-up PR; the §4 action table below is the design for that work.
+Items marked *deferred* are not implemented.
 
 ## 0. How it talks to AT-SPI
 
@@ -30,6 +33,14 @@ the `Surface` trait's `async fn`s. The `AccessibilityConnection` is held on the
 On non-Linux hosts the crate compiles to a stub that returns
 `Error::PermissionDenied` / `Error::Unsupported`, like `surface-uia` does off
 Windows.
+
+**Enabling accessibility.** GTK and Qt only build and register their AT-SPI
+tree when `org.a11y.Status.IsEnabled` is true - the Linux analog of macOS only
+exposing AX to a trusted process. `AtSpiSurface::open` sets that flag (and
+`ScreenReaderEnabled`) on the session bus, so a `snapshot` sees app trees
+without the user manually enabling accessibility. An app already running when
+the flag flips may take a moment to register; `resolve_target` retries the
+registry enumeration briefly, and `snapshot --settle` covers the rest.
 
 ## 1. Role mapping (AT-SPI `Role` → [`Role`](../crates/core/src/role.rs))
 
@@ -82,7 +93,7 @@ with the `Modal` state → `Dialog`.
 | `State` field | AT-SPI source |
 |---|---|
 | `visible` | `Showing` AND `Visible` (an off-screen-but-visible widget maps to `false`, matching the UIA `IsOffscreen` choice). |
-| `enabled` | `Enabled` AND `Sensitive`. |
+| `enabled` | `Sensitive` OR `Enabled`. GTK marks interactable widgets `Sensitive` but does not always also set `Enabled`; a control counts as disabled only when it has lost both. |
 | `focused` | `Focused`. |
 | `selected` | `Selected` when `Selectable` is set, else `None`. |
 | `checked` | `Checked` → `True` / `Indeterminate` → `Mixed` / (checkable but unchecked) → `False`; else `None`. "checkable" = role is checkbox/radio/toggle/check-menu-item etc. |

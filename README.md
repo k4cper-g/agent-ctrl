@@ -74,7 +74,7 @@ npm install @agent-ctrl/client
 
 ### Requirements
 
-- **Windows 10/11** for UIA, **macOS 12+** for AX. Both surfaces ship the full action vocabulary; Linux / Android / iOS are not implemented yet. Other OSes build cleanly with stub surfaces.
+- **Windows 10/11** for UIA, **macOS 12+** for AX. Both surfaces ship the full action vocabulary. **Linux** (AT-SPI) ships the snapshot-read path - `snapshot`, `find`, inspect, and `window-list`; its action vocabulary, plus Android / iOS, are not implemented yet. Other OSes build cleanly with stub surfaces.
 - **Rust 1.85+** (workspace MSRV; rustup will install it from `rust-toolchain.toml`).
 - **Node.js 20+** only when using the TypeScript client.
 
@@ -360,7 +360,7 @@ agent-ctrl uses a client-daemon architecture mirroring agent-browser:
 
 1. **Rust CLI** (`crates/cli`) - parses commands, dials the daemon, prints results.
 2. **Rust daemon** (`crates/daemon`) - long-running process that owns surface sessions and dispatches snapshot / action / find / wait / list-windows requests.
-3. **Surface trait** (`crates/core`) - cross-platform contract every backend implements. Per-platform crates (`crates/surface-uia`, `surface-ax`) provide the implementations, gated by `target_os`.
+3. **Surface trait** (`crates/core`) - cross-platform contract every backend implements. Per-platform crates (`crates/surface-uia`, `surface-ax`, `surface-atspi`) provide the implementations, gated by `target_os`.
 
 The daemon starts via `agent-ctrl open <surface>` and persists across CLI invocations for fast subsequent operations. Each session has its own daemon process and writes a discovery file at `~/.agent-ctrl/<session>.json`.
 
@@ -377,6 +377,8 @@ The repository is a **dual workspace** - a Cargo workspace for the Rust engine a
 | [`crates/uia-fixture`](crates/uia-fixture) | Deterministic native Win32 fixture app for UIA reliability tests. |
 | [`crates/surface-ax`](crates/surface-ax) | macOS Accessibility surface (full action vocabulary; macOS-only). |
 | [`crates/ax-fixture`](crates/ax-fixture) | Deterministic native Cocoa fixture app for AX reliability tests. |
+| [`crates/surface-atspi`](crates/surface-atspi) | Linux AT-SPI surface - snapshot-read path (Linux-only). |
+| [`crates/atspi-fixture`](crates/atspi-fixture) | Deterministic GTK4 fixture app (Python) for AT-SPI tests. |
 | [`packages/client`](packages/client) | `@agent-ctrl/client` - typed TypeScript wrapper over stdio JSON-RPC. |
 
 Surfaces gated by `target_os` compile to empty crates on other platforms, so the workspace builds on any host.
@@ -389,7 +391,7 @@ A **surface** is one accessibility protocol - UIA, AX, AT-SPI, etc. A **platform
 |---|---|---|
 | Windows | [`surface-uia`](crates/surface-uia) - UI Automation | **ready** |
 | macOS | [`surface-ax`](crates/surface-ax) - Accessibility / AX | **ready** |
-| Linux | _planned_ `surface-atspi` (AT-SPI / D-Bus) | design + headless test harness in place ([`docs/atspi-mapping.md`](docs/atspi-mapping.md), [`docker/linux-dev/`](docker/linux-dev), [`crates/atspi-fixture/`](crates/atspi-fixture)); implementation pending |
+| Linux | [`surface-atspi`](crates/surface-atspi) - AT-SPI / D-Bus | **snapshot-read** - `snapshot`, `find`, inspect, and `window-list` work; the action vocabulary is a follow-up. Mapping in [`docs/atspi-mapping.md`](docs/atspi-mapping.md); headless dev/CI stack in [`docker/linux-dev/`](docker/linux-dev) |
 | Android | _planned_ `surface-accessibility-service` (JNI) | not started |
 | iOS | _planned_ `surface-xcuitest` (WebDriverAgent) | not started |
 
@@ -452,6 +454,25 @@ The AX fixture covers the deterministic macOS loop for snapshots, `find`,
 `click`, `fill`, `check`, `uncheck`, `toggle`, and `window-list`. Keyboard
 actions exist, but are still validated manually because host focus and event-tap
 behavior can vary under the Rust test harness.
+
+Linux AT-SPI fixture:
+
+AT-SPI does not exist on Windows or macOS, so the `surface-atspi` crate is
+developed and tested inside the headless container in [`docker/linux-dev/`](docker/linux-dev)
+(Xvfb + a private session D-Bus + the AT-SPI registry + GTK4). The fixture is a
+deterministic GTK4 app, [`crates/atspi-fixture/main.py`](crates/atspi-fixture/main.py).
+
+```bash
+docker build -t agent-ctrl-linux-dev docker/linux-dev/
+docker run --rm -v "$PWD:/work" -w /work agent-ctrl-linux-dev \
+  bash -c 'RUN_ATSPI_TESTS=1 cargo test -p agent-ctrl-cli --test linux_atspi_fixture'
+```
+
+The opt-in `linux_atspi_fixture` test (gated by `RUN_ATSPI_TESTS=1`, like the
+UIA and AX fixture tests) opens an `atspi` session, launches the GTK fixture,
+and exercises `snapshot`, `find`, `get`, `is`, and `window-list`. See
+[`docker/linux-dev/README.md`](docker/linux-dev/README.md) for the full
+container invocation.
 
 TypeScript client:
 
@@ -517,7 +538,8 @@ Production agents should prefer the generic loop over app-specific assumptions.
 
 These are real today - the goal is to fix or document them as the project matures.
 
-- **Windows and macOS are the supported surfaces.** Linux / Android / iOS / browser flows are not implemented in this project yet. macOS additionally requires Screen Recording permission for `screenshot` and may require Automation permission for some Apple system apps (Notes, Calendar, Music) - see [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md).
+- **Windows and macOS are the action-ready surfaces.** Linux (AT-SPI) is snapshot-read only - it captures trees, resolves `find`/inspect refs, and lists windows, but cannot yet click, type, or focus; Android / iOS / browser flows are not implemented in this project yet. macOS additionally requires Screen Recording permission for `screenshot` and may require Automation permission for some Apple system apps (Notes, Calendar, Music) - see [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md).
+- **Linux apps must have accessibility enabled to be visible.** GTK and Qt only build their AT-SPI tree when `org.a11y.Status.IsEnabled` is set; `agent-ctrl open atspi` flips it, but an app already running may take a moment to register its tree (use `snapshot --settle`). Headless geometry is approximate - GTK under Xvfb reports no screen coordinates, so `bounds` may be absent.
 - **Local TCP daemon auth is developer-machine scoped.** TCP session files include a random bearer token and the daemon rejects missing or incorrect tokens, but anyone who can read `~/.agent-ctrl/<session>.json` can still use that session. Treat sessions as a local developer-machine boundary, not a multi-user security sandbox.
 - **Refs are valid only against the snapshot that produced them.** If `wait-for` runs in parallel with another command on the same session (across two shells), the wait loop refreshes the cached refs on each poll, and a previously-issued ref may resolve to a different element. Sequential CLI usage in one shell - the realistic flow - doesn't trip this.
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.

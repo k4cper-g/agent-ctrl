@@ -100,6 +100,7 @@ impl SurfaceKind {
 /// - `"keyboard"` - synthetic keyboard input
 /// - `"mouse"` - synthetic pointer input
 /// - `"drag"` - pointer drag gestures
+/// - `"windows"` - can list top-level windows for the pinned app
 /// - `"multi_app"` - can list and switch among multiple apps
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitySet {
