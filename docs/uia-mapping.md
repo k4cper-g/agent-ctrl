@@ -108,7 +108,7 @@ from the prefix) is intentionally deferred to v0.2.
 |---|---|
 | `name`         | `Name` as reported by UIA; empty string when the platform exposes none |
 | `description`  | `HelpText` when non-empty and ≠ `Name`; else `None` |
-| `value`        | `ValuePattern.Value` when present; else `RangeValuePattern.Value` formatted as a string (sliders, spinners - whole numbers render without a fractional part) |
+| `value`        | `ValuePattern.Value` when present and `IsPassword=false`; else `RangeValuePattern.Value` formatted as a string (sliders, spinners - whole numbers render without a fractional part) |
 | `bounds`       | `BoundingRectangle` after DPI normalization (see §6) |
 | `level`        | UIA `Level` property when positive (tree items, list items, headings); else `None` |
 | `role`         | per §1 |
@@ -220,7 +220,11 @@ We populate both. `automation_id` is the most stable identifier UIA exposes
 is what UIA itself uses to compare elements but is unstable across runs.
 
 At action-time re-resolution we try in order:
-1. `automation_id` lookup if set - fast and durable.
+1. `automation_id` lookup - fast and durable, but only for the first
+   occurrence of a `(role, name)` pair (`nth == 0`). AutomationIds are
+   duplicated across repeated templates (every list row's "Delete" button
+   shares one), so `FindFirst` cannot address a later occurrence; a non-zero
+   `nth` falls through to tiers 2-3.
 2. `runtime_id` comparison - works within the same UIA session.
 3. `(role, name, nth)` walk from the [`RefMap`](../crates/core/src/snapshot.rs) - durable across UIA invalidations.
 

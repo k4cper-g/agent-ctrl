@@ -64,9 +64,9 @@ use windows::Win32::UI::Accessibility::{
     UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HelpTextPropertyId,
     UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId,
     UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId,
-    UIA_IsRequiredForFormPropertyId, UIA_LevelPropertyId, UIA_ListControlTypeId,
-    UIA_ListItemControlTypeId, UIA_MenuBarControlTypeId, UIA_MenuControlTypeId,
-    UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_PaneControlTypeId,
+    UIA_IsPasswordPropertyId, UIA_IsRequiredForFormPropertyId, UIA_LevelPropertyId,
+    UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuBarControlTypeId,
+    UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_PaneControlTypeId,
     UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId, UIA_RangeValuePatternId,
     UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_SelectionItemPatternId,
     UIA_SelectionPatternId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
@@ -392,7 +392,7 @@ impl Drop for UiaInner {
 /// a typed `Cached*` getter, or, for `Level` (which has no typed getter), via
 /// `GetCachedPropertyValue`. Must be kept in sync with the cache reads in
 /// [`build_node`].
-const CACHED_PROPERTIES: [UIA_PROPERTY_ID; 12] = [
+const CACHED_PROPERTIES: [UIA_PROPERTY_ID; 13] = [
     UIA_ControlTypePropertyId,
     UIA_NamePropertyId,
     UIA_ClassNamePropertyId,
@@ -401,6 +401,7 @@ const CACHED_PROPERTIES: [UIA_PROPERTY_ID; 12] = [
     UIA_IsOffscreenPropertyId,
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
+    UIA_IsPasswordPropertyId,
     UIA_BoundingRectanglePropertyId,
     UIA_IsRequiredForFormPropertyId,
     UIA_HelpTextPropertyId,
@@ -504,7 +505,13 @@ fn capture_with_options(
     let pid = u32::try_from(pid_signed)
         .map_err(|_| Error::Snapshot(format!("invalid PID from UIA: {pid_signed}")))?;
 
-    let (app_id, app_name) = process_info(pid)?;
+    // The window may belong to a protected or higher-integrity process we
+    // cannot `OpenProcess` (a system service, an elevated app driven from an
+    // unelevated agent). The accessibility tree is still valid and is the
+    // point of the snapshot, so degrade the app context to a pid placeholder
+    // rather than failing the whole capture.
+    let (app_id, app_name) =
+        process_info(pid).unwrap_or_else(|_| (format!("pid:{pid}"), format!("pid_{pid}")));
 
     Ok(Snapshot {
         captured_at: SystemTime::now(),
@@ -634,6 +641,13 @@ fn read_value_pattern(element: &IUIAutomationElement) -> Option<(String, bool)> 
     Some((value, read_only))
 }
 
+/// Live-read whether an element is password-protected. Used by action-time
+/// ref resolution to mirror snapshot-time value suppression.
+fn is_current_password(element: &IUIAutomationElement) -> bool {
+    // SAFETY: `element` is a valid COM interface.
+    unsafe { element.CurrentIsPassword() }.is_ok_and(BOOL::as_bool)
+}
+
 /// Ref-emission inputs that [`build_node`] extracts but that aren't carried
 /// on [`Node`] itself. Combined with the node's role by [`qualifies_for_ref`].
 struct RefSignals {
@@ -706,7 +720,10 @@ fn read_level(element: &IUIAutomationElement) -> Option<i32> {
 /// `has_editable_value` signal: `true` only for a non-read-only `ValuePattern`,
 /// because that is the pattern the `Fill` action drives - a range control is
 /// already an interactive role and earns its ref regardless.
-fn read_node_value(element: &IUIAutomationElement) -> (Option<String>, bool) {
+fn read_node_value(element: &IUIAutomationElement, is_password: bool) -> (Option<String>, bool) {
+    if is_password {
+        return (None, false);
+    }
     if let Some((text, read_only)) = read_value_pattern(element) {
         let value = if text.is_empty() { None } else { Some(text) };
         return (value, !read_only);
@@ -777,6 +794,7 @@ fn build_node(
     let has_focus = unsafe { element.CachedHasKeyboardFocus() }.is_ok_and(BOOL::as_bool);
     let keyboard_focusable =
         unsafe { element.CachedIsKeyboardFocusable() }.is_ok_and(BOOL::as_bool);
+    let is_password = unsafe { element.CachedIsPassword() }.is_ok_and(BOOL::as_bool);
 
     let bounds = unsafe { element.CachedBoundingRectangle() }
         .ok()
@@ -790,7 +808,7 @@ fn build_node(
     let level = read_level(element);
 
     let (value, has_editable_value) = if role_might_have_value(&role) {
-        read_node_value(element)
+        read_node_value(element, is_password)
     } else {
         (None, false)
     };
@@ -3552,11 +3570,14 @@ fn list_windows_inner(state: &mut WorkerState) -> Result<Vec<WindowInfo>> {
 ///
 /// Resolution priority, per `docs/uia-mapping.md` §7:
 ///
-/// 1. Fast path: if the entry carries an `AutomationId`, ask UIA itself for
+/// 1. Fast path: if the entry carries an `AutomationId` *and* is the first
+///    occurrence of its `(role, name)` pair (`nth == 0`), ask UIA itself for
 ///    the matching subtree element. UIA evaluates the property condition in
 ///    its own indexed structures, which avoids cross-process COM round-trips
 ///    per node and is what makes WPF/WinUI apps with thousands of controls
-///    snappy to drive.
+///    snappy to drive. AutomationIds are duplicated across repeated templates
+///    (every list row's "Delete" button shares one), so a non-zero `nth`
+///    cannot be addressed by `FindFirst` and skips straight to tier 2.
 /// 2. Mid tier: if the entry carries a `RuntimeId`, walk the Control view and
 ///    return the element whose `RuntimeId` still equals it. RuntimeIds are
 ///    unique on the desktop at any instant, so a match is unambiguous - this
@@ -3590,7 +3611,7 @@ fn resolve_element(
         ..
     }) = &target.native
     {
-        if let Some(elem) = find_by_automation_id(automation, &root, aid, &target.role) {
+        if let Some(elem) = find_by_automation_id(automation, &root, aid, target) {
             return Ok(elem);
         }
     }
@@ -3672,16 +3693,22 @@ fn first_element_with_runtime_id(
 }
 
 /// Fast-path resolver: ask UIA for the subtree element with this
-/// `AutomationId`. Returns `None` if the property condition can't be
-/// constructed, the search returns nothing, or the found element's role no
-/// longer matches what we captured (a buggy app could reuse the same
-/// `AutomationId` across role changes; the role check keeps us honest).
+/// `AutomationId`, but only when accepting the first match cannot bypass the
+/// captured `(role, name, nth)` identity. Returns `None` if the property
+/// condition can't be constructed, the search returns nothing, the first match
+/// no longer qualifies as the captured ref, or the captured ref was not the
+/// first occurrence of its `(role, name)` pair. Duplicate AutomationIds are
+/// common in repeated templates, so later occurrences deliberately fall
+/// through to the runtime-id or full `(role, name, nth)` walk.
 fn find_by_automation_id(
     automation: &IUIAutomation,
     root: &IUIAutomationElement,
     automation_id: &str,
-    expected_role: &Role,
+    target: &RefEntry,
 ) -> Option<IUIAutomationElement> {
+    if target.nth != 0 {
+        return None;
+    }
     let value: VARIANT = BSTR::from(automation_id).into();
     // SAFETY: `automation` is a valid COM interface; `value` outlives the call.
     let condition: IUIAutomationCondition =
@@ -3690,19 +3717,12 @@ fn find_by_automation_id(
     // SAFETY: `root` and `condition` are valid COM interfaces.
     let element = unsafe { root.FindFirst(TreeScope(TreeScope_Subtree.0), &condition) }.ok()?;
 
-    // Defensive: confirm the role still matches what the snapshot recorded.
-    // SAFETY: `element` is valid; failed reads fall back to a sentinel role.
-    let ct = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
-    let class = unsafe { element.CurrentClassName() }
-        .ok()
-        .map(|b| b.to_string())
-        .unwrap_or_default();
     // We don't have the parent on this fast path (FindFirst returned the
     // element directly, not a path). Per-element promotions still apply;
     // the parent-aware ListItem→Option promotion does not, so a ref whose
     // recorded role is `Option` will deliberately miss the fast path here
     // and fall through to `find_in_tree`, which threads parent context.
-    if &promoted_role(&element, ct, &class, None) == expected_role {
+    if element_qualifies_as_ref(&element, None, &target.role, &target.name) {
         Some(element)
     } else {
         None
@@ -3806,7 +3826,7 @@ fn element_qualifies_as_ref(
     if r.is_interactive() {
         return true;
     }
-    if role_might_have_value(&r) {
+    if role_might_have_value(&r) && !is_current_password(element) {
         if let Some((_, read_only)) = read_value_pattern(element) {
             if !read_only {
                 return true;

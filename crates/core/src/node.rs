@@ -167,7 +167,7 @@ pub struct Node {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bounds: Option<Bounds>,
 
-    /// Heading level (1-6) for `Role::Heading`.
+    /// Hierarchy or heading level when exposed by the platform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<i32>,
 

@@ -39,10 +39,10 @@ mod windows_app {
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDlgItem, GetMessageW,
         LoadCursorW, PostQuitMessage, RegisterClassW, SendMessageW, SetTimer, SetWindowTextW,
         ShowWindow, TranslateMessage, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CBS_DROPDOWNLIST,
-        CB_ADDSTRING, CB_SETCURSEL, CW_USEDEFAULT, ES_AUTOHSCROLL, ES_LEFT, GWLP_USERDATA, HMENU,
-        IDC_ARROW, LBS_NOTIFY, LB_ADDSTRING, LB_SETCURSEL, MSG, SW_SHOW, WINDOW_EX_STYLE,
-        WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD,
-        WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+        CB_ADDSTRING, CB_SETCURSEL, CW_USEDEFAULT, ES_AUTOHSCROLL, ES_LEFT, ES_PASSWORD,
+        GWLP_USERDATA, HMENU, IDC_ARROW, LBS_NOTIFY, LB_ADDSTRING, LB_SETCURSEL, MSG, SW_SHOW,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW,
+        WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
     };
 
     const CLASS_NAME: PCWSTR = w!("AgentCtrlUiaFixtureWindow");
@@ -59,6 +59,7 @@ mod windows_app {
     const ID_DIALOG: i32 = 106;
     const ID_DELAY: i32 = 107;
     const ID_SLIDER: i32 = 108;
+    const ID_PASSWORD: i32 = 109;
     const ID_DIALOG_OK: i32 = 201;
     const TIMER_DELAY_READY: usize = 1;
     const TIMER_AUTO_CLOSE: usize = 2;
@@ -246,6 +247,25 @@ mod windows_app {
                 width: 320,
                 height: 28,
                 id: ID_TEXT,
+            },
+        )?;
+        // A password edit (`ES_PASSWORD`) so the snapshot's `IsPassword`
+        // value suppression has deterministic coverage: its content must
+        // never appear in a snapshot, yet it stays reffable as a text field.
+        create_child(
+            hwnd,
+            ControlSpec {
+                class_name: w!("EDIT"),
+                text: "hunter2secret",
+                style: control_style(ES_LEFT | ES_AUTOHSCROLL | ES_PASSWORD)
+                    | WS_BORDER
+                    | WS_TABSTOP,
+                ex_style: WS_EX_CLIENTEDGE,
+                x: 24,
+                y: 408,
+                width: 320,
+                height: 28,
+                id: ID_PASSWORD,
             },
         )?;
         Ok(())

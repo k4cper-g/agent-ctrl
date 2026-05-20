@@ -29,6 +29,13 @@ fn run_fixture_flow() {
         fixture.display()
     );
 
+    // Terminate any fixture left running by an earlier, improperly torn-down
+    // run. `snapshot --target-process` resolves the target window by its
+    // executable name, so a second live instance makes targeting ambiguous -
+    // actions could drive one process while reads observe the other, which
+    // surfaces as a "cleared" field still showing stale characters.
+    kill_stale_fixtures();
+
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -66,6 +73,7 @@ fn run_fixture_flow() {
     run.exercise_selection();
     run.exercise_checkbox();
     run.exercise_slider();
+    run.exercise_password();
     run.exercise_screenshots();
     run.exercise_dialog_window();
 }
@@ -299,7 +307,18 @@ impl FixtureRun<'_> {
             self.home,
             ["clear", field.trim(), "--session", "fixture"],
         );
-        self.snapshot();
+        let snap = run_cli(
+            self.cli,
+            self.home,
+            [
+                "snapshot",
+                "--session",
+                "fixture",
+                "--target-process",
+                "agent-ctrl-uia-fixture",
+                "--json",
+            ],
+        );
         let field = run_cli(
             self.cli,
             self.home,
@@ -319,7 +338,7 @@ impl FixtureRun<'_> {
         );
         assert!(
             matches!(value.trim(), "\"\"" | "null"),
-            "expected cleared text field, got {value:?}"
+            "expected cleared text field, got {value:?}\nfield ref: {field:?}\npost-clear snapshot:\n{snap}"
         );
     }
 
@@ -410,6 +429,40 @@ impl FixtureRun<'_> {
         assert!(
             value.contains("40"),
             "expected the fixture trackbar to report RangeValue 40, got {value:?}"
+        );
+    }
+
+    /// The fixture's password edit (`ES_PASSWORD`) must keep its ref - it is
+    /// still a text field an agent can focus and fill - while its content is
+    /// withheld from the snapshot entirely.
+    fn exercise_password(&self) {
+        let snapshot = run_cli(
+            self.cli,
+            self.home,
+            [
+                "snapshot",
+                "--session",
+                "fixture",
+                "--target-process",
+                "agent-ctrl-uia-fixture",
+                "--json",
+            ],
+        );
+        assert!(
+            !snapshot.contains("hunter2secret"),
+            "password edit content leaked into the snapshot:\n{snapshot}"
+        );
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        let mut text_fields = Vec::new();
+        collect_role_nodes(&snapshot["root"], "text-field", &mut text_fields);
+        assert!(
+            text_fields.len() >= 2,
+            "expected the plain and password edits as text-field nodes, got {}",
+            text_fields.len()
+        );
+        assert!(
+            text_fields.iter().all(|node| node.get("ref_id").is_some()),
+            "every text field, the password edit included, must keep a ref"
         );
     }
 
@@ -561,6 +614,22 @@ impl FixtureRun<'_> {
         full_args.push(path.to_str().expect("screenshot path must be UTF-8"));
         full_args.extend(args.iter().copied().skip(1));
         run_cli_vec(self.cli, self.home, &full_args)
+    }
+}
+
+/// Depth-first collect every node whose `role` equals `role`.
+fn collect_role_nodes<'a>(
+    node: &'a serde_json::Value,
+    role: &str,
+    out: &mut Vec<&'a serde_json::Value>,
+) {
+    if node.get("role").and_then(serde_json::Value::as_str) == Some(role) {
+        out.push(node);
+    }
+    if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+        for child in children {
+            collect_role_nodes(child, role, out);
+        }
     }
 }
 
@@ -727,6 +796,17 @@ fn wait_for_ready(path: &Path) {
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("UIA fixture did not signal readiness at {}", path.display());
+}
+
+/// Best-effort termination of any leftover fixture process so this run's
+/// `--target-process` resolution is unambiguous. A missing process (nothing
+/// to kill) just makes `taskkill` exit non-zero, which we ignore.
+fn kill_stale_fixtures() {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "agent-ctrl-uia-fixture.exe"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn fixture_exe_path() -> PathBuf {

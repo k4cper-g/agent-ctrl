@@ -18,8 +18,28 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
   interactive role still get a `@eN` ref an agent can target. The snapshot
   walk and the action-time resolver share one `qualifies_for_ref` predicate;
   the fixture round-trips every emitted ref to guard them against drift.
-- UIA fixture gained a trackbar (slider) control for deterministic
-  `RangeValuePattern` coverage.
+- UIA fixture gained a trackbar (slider) and a password edit for
+  deterministic `RangeValuePattern` and `IsPassword` coverage.
+
+### Changed
+
+- Windows UIA snapshots no longer expose the contents of password-protected
+  fields (`IsPassword`): such a node keeps its ref and role but reports no
+  `value`.
+
+### Fixed
+
+- Windows UIA action-time resolution no longer takes the `AutomationId`
+  fast path for refs past the first occurrence of their `(role, name)` pair.
+  AutomationIds are duplicated across repeated templates, so `FindFirst`
+  could resolve a later ref onto the first matching element; non-zero `nth`
+  now falls through to the runtime-id and `(role, name, nth)` walk that
+  count correctly.
+- Windows UIA `snapshot` no longer fails outright when the target window
+  belongs to a process it cannot `OpenProcess` (a protected system service,
+  or an elevated app driven from an unelevated agent). The accessibility
+  tree is still captured; only the `app` id/name degrade to a `pid:<n>`
+  placeholder.
 - AX window listing and `focus-window` preview using session-oriented
   `pid:<pid>:window:<index>` ids and AX `AXRaise`.
 - **Linux AT-SPI surface (`agent-ctrl-surface-atspi`), snapshot-read path.**
