@@ -31,7 +31,9 @@ mod windows_app {
     use windows::Win32::Graphics::Gdi::{GetStockObject, HBRUSH, WHITE_BRUSH};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Controls::{
-        InitCommonControlsEx, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
+        InitCommonControlsEx, ICC_BAR_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
+        INITCOMMONCONTROLSEX_ICC, TBM_SETPOS, TBM_SETRANGE, TBS_AUTOTICKS, TBS_HORZ,
+        TRACKBAR_CLASS,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDlgItem, GetMessageW,
@@ -56,6 +58,7 @@ mod windows_app {
     const ID_LIST: i32 = 105;
     const ID_DIALOG: i32 = 106;
     const ID_DELAY: i32 = 107;
+    const ID_SLIDER: i32 = 108;
     const ID_DIALOG_OK: i32 = 201;
     const TIMER_DELAY_READY: usize = 1;
     const TIMER_AUTO_CLOSE: usize = 2;
@@ -212,6 +215,7 @@ mod windows_app {
         create_text_controls(hwnd)?;
         create_choice_controls(hwnd)?;
         create_command_controls(hwnd)?;
+        create_range_controls(hwnd)?;
         Ok(())
     }
 
@@ -348,6 +352,31 @@ mod windows_app {
         Ok(())
     }
 
+    /// A trackbar exercises the `RangeValuePattern` value path: it exposes its
+    /// position through `RangeValuePattern`, not `ValuePattern`, so a snapshot
+    /// of it confirms the slider/spinner value fallback.
+    unsafe fn create_range_controls(hwnd: HWND) -> windows::core::Result<()> {
+        let slider = create_child(
+            hwnd,
+            ControlSpec {
+                class_name: TRACKBAR_CLASS,
+                text: "",
+                style: control_style((TBS_HORZ | TBS_AUTOTICKS) as i32) | WS_TABSTOP,
+                ex_style: WINDOW_EX_STYLE::default(),
+                x: 24,
+                y: 360,
+                width: 320,
+                height: 40,
+                id: ID_SLIDER,
+            },
+        )?;
+        // Range 0..100 with the thumb parked at a deterministic 40, so the
+        // snapshot's `RangeValuePattern.Value` read is repeatable across runs.
+        SendMessageW(slider, TBM_SETRANGE, WPARAM(1), LPARAM(100 << 16));
+        SendMessageW(slider, TBM_SETPOS, WPARAM(1), LPARAM(40));
+        Ok(())
+    }
+
     unsafe fn create_child(parent: HWND, spec: ControlSpec) -> windows::core::Result<HWND> {
         let instance = GetModuleHandleW(None)?;
         let text_wide = wide(spec.text);
@@ -473,7 +502,9 @@ mod windows_app {
         let size = u32::try_from(std::mem::size_of::<INITCOMMONCONTROLSEX>()).unwrap_or_default();
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size,
-            dwICC: ICC_STANDARD_CLASSES,
+            // Standard classes plus the bar classes, the latter registering
+            // the trackbar (`msctls_trackbar32`) used by `create_range_controls`.
+            dwICC: INITCOMMONCONTROLSEX_ICC(ICC_STANDARD_CLASSES.0 | ICC_BAR_CLASSES.0),
         };
         let _ = InitCommonControlsEx(&raw const controls);
     }

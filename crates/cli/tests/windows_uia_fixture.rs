@@ -65,6 +65,7 @@ fn run_fixture_flow() {
     run.exercise_text_field();
     run.exercise_selection();
     run.exercise_checkbox();
+    run.exercise_slider();
     run.exercise_screenshots();
     run.exercise_dialog_window();
 }
@@ -380,6 +381,38 @@ impl FixtureRun<'_> {
         );
     }
 
+    /// The fixture trackbar exposes its position through `RangeValuePattern`,
+    /// not `ValuePattern`. A snapshot of it must surface `value` via the
+    /// range-value fallback, and the slider role must earn a ref.
+    fn exercise_slider(&self) {
+        self.snapshot();
+        let slider = run_cli(
+            self.cli,
+            self.home,
+            [
+                "find",
+                "--role",
+                "slider",
+                "--first",
+                "--session",
+                "fixture",
+            ],
+        );
+        assert!(
+            slider.trim().starts_with("@e") || slider.trim().starts_with("ref_"),
+            "expected a ref for the slider, got {slider:?}"
+        );
+        let value = run_cli(
+            self.cli,
+            self.home,
+            ["get", "value", slider.trim(), "--session", "fixture"],
+        );
+        assert!(
+            value.contains("40"),
+            "expected the fixture trackbar to report RangeValue 40, got {value:?}"
+        );
+    }
+
     fn exercise_screenshots(&self) {
         self.snapshot();
         let checkbox = self.find("Enable advanced mode", "checkbox");
@@ -557,6 +590,8 @@ fn run_cli<const N: usize>(cli: &Path, home: &Path, args: [&str; N]) -> String {
 }
 
 fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
+    use std::io::Read;
+
     eprintln!("running agent-ctrl {args:?}");
     let mut child = Command::new(cli)
         .args(args)
@@ -565,32 +600,51 @@ fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
         .stderr(Stdio::piped())
         .spawn()
         .expect("running agent-ctrl");
+
+    // Drain stdout and stderr on dedicated threads. A command like `batch`
+    // with many `screenshot` steps emits more than the OS pipe buffer holds;
+    // if we waited for the child to exit before reading, it would block
+    // writing into a full pipe and never exit (a classic deadlock). Reading
+    // concurrently keeps the pipe moving regardless of output size.
+    let mut stdout_pipe = child.stdout.take().expect("child stdout is piped");
+    let mut stderr_pipe = child.stderr.take().expect("child stderr is piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let collect = |reader: std::thread::JoinHandle<Vec<u8>>| {
+        String::from_utf8_lossy(&reader.join().expect("output reader thread")).into_owned()
+    };
+
     let started = Instant::now();
-    let output = loop {
-        if child.try_wait().expect("polling agent-ctrl").is_some() {
-            break child
-                .wait_with_output()
-                .expect("collecting agent-ctrl output");
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("polling agent-ctrl") {
+            break status;
         }
         if started.elapsed() > Duration::from_secs(30) {
             let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .expect("collecting timed-out agent-ctrl output");
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = child.wait();
+            let stdout = collect(stdout_reader);
+            let stderr = collect(stderr_reader);
             panic!(
                 "agent-ctrl command timed out after 30s\nargs: {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
             );
         }
         std::thread::sleep(Duration::from_millis(25));
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let stdout = collect(stdout_reader);
+    if !status.success() {
+        let stderr = collect(stderr_reader);
         panic!(
             "agent-ctrl failed with status {:?}\nargs: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            output.status.code(),
+            status.code(),
             args,
         );
     }

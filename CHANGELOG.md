@@ -8,6 +8,18 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 ### Added
 
+- Windows UIA snapshot fidelity: nodes now carry `description` (from UIA
+  `HelpText`, kept only when it adds information beyond `name`), `level` (the
+  UIA hierarchy depth for tree items, list items, and headings), and a `value`
+  for sliders and spinners (read from `RangeValuePattern` when the control has
+  no `ValuePattern`).
+- Windows UIA ref emission now includes keyboard-focusable controls with a
+  non-structural role, so custom controls UIA does not classify as an
+  interactive role still get a `@eN` ref an agent can target. The snapshot
+  walk and the action-time resolver share one `qualifies_for_ref` predicate;
+  the fixture round-trips every emitted ref to guard them against drift.
+- UIA fixture gained a trackbar (slider) control for deterministic
+  `RangeValuePattern` coverage.
 - AX window listing and `focus-window` preview using session-oriented
   `pid:<pid>:window:<index>` ids and AX `AXRaise`.
 - **Linux AT-SPI surface (`agent-ctrl-surface-atspi`), snapshot-read path.**

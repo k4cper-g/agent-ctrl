@@ -106,11 +106,11 @@ from the prefix) is intentionally deferred to v0.2.
 
 | `Node` field   | UIA source |
 |---|---|
-| `name`         | `Name` (after trimming control characters; if empty, fall back to `LocalizedControlType` for landmarks) |
-| `description`  | `HelpText` if non-empty and ≠ `Name`; else `None` |
-| `value`        | `ValuePattern.Value` if present and not a password field; else `RangeValuePattern.Value.to_string()` |
+| `name`         | `Name` as reported by UIA; empty string when the platform exposes none |
+| `description`  | `HelpText` when non-empty and ≠ `Name`; else `None` |
+| `value`        | `ValuePattern.Value` when present; else `RangeValuePattern.Value` formatted as a string (sliders, spinners - whole numbers render without a fractional part) |
 | `bounds`       | `BoundingRectangle` after DPI normalization (see §6) |
-| `level`        | `Level` property where applicable (tree items, headings); else `None` |
+| `level`        | UIA `Level` property when positive (tree items, list items, headings); else `None` |
 | `role`         | per §1 |
 | `state`        | per §2 |
 | `native`       | `NativeHandle::Uia { runtime_id, automation_id }` (see §7) |
@@ -260,24 +260,36 @@ calls - it stops at the target node, so the per-node cost matters less there.
 **`Generic` nodes are emitted by default.** They carry contextual labels
 (group headers, sections, panels) that an agent often needs to disambiguate
 controls that share names. To keep the tree small for token-budgeted agents,
-`SnapshotOptions::compact = true` strips `Generic`, `Pane`, `Group`,
-`Separator`, `TitleBar`, and `Thumb` from the emitted tree (children are
-still walked; structural ancestors are reattached to the nearest non-stripped
-ancestor).
+`SnapshotOptions::compact = true` strips *unnamed, unfocused* `Generic` nodes
+from the emitted tree - which covers UIA's `Pane`, `Separator`, `TitleBar`,
+and `Thumb` control types, since §1 already maps all of those to `Generic`.
+Named `Generic` nodes are kept (the name is the contextual label that earns
+their place), as are `Group` nodes. Children of a stripped node are still
+walked and reattached to the nearest surviving ancestor.
 
 The CLI `snapshot` command defaults to `compact = true` for terminal
 readability. Programmatic clients can opt into full fidelity by passing
 `compact: false`.
 
 Walk depth-first, stop at `SnapshotOptions::depth` if set. At each node
-decide whether to emit a `RefId` based on:
+decide whether to emit a `RefId`. An element earns one when **any** of these
+holds (this is the `qualifies_for_ref` predicate):
 
-- Role is interactive (per `Role::is_interactive`), OR
-- Has the `Invoke` or `Value` pattern, OR
-- `IsKeyboardFocusable` is true and role is not purely structural.
+- its role is interactive (per `Role::is_interactive`); OR
+- it exposes a non-read-only `ValuePattern` (an editable field whose role
+  isn't ARIA-interactive - e.g. Win11 Notepad's `Document`-typed canvas); OR
+- it is keyboard-focusable (`IsKeyboardFocusable`) and its role is **not**
+  purely structural (per `Role::is_structural`).
 
 That last rule catches custom controls that aren't ARIA-classified but the
-user can clearly act on.
+user can clearly Tab to and act on; excluding structural roles keeps a
+focusable pane or group from flooding the ref map.
+
+The action path re-resolves a `RefId` by re-walking the tree counting the
+same `(role, name, nth)`, so it **must** apply this identical predicate -
+`element_qualifies_as_ref` is the live-read mirror of `qualifies_for_ref`.
+If the two drift, refs silently stop resolving; the fixture integration test
+round-trips every emitted ref through the action path to guard this.
 
 ## 10. Threading and COM
 

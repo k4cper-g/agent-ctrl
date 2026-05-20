@@ -51,21 +51,23 @@ use windows::Win32::UI::Accessibility::{
     ExpandCollapseState_LeafNode, ExpandCollapseState_PartiallyExpanded, IUIAutomation,
     IUIAutomationCacheRequest, IUIAutomationCondition, IUIAutomationElement,
     IUIAutomationElementArray, IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationSelectionItemPattern,
-    IUIAutomationSelectionPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
-    IUIAutomationValuePattern, IUIAutomationWindowPattern, ToggleState_Indeterminate,
-    ToggleState_Off, ToggleState_On, TreeScope, TreeScope_Children, TreeScope_Element,
-    TreeScope_Subtree, UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId,
-    UIA_ButtonControlTypeId, UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId,
-    UIA_ClassNamePropertyId, UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId,
-    UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ExpandCollapsePatternId,
-    UIA_GroupControlTypeId, UIA_HasKeyboardFocusPropertyId, UIA_HeaderControlTypeId,
-    UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
-    UIA_InvokePatternId, UIA_IsEnabledPropertyId, UIA_IsOffscreenPropertyId,
-    UIA_IsRequiredForFormPropertyId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
-    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_NamePropertyId,
-    UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
+    IUIAutomationRangeValuePattern, IUIAutomationScrollItemPattern,
+    IUIAutomationSelectionItemPattern, IUIAutomationSelectionPattern, IUIAutomationTogglePattern,
+    IUIAutomationTreeWalker, IUIAutomationValuePattern, IUIAutomationWindowPattern,
+    ToggleState_Indeterminate, ToggleState_Off, ToggleState_On, TreeScope, TreeScope_Children,
+    TreeScope_Element, TreeScope_Subtree, UIA_AutomationIdPropertyId,
+    UIA_BoundingRectanglePropertyId, UIA_ButtonControlTypeId, UIA_CalendarControlTypeId,
+    UIA_CheckBoxControlTypeId, UIA_ClassNamePropertyId, UIA_ComboBoxControlTypeId,
+    UIA_ControlTypePropertyId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
+    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId, UIA_HasKeyboardFocusPropertyId,
+    UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HelpTextPropertyId,
+    UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId,
+    UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId,
+    UIA_IsRequiredForFormPropertyId, UIA_LevelPropertyId, UIA_ListControlTypeId,
+    UIA_ListItemControlTypeId, UIA_MenuBarControlTypeId, UIA_MenuControlTypeId,
+    UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_PaneControlTypeId,
+    UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId, UIA_RangeValuePatternId,
     UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_SelectionItemPatternId,
     UIA_SelectionPatternId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
@@ -386,9 +388,11 @@ impl Drop for UiaInner {
 // ---------- Snapshot pieces ----------
 
 /// Element properties fetched in bulk by [`build_cache_request`]; every one is
-/// then read per node via a `Cached*` getter with no COM round-trip. Must be
-/// kept in sync with the `Cached*` reads in [`build_node`].
-const CACHED_PROPERTIES: [UIA_PROPERTY_ID; 9] = [
+/// then read per node from the local cache with no COM round-trip - either via
+/// a typed `Cached*` getter, or, for `Level` (which has no typed getter), via
+/// `GetCachedPropertyValue`. Must be kept in sync with the cache reads in
+/// [`build_node`].
+const CACHED_PROPERTIES: [UIA_PROPERTY_ID; 12] = [
     UIA_ControlTypePropertyId,
     UIA_NamePropertyId,
     UIA_ClassNamePropertyId,
@@ -396,8 +400,11 @@ const CACHED_PROPERTIES: [UIA_PROPERTY_ID; 9] = [
     UIA_IsEnabledPropertyId,
     UIA_IsOffscreenPropertyId,
     UIA_HasKeyboardFocusPropertyId,
+    UIA_IsKeyboardFocusablePropertyId,
     UIA_BoundingRectanglePropertyId,
     UIA_IsRequiredForFormPropertyId,
+    UIA_HelpTextPropertyId,
+    UIA_LevelPropertyId,
 ];
 
 /// Build the per-session [`IUIAutomationCacheRequest`]. `BuildUpdatedCache`
@@ -469,8 +476,8 @@ fn capture_with_options(
     // so it can rediscover any element the agent references.
     let mut nth_seen: HashMap<(Role, String), usize> = HashMap::new();
 
-    let (mut root, root_editable) = build_node(&root_element, None, dpi_scale);
-    if root.role.is_interactive() || root_editable {
+    let (mut root, root_signals) = build_node(&root_element, None, dpi_scale);
+    if qualifies_for_ref(&root.role, &root_signals) {
         let key = (root.role.clone(), root.name.clone());
         let counter = nth_seen.entry(key).or_insert(0);
         let nth = *counter;
@@ -540,14 +547,12 @@ fn walk_children(
     let mut result: Vec<Node> = Vec::new();
 
     for child in cached_children(parent) {
-        let (mut node, has_editable_value) = build_node(&child, Some(parent), dpi_scale);
+        let (mut node, signals) = build_node(&child, Some(parent), dpi_scale);
 
         // Allocate ref BEFORE recursing so `nth` follows pre-order DFS.
-        // `find_in_tree` mirrors this exact ordering at action time.
-        // Refs are emitted for ARIA-interactive roles AND for any element
-        // that exposes an editable `ValuePattern` (catches Document-typed
-        // text editors like Win11 Notepad's main canvas).
-        if node.role.is_interactive() || has_editable_value {
+        // `find_in_tree` mirrors this exact ordering at action time. See
+        // `qualifies_for_ref` for which elements earn a ref.
+        if qualifies_for_ref(&node.role, &signals) {
             let key = (node.role.clone(), node.name.clone());
             let counter = nth_seen.entry(key).or_insert(0);
             let nth = *counter;
@@ -629,25 +634,128 @@ fn read_value_pattern(element: &IUIAutomationElement) -> Option<(String, bool)> 
     Some((value, read_only))
 }
 
+/// Ref-emission inputs that [`build_node`] extracts but that aren't carried
+/// on [`Node`] itself. Combined with the node's role by [`qualifies_for_ref`].
+struct RefSignals {
+    /// Element exposes a non-read-only `ValuePattern` - it is an editable
+    /// field even when its role isn't ARIA-interactive (the typical case for
+    /// Win11 Notepad's `Document`-typed edit area).
+    has_editable_value: bool,
+    /// Element reports `IsKeyboardFocusable` - a user can Tab to it and act
+    /// on it, which is the signal that catches custom controls UIA doesn't
+    /// classify as one of the interactive roles.
+    keyboard_focusable: bool,
+}
+
+/// Decide whether an element earns a `RefId`. Per `docs/uia-mapping.md` §9 an
+/// element is reffable when any of the following holds:
+///
+/// - its role is ARIA-interactive ([`Role::is_interactive`]); or
+/// - it exposes a non-read-only `ValuePattern`; or
+/// - it is keyboard-focusable and its role is not purely structural
+///   ([`Role::is_structural`]) - this is what surfaces focusable custom
+///   controls the agent can clearly act on.
+///
+/// Both the snapshot walk and the action-time `nth` walk
+/// ([`element_qualifies_as_ref`]) must apply this exact predicate, or refs
+/// stop resolving. The keyboard-focus tier deliberately excludes structural
+/// roles (panes, groups, windows) so a focusable container doesn't flood the
+/// ref map.
+fn qualifies_for_ref(role: &Role, signals: &RefSignals) -> bool {
+    role.is_interactive()
+        || signals.has_editable_value
+        || (signals.keyboard_focusable && !role.is_structural())
+}
+
+/// Read `HelpText` for the [`Node::description`] field. UIA apps often mirror
+/// the `Name` into `HelpText`; we keep it only when it adds information, so a
+/// node never carries a `description` that just repeats its `name`.
+fn read_help_text(element: &IUIAutomationElement, name: &str) -> Option<String> {
+    // SAFETY: `element` is a valid cached COM interface; reads the local cache.
+    let text = unsafe { element.CachedHelpText() }.ok()?.to_string();
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == name {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Read the UIA `Level` property - the 1-based hierarchy depth UIA exposes on
+/// tree items, list items, and headings. `Level` has no typed `Cached*`
+/// getter, so we read it from the cache as a VARIANT. UIA reports `0` for
+/// elements that have no level; we map that (and any non-positive value) to
+/// `None` so only elements that genuinely carry a level surface one.
+fn read_level(element: &IUIAutomationElement) -> Option<i32> {
+    // SAFETY: `element` is a valid cached COM interface; `UIA_LevelPropertyId`
+    // is in the cache request, so this reads the local cache, no round-trip.
+    let variant = unsafe { element.GetCachedPropertyValue(UIA_LevelPropertyId) }.ok()?;
+    let level = i32::try_from(&variant).ok()?;
+    if level > 0 {
+        Some(level)
+    } else {
+        None
+    }
+}
+
+/// Read a value-bearing node's current value plus whether it is editable.
+///
+/// Prefers `ValuePattern` (text fields, combo boxes, documents). When the
+/// element has no `ValuePattern` it falls back to `RangeValuePattern` for the
+/// numeric position of sliders and spinners. The returned bool is the
+/// `has_editable_value` signal: `true` only for a non-read-only `ValuePattern`,
+/// because that is the pattern the `Fill` action drives - a range control is
+/// already an interactive role and earns its ref regardless.
+fn read_node_value(element: &IUIAutomationElement) -> (Option<String>, bool) {
+    if let Some((text, read_only)) = read_value_pattern(element) {
+        let value = if text.is_empty() { None } else { Some(text) };
+        return (value, !read_only);
+    }
+    (read_range_value(element), false)
+}
+
+/// Read `RangeValuePattern.Value` as a display string. Sliders and spinners
+/// expose their position here rather than through `ValuePattern`.
+fn read_range_value(element: &IUIAutomationElement) -> Option<String> {
+    // SAFETY: `element` is a valid COM interface; UIA pattern IDs are well-known.
+    let pattern: IUIAutomationRangeValuePattern =
+        unsafe { element.GetCurrentPatternAs(UIA_RangeValuePatternId) }.ok()?;
+    // SAFETY: `pattern` is a valid IUIAutomationRangeValuePattern.
+    let value = unsafe { pattern.CurrentValue() }.ok()?;
+    Some(format_range_value(value))
+}
+
+/// Format a `RangeValuePattern` value for display: whole numbers render with
+/// no fractional part (a slider at 40 reads `"40"`, not `"40.0"`); other
+/// values keep their natural precision.
+fn format_range_value(v: f64) -> String {
+    if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e15 {
+        #[allow(clippy::cast_possible_truncation)]
+        let whole = v as i64;
+        whole.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
 /// Map an [`IUIAutomationElement`] (from the cache built by `BuildUpdatedCache`)
 /// to a [`Node`] (no children populated).
 ///
-/// Returns `(node, has_editable_value)`. The nine plain element properties
-/// come from the local cache (`Cached*` getters - no COM round-trip); the
-/// pattern-derived state (`value`, `checked`, `expanded`, `selected`) and the
-/// runtime-id handle are read live, but only for roles that plausibly carry
-/// them, so a tree of structural nodes still costs roughly one round-trip per
-/// node. Each read is best-effort: a missing/unsupported value yields a
-/// defensible default rather than failing the whole node. `has_editable_value`
-/// is `true` when the element exposes a non-read-only `ValuePattern`; the
-/// caller uses it to decide whether to allocate a `RefId` even when the role
-/// isn't ARIA-interactive (the typical case for Win11 Notepad's `Document`-
-/// typed edit area).
+/// Returns `(node, signals)`. The plain element properties come from the local
+/// cache (`Cached*` getters / cached `GetCachedPropertyValue` - no COM
+/// round-trip); the pattern-derived state (`value`, `checked`, `expanded`,
+/// `selected`) and the runtime-id handle are read live, but only for roles
+/// that plausibly carry them, so a tree of structural nodes still costs
+/// roughly one round-trip per node. Each read is best-effort: a
+/// missing/unsupported value yields a defensible default rather than failing
+/// the whole node. The returned [`RefSignals`] carry the two ref-emission
+/// inputs not visible on `Node` itself; [`qualifies_for_ref`] combines them
+/// with the role.
 fn build_node(
     element: &IUIAutomationElement,
     parent: Option<&IUIAutomationElement>,
     dpi_scale: f64,
-) -> (Node, bool) {
+) -> (Node, RefSignals) {
     // SAFETY: each getter dereferences only the COM `this` pointer (the
     // receiver), which is valid for the lifetime of `element`. The `Cached*`
     // variants read from the local cache populated by `BuildUpdatedCache`.
@@ -662,10 +770,13 @@ fn build_node(
         .ok()
         .map(|b| b.to_string())
         .unwrap_or_default();
+    let description = read_help_text(element, &name);
 
     let is_enabled = unsafe { element.CachedIsEnabled() }.is_ok_and(BOOL::as_bool);
     let is_offscreen = unsafe { element.CachedIsOffscreen() }.is_ok_and(BOOL::as_bool);
     let has_focus = unsafe { element.CachedHasKeyboardFocus() }.is_ok_and(BOOL::as_bool);
+    let keyboard_focusable =
+        unsafe { element.CachedIsKeyboardFocusable() }.is_ok_and(BOOL::as_bool);
 
     let bounds = unsafe { element.CachedBoundingRectangle() }
         .ok()
@@ -676,11 +787,10 @@ fn build_node(
             h: f64::from(r.bottom - r.top) / dpi_scale,
         });
 
+    let level = read_level(element);
+
     let (value, has_editable_value) = if role_might_have_value(&role) {
-        match read_value_pattern(element) {
-            Some((v, read_only)) => (if v.is_empty() { None } else { Some(v) }, !read_only),
-            None => (None, false),
-        }
+        read_node_value(element)
     } else {
         (None, false)
     };
@@ -712,7 +822,7 @@ fn build_node(
         ref_id: None,
         role,
         name,
-        description: None,
+        description,
         value,
         state: State {
             visible: !is_offscreen,
@@ -724,12 +834,18 @@ fn build_node(
             required,
         },
         bounds,
-        level: None,
+        level,
         children: Vec::new(),
         opaque: false,
         native,
     };
-    (node, has_editable_value)
+    (
+        node,
+        RefSignals {
+            has_editable_value,
+            keyboard_focusable,
+        },
+    )
 }
 
 /// Roles plausibly hosting `TogglePattern`. Cheap pre-filter so we don't
@@ -3598,9 +3714,9 @@ fn find_by_automation_id(
 ///
 /// `nth` is global across the snapshot, mirroring the snapshot-time scheme.
 /// Crucially, the predicate that decides whether an element "counts" toward
-/// `nth` must match snapshot's ref-emission predicate exactly (interactive
-/// role OR editable `ValuePattern`) - otherwise an element matching role+name
-/// that didn't get a ref in the snapshot would still bump the counter here,
+/// `nth` must match snapshot's ref-emission predicate exactly (see
+/// [`qualifies_for_ref`]) - otherwise an element matching role+name that
+/// didn't get a ref in the snapshot would still bump the counter here,
 /// causing action-time resolution to land on the wrong element.
 fn find_in_tree(
     walker: &IUIAutomationTreeWalker,
@@ -3651,7 +3767,9 @@ fn descend(
 
 /// Mirrors snapshot's ref-emission predicate: returns `true` iff the element
 /// matches `(role, name)` AND would have been allocated a `RefId` during
-/// snapshot (interactive role, or editable `ValuePattern`). Uses the same
+/// snapshot. Applies [`qualifies_for_ref`]'s three tiers - interactive role,
+/// editable `ValuePattern`, or keyboard-focusable non-structural role - with
+/// live (`Current*`) reads instead of cached ones. Uses the same
 /// `promoted_role` the snapshot did, so refs that captured a promoted role
 /// (e.g. `MenuItemCheckbox` from a `MenuItem` with `TogglePattern`) still
 /// resolve correctly.
@@ -3679,10 +3797,12 @@ fn element_qualifies_as_ref(
         return false;
     }
 
-    // Final gate: the snapshot only allocates a ref when the element is
-    // ARIA-interactive OR exposes a non-read-only `ValuePattern`. We check
-    // ValuePattern only for roles that might have one (avoids per-element
-    // COM calls during the cold portion of the walk).
+    // Final gate: the snapshot allocates a ref when the element is
+    // ARIA-interactive, exposes a non-read-only `ValuePattern`, or is
+    // keyboard-focusable with a non-structural role - the three tiers of
+    // `qualifies_for_ref`. We probe `ValuePattern` only for roles that might
+    // have one, and the focus property only for non-structural roles, so the
+    // cold portion of the walk stays free of per-element COM calls.
     if r.is_interactive() {
         return true;
     }
@@ -3691,6 +3811,12 @@ fn element_qualifies_as_ref(
             if !read_only {
                 return true;
             }
+        }
+    }
+    if !r.is_structural() {
+        // SAFETY: `element` is a valid COM interface.
+        if unsafe { element.CurrentIsKeyboardFocusable() }.is_ok_and(BOOL::as_bool) {
+            return true;
         }
     }
     false
@@ -3976,5 +4102,60 @@ mod tests {
             .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
             .collect();
         assert_eq!(reconstructed, ids);
+    }
+
+    #[test]
+    fn range_value_formats_whole_and_fractional() {
+        use super::format_range_value;
+        // Whole numbers drop the fractional part so a slider reads cleanly.
+        assert_eq!(format_range_value(40.0), "40");
+        assert_eq!(format_range_value(0.0), "0");
+        assert_eq!(format_range_value(-7.0), "-7");
+        // Genuine fractions keep their precision.
+        assert_eq!(format_range_value(2.5), "2.5");
+        // Non-finite values fall back to the float formatting rather than
+        // truncating into a bogus integer.
+        assert_eq!(format_range_value(f64::INFINITY), "inf");
+    }
+
+    /// The snapshot walk and the action-time `nth` walk must agree on which
+    /// elements earn a ref; both route through `qualifies_for_ref`, so this
+    /// pins its three tiers.
+    #[test]
+    fn qualifies_for_ref_covers_the_three_tiers() {
+        use super::{qualifies_for_ref, RefSignals};
+        use agent_ctrl_core::Role;
+
+        let inert = RefSignals {
+            has_editable_value: false,
+            keyboard_focusable: false,
+        };
+        let focusable = RefSignals {
+            has_editable_value: false,
+            keyboard_focusable: true,
+        };
+        let editable = RefSignals {
+            has_editable_value: true,
+            keyboard_focusable: false,
+        };
+
+        // Tier 1: an interactive role always qualifies.
+        assert!(qualifies_for_ref(&Role::Button, &inert));
+        // Tier 2: an editable ValuePattern qualifies any role.
+        assert!(qualifies_for_ref(&Role::Document, &editable));
+        // Tier 3: keyboard-focusable + non-structural role qualifies; this is
+        // the rule that surfaces custom controls UIA does not classify.
+        assert!(qualifies_for_ref(
+            &Role::Unknown("Custom".into()),
+            &focusable
+        ));
+        assert!(qualifies_for_ref(&Role::Image, &focusable));
+        // Structural roles never qualify on focus alone - a focusable pane or
+        // group must not flood the ref map.
+        assert!(!qualifies_for_ref(&Role::Generic, &focusable));
+        assert!(!qualifies_for_ref(&Role::Group, &focusable));
+        assert!(!qualifies_for_ref(&Role::Window, &focusable));
+        // A non-structural role with no signal at all stays unreffed.
+        assert!(!qualifies_for_ref(&Role::Unknown("Custom".into()), &inert));
     }
 }
