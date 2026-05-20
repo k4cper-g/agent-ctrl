@@ -71,6 +71,7 @@ fn run_fixture_flow() {
     run.exercise_button_click();
     run.exercise_text_field();
     run.exercise_selection();
+    run.exercise_offscreen_item();
     run.exercise_checkbox();
     run.exercise_slider();
     run.exercise_password();
@@ -359,6 +360,39 @@ impl FixtureRun<'_> {
             [
                 "wait-for",
                 "Second",
+                "--role",
+                "option",
+                "--state",
+                "selected",
+                "--timeout",
+                "5000",
+                "--session",
+                "fixture",
+            ],
+        );
+    }
+
+    /// A listbox option scrolled out of the viewport must still be
+    /// actionable. `double-click` is a pure pointer action - it positions the
+    /// cursor at the element's bounding-rectangle centre - so it only lands
+    /// on the right row if the action path first realized and scrolled the
+    /// off-screen item into view. An off-screen item reports a `{0,0,0,0}`
+    /// rectangle, so without that step the click would land at the screen
+    /// origin and the row would never become selected.
+    fn exercise_offscreen_item(&self) {
+        self.snapshot();
+        let option = self.find("Item 20", "option");
+        run_cli(
+            self.cli,
+            self.home,
+            ["double-click", option.trim(), "--session", "fixture"],
+        );
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "wait-for",
+                "Item 20",
                 "--role",
                 "option",
                 "--state",

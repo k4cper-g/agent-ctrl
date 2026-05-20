@@ -53,28 +53,29 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationElementArray, IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
     IUIAutomationRangeValuePattern, IUIAutomationScrollItemPattern,
     IUIAutomationSelectionItemPattern, IUIAutomationSelectionPattern, IUIAutomationTogglePattern,
-    IUIAutomationTreeWalker, IUIAutomationValuePattern, IUIAutomationWindowPattern,
-    ToggleState_Indeterminate, ToggleState_Off, ToggleState_On, TreeScope, TreeScope_Children,
-    TreeScope_Element, TreeScope_Subtree, UIA_AutomationIdPropertyId,
-    UIA_BoundingRectanglePropertyId, UIA_ButtonControlTypeId, UIA_CalendarControlTypeId,
-    UIA_CheckBoxControlTypeId, UIA_ClassNamePropertyId, UIA_ComboBoxControlTypeId,
-    UIA_ControlTypePropertyId, UIA_CustomControlTypeId, UIA_DataGridControlTypeId,
-    UIA_DataItemControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId, UIA_HasKeyboardFocusPropertyId,
-    UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HelpTextPropertyId,
-    UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId,
-    UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId,
-    UIA_IsPasswordPropertyId, UIA_IsRequiredForFormPropertyId, UIA_LevelPropertyId,
-    UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuBarControlTypeId,
-    UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_PaneControlTypeId,
-    UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId, UIA_RangeValuePatternId,
-    UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_SelectionItemPatternId,
-    UIA_SelectionPatternId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
-    UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
-    UIA_StatusBarControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
-    UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_ThumbControlTypeId,
-    UIA_TitleBarControlTypeId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
-    UIA_ToolTipControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+    IUIAutomationTreeWalker, IUIAutomationValuePattern, IUIAutomationVirtualizedItemPattern,
+    IUIAutomationWindowPattern, ToggleState_Indeterminate, ToggleState_Off, ToggleState_On,
+    TreeScope, TreeScope_Children, TreeScope_Element, TreeScope_Subtree,
+    UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId, UIA_ButtonControlTypeId,
+    UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId, UIA_ClassNamePropertyId,
+    UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId, UIA_CustomControlTypeId,
+    UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
+    UIA_HasKeyboardFocusPropertyId, UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId,
+    UIA_HelpTextPropertyId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
+    UIA_InvokePatternId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
+    UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId, UIA_IsRequiredForFormPropertyId,
+    UIA_LevelPropertyId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_NamePropertyId,
+    UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
+    UIA_RangeValuePatternId, UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId,
+    UIA_SelectionItemPatternId, UIA_SelectionPatternId, UIA_SemanticZoomControlTypeId,
+    UIA_SeparatorControlTypeId, UIA_SliderControlTypeId, UIA_SpinnerControlTypeId,
+    UIA_SplitButtonControlTypeId, UIA_StatusBarControlTypeId, UIA_TabControlTypeId,
+    UIA_TabItemControlTypeId, UIA_TableControlTypeId, UIA_TextControlTypeId,
+    UIA_ThumbControlTypeId, UIA_TitleBarControlTypeId, UIA_TogglePatternId,
+    UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId, UIA_TreeControlTypeId,
+    UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_VirtualizedItemPatternId,
     UIA_WindowControlTypeId, UIA_WindowPatternId, WindowVisualState_Normal, UIA_CONTROLTYPE_ID,
     UIA_PROPERTY_ID,
 };
@@ -1374,7 +1375,7 @@ fn act_wait(ms: u64) -> Result<ActionResult> {
 fn act_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "click")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
 
     if entry.role == Role::Button {
         return try_invoke(&element)
@@ -1453,7 +1454,7 @@ fn act_focus(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
         action: "resolve".into(),
         reason: "no prior snapshot - call snapshot before act".into(),
     })?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
 
     // SAFETY: `element` is a valid COM interface.
     unsafe { element.SetFocus() }.map_err(|e| Error::Action {
@@ -1470,7 +1471,7 @@ fn act_fill(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<ActionRe
         action: "resolve".into(),
         reason: "no prior snapshot - call snapshot before act".into(),
     })?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
 
     // SAFETY: `element` is a valid COM interface.
     let pattern: IUIAutomationValuePattern =
@@ -1515,7 +1516,7 @@ fn lookup_ref(state: &WorkerState, ref_id: &RefId) -> Result<RefEntry> {
 fn act_select(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "select")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
 
     if let Some(pattern) = selection_item_pattern_if_named(&element, value) {
         // SAFETY: `pattern` is a valid IUIAutomationSelectionItemPattern.
@@ -1563,7 +1564,7 @@ fn act_select(state: &WorkerState, ref_id: &RefId, value: &str) -> Result<Action
 fn act_scroll_into_view(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "scroll_into_view")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
 
     // SAFETY: `element` is valid; pattern probe returns Err if unsupported.
     let pattern: IUIAutomationScrollItemPattern = unsafe {
@@ -1597,7 +1598,7 @@ fn act_select_all(state: &WorkerState, ref_id: Option<&RefId>) -> Result<ActionR
 fn act_toggle(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "toggle")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
     let pattern: IUIAutomationTogglePattern =
         unsafe { element.GetCurrentPatternAs(UIA_TogglePatternId) }.map_err(|e| Error::Action {
             action: "toggle".into(),
@@ -1613,7 +1614,7 @@ fn act_toggle(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
 fn act_check(state: &WorkerState, ref_id: &RefId, desired: bool) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, if desired { "check" } else { "uncheck" })?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
     let pattern: IUIAutomationTogglePattern =
         unsafe { element.GetCurrentPatternAs(UIA_TogglePatternId) }.map_err(|e| Error::Action {
             action: if desired { "check" } else { "uncheck" }.into(),
@@ -1650,7 +1651,7 @@ fn act_check(state: &WorkerState, ref_id: &RefId, desired: bool) -> Result<Actio
 fn act_clear(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "clear")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
 
     if let Ok(pattern) =
         unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
@@ -2027,7 +2028,7 @@ fn act_key_up(state: &WorkerState, key: &str) -> Result<ActionResult> {
 fn act_double_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "double_click")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
     let (cx, cy) = element_center_physical(&element)?;
     let (ax, ay) = screen_to_absolute(cx, cy);
     ensure_foreground(state, "double_click")?;
@@ -2047,7 +2048,7 @@ fn act_double_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult>
 fn act_right_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "right_click")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
     pointer_click(state, &element, MouseButton::Right, "right_click")
 }
 
@@ -2075,7 +2076,7 @@ fn pointer_click(
 fn act_hover(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult> {
     let entry = lookup_ref(state, ref_id)?;
     let hwnd = require_hwnd(state, "hover")?;
-    let element = resolve_element(&state.automation, hwnd, &entry)?;
+    let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
     let (cx, cy) = element_center_physical(&element)?;
     let (ax, ay) = screen_to_absolute(cx, cy);
     ensure_foreground(state, "hover")?;
@@ -2104,7 +2105,7 @@ fn act_scroll(
 
     if let Some(rid) = ref_id {
         let entry = lookup_ref(state, rid)?;
-        let element = resolve_element(&state.automation, hwnd, &entry)?;
+        let element = resolve_element_for_action(&state.automation, hwnd, &entry)?;
         let (cx, cy) = element_center_physical(&element)?;
         let (ax, ay) = screen_to_absolute(cx, cy);
         inputs.push(make_mouse_move_absolute(ax, ay));
@@ -2140,8 +2141,8 @@ fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResul
     let from_entry = lookup_ref(state, from)?;
     let to_entry = lookup_ref(state, to)?;
 
-    let from_element = resolve_element(&state.automation, hwnd, &from_entry)?;
-    let to_element = resolve_element(&state.automation, hwnd, &to_entry)?;
+    let from_element = resolve_element_for_action(&state.automation, hwnd, &from_entry)?;
+    let to_element = resolve_element_for_action(&state.automation, hwnd, &to_entry)?;
 
     let (fx, fy) = element_center_physical(&from_element)?;
     let (tx, ty) = element_center_physical(&to_element)?;
@@ -3637,6 +3638,77 @@ fn resolve_element(
             target.role, target.name, target.nth
         ),
     })
+}
+
+/// Resolve a `RefId` for a *mutating* action.
+///
+/// Like [`resolve_element`], then additionally materializes and reveals the
+/// element via [`realize_for_action`] so a virtualized list/grid item is
+/// realized and an off-screen item is scrolled into its container's viewport
+/// before the action runs. When that scroll happens the element is
+/// **re-resolved**: a list/grid commonly rebuilds its item elements as it
+/// scrolls, so the pre-scroll handle would still report the old (off-screen)
+/// `BoundingRectangle` and a pointer action would miss. Read-only paths
+/// (`screenshot --target ref`) deliberately stay on plain [`resolve_element`]
+/// so they never scroll the target app as a side effect.
+fn resolve_element_for_action(
+    automation: &IUIAutomation,
+    hwnd: HWND,
+    target: &RefEntry,
+) -> Result<IUIAutomationElement> {
+    let element = resolve_element(automation, hwnd, target)?;
+    if realize_for_action(&element) {
+        // Scrolled an off-screen element into view; re-resolve so the caller
+        // reads a fresh handle whose `BoundingRectangle` is the new position.
+        return resolve_element(automation, hwnd, target);
+    }
+    Ok(element)
+}
+
+/// Best-effort: bring an element into a state where an action can land on it.
+/// Returns `true` when it scrolled/realized the element, so the caller knows
+/// the handle is stale and should be re-resolved.
+///
+/// Returns `false` immediately when the element is already on-screen (the
+/// common case). Otherwise: `VirtualizedItemPattern::Realize` turns a
+/// virtualized placeholder into a real element (and scrolls it into view), and
+/// `ScrollItemPattern` scrolls a realized-but-off-screen item back into its
+/// container's viewport - so a pointer action reads a valid on-screen
+/// `BoundingRectangle`, and a pattern action runs against a materialized
+/// element.
+///
+/// Every step is best-effort: elements that don't support these patterns are
+/// left untouched, and failures are swallowed - the action itself surfaces
+/// the real error if the element genuinely cannot be acted on.
+fn realize_for_action(element: &IUIAutomationElement) -> bool {
+    // An on-screen element needs neither realization nor scrolling; skip the
+    // pattern probes and the settle delay entirely - the common case.
+    // SAFETY: `element` is a valid COM interface.
+    if !unsafe { element.CurrentIsOffscreen() }.is_ok_and(BOOL::as_bool) {
+        return false;
+    }
+
+    // SAFETY: `element` is a valid COM interface; UIA pattern IDs are well-known.
+    if let Ok(pattern) = unsafe {
+        element.GetCurrentPatternAs::<IUIAutomationVirtualizedItemPattern>(
+            UIA_VirtualizedItemPatternId,
+        )
+    } {
+        // SAFETY: `pattern` is a valid IUIAutomationVirtualizedItemPattern.
+        let _ = unsafe { pattern.Realize() };
+    }
+    // SAFETY: `element` is a valid COM interface.
+    if let Ok(pattern) = unsafe {
+        element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
+    } {
+        // SAFETY: `pattern` is a valid IUIAutomationScrollItemPattern.
+        let _ = unsafe { pattern.ScrollIntoView() };
+    }
+
+    // Let the container finish scrolling and relayout so the re-resolved
+    // element's `BoundingRectangle` is current before a pointer action reads it.
+    std::thread::sleep(Duration::from_millis(40));
+    true
 }
 
 /// Mid-tier resolver: pre-order DFS for the element whose packed `RuntimeId`

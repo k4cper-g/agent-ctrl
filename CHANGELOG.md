@@ -20,6 +20,14 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
   the fixture round-trips every emitted ref to guard them against drift.
 - UIA fixture gained a trackbar (slider) and a password edit for
   deterministic `RangeValuePattern` and `IsPassword` coverage.
+- Windows UIA ref-targeted actions now handle off-screen and virtualized
+  targets: before acting, the resolver realizes a `VirtualizedItemPattern`
+  placeholder and scrolls an off-screen list/grid item into its container's
+  viewport (then re-resolves for a fresh handle), so `click` / `double-click`
+  / `drag` and the rest land correctly on an item that scrolled out of view
+  since the snapshot. `screenshot --target ref` is exempt so a capture never
+  scrolls the app. The fixture listbox carries 30 items - most off-screen -
+  to cover this.
 
 ### Changed
 

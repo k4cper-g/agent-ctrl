@@ -163,6 +163,17 @@ unsupported. Synthetic input (`SendInput`) requires the pinned window to be
 foreground; the surface brings it forward first and reports a clear error if
 UIPI/UAC blocks injection.
 
+**Off-screen / virtualized targets.** Every ref-targeted *action* routes
+through a resolve step that, when the target element is off-screen, realizes
+it (`VirtualizedItemPattern.Realize`), scrolls it into its container's
+viewport (`ScrollItemPattern.ScrollIntoView`), and then re-resolves for a
+fresh handle (a list/grid commonly rebuilds item elements as it scrolls, so
+the pre-scroll handle would report a stale `BoundingRectangle`). So
+`click` / `double-click` / `drag` / etc. land correctly on a list or grid
+item an agent referenced from a snapshot even if it has since scrolled out of
+view. `screenshot --target ref` deliberately skips this so a capture never
+scrolls the target app as a side effect.
+
 ## 5. App and window context
 
 | Field | Source |
@@ -312,7 +323,7 @@ Things UIA exposes that we are deliberately not surfacing in v0.1:
 
 - **Annotations / live regions** - `AnnotationPattern`, `LiveSetting`. Useful for screen readers; not for agents (yet).
 - **Text patterns** - full `TextPattern` access (text ranges, attributes, find). Massive surface, deferred to a separate text-aware iteration.
-- **Virtualization** - `VirtualizedItemPattern` realisation. We will hit this when snapshotting large list/grid controls (Outlook, Excel). Track as a known gap; for v0.1 we capture only realised items.
+- **Virtualization (snapshot side)** - a snapshot still captures only the *realised* items of a large virtualized list/grid; off-screen rows a provider hasn't materialised aren't in the tree. *Action-time* virtualization is handled (see §4): a ref-targeted action realises a `VirtualizedItemPattern` placeholder and scrolls an off-screen item into view before acting. Capturing unrealised items into the snapshot itself (walking a container via `ItemContainerPattern.FindItemByProperty`) remains a gap - for now, scroll and re-`snapshot` to bring more rows into the tree.
 - **Drag-and-drop** - `DragPattern` / `DropTargetPattern`. Deferred.
 - **Custom annotation properties** - UIA lets apps expose arbitrary string properties. Skip until a concrete use case appears.
 - **Direct MSAA path.** Older Win32 apps with no native UIA support fall through Windows' built-in UIA→MSAA bridge, which gives reduced-fidelity trees but is "good enough" for v0.1. If a critical real app needs more, we add a parallel `IAccessible` walker; until then, we trust the bridge.

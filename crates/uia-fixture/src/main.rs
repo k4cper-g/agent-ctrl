@@ -43,6 +43,7 @@ mod windows_app {
         GWLP_USERDATA, HMENU, IDC_ARROW, LBS_NOTIFY, LB_ADDSTRING, LB_SETCURSEL, MSG, SW_SHOW,
         WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW,
         WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+        WS_VSCROLL,
     };
 
     const CLASS_NAME: PCWSTR = w!("AgentCtrlUiaFixtureWindow");
@@ -310,7 +311,7 @@ mod windows_app {
             ControlSpec {
                 class_name: w!("LISTBOX"),
                 text: "",
-                style: control_style(LBS_NOTIFY) | WS_BORDER | WS_TABSTOP,
+                style: control_style(LBS_NOTIFY) | WS_BORDER | WS_TABSTOP | WS_VSCROLL,
                 ex_style: WS_EX_CLIENTEDGE,
                 x: 280,
                 y: 168,
@@ -322,6 +323,11 @@ mod windows_app {
         add_list_item(list, "First");
         add_list_item(list, "Second");
         add_list_item(list, "Third");
+        // The 96px-tall listbox shows ~6 rows; the rest scroll off-screen so
+        // an action on a high-numbered item exercises realize/scroll-into-view.
+        for n in 4..=30 {
+            add_list_item(list, &format!("Item {n:02}"));
+        }
         SendMessageW(list, LB_SETCURSEL, WPARAM(0), LPARAM(0));
         Ok(())
     }
