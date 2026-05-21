@@ -37,13 +37,13 @@ mod windows_app {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDlgItem, GetMessageW,
-        LoadCursorW, PostQuitMessage, RegisterClassW, SendMessageW, SetTimer, SetWindowTextW,
-        ShowWindow, TranslateMessage, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CBS_DROPDOWNLIST,
-        CB_ADDSTRING, CB_SETCURSEL, CW_USEDEFAULT, ES_AUTOHSCROLL, ES_LEFT, ES_PASSWORD,
-        GWLP_USERDATA, HMENU, IDC_ARROW, LBS_NOTIFY, LB_ADDSTRING, LB_SETCURSEL, MSG, SW_SHOW,
-        WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW,
-        WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
-        WS_VSCROLL,
+        LoadCursorW, PostQuitMessage, RegisterClassW, SendMessageW, SetTimer, SetWindowPos,
+        SetWindowTextW, ShowWindow, TranslateMessage, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON,
+        CBS_DROPDOWNLIST, CB_ADDSTRING, CB_SETCURSEL, CW_USEDEFAULT, ES_AUTOHSCROLL, ES_LEFT,
+        ES_PASSWORD, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW, LBS_NOTIFY, LB_ADDSTRING,
+        LB_SETCURSEL, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD,
+        WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
     };
 
     const CLASS_NAME: PCWSTR = w!("AgentCtrlUiaFixtureWindow");
@@ -61,6 +61,8 @@ mod windows_app {
     const ID_DELAY: i32 = 107;
     const ID_SLIDER: i32 = 108;
     const ID_PASSWORD: i32 = 109;
+    const ID_COVERED: i32 = 110;
+    const ID_OVERLAY: i32 = 111;
     const ID_DIALOG_OK: i32 = 201;
     const TIMER_DELAY_READY: usize = 1;
     const TIMER_AUTO_CLOSE: usize = 2;
@@ -129,7 +131,7 @@ mod windows_app {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 760,
-                520,
+                600,
                 None,
                 None,
                 instance,
@@ -218,6 +220,53 @@ mod windows_app {
         create_choice_controls(hwnd)?;
         create_command_controls(hwnd)?;
         create_range_controls(hwnd)?;
+        create_occlusion_controls(hwnd)?;
+        Ok(())
+    }
+
+    /// A button fully covered by a second button created on top of it. Used
+    /// to exercise occlusion detection: a pointer action on "Covered" must be
+    /// rejected because "Overlay" sits over its centre in the sibling z-order.
+    unsafe fn create_occlusion_controls(hwnd: HWND) -> windows::core::Result<()> {
+        create_child(
+            hwnd,
+            ControlSpec {
+                class_name: w!("BUTTON"),
+                text: "Covered",
+                style: WS_TABSTOP,
+                ex_style: WINDOW_EX_STYLE::default(),
+                x: 24,
+                y: 470,
+                width: 200,
+                height: 36,
+                id: ID_COVERED,
+            },
+        )?;
+        let overlay = create_child(
+            hwnd,
+            ControlSpec {
+                class_name: w!("BUTTON"),
+                text: "Overlay",
+                style: WS_TABSTOP,
+                ex_style: WINDOW_EX_STYLE::default(),
+                x: 24,
+                y: 470,
+                width: 200,
+                height: 36,
+                id: ID_OVERLAY,
+            },
+        )?;
+        // Raise "Overlay" to the top of the sibling z-order so it deterministically
+        // wins hit-tests over "Covered" - child z-order at creation is not guaranteed.
+        let _ = SetWindowPos(
+            overlay,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
         Ok(())
     }
 

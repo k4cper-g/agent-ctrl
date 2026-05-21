@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime};
 use windows::core::Result as WinResult;
 use windows::core::{BSTR, VARIANT};
 use windows::Win32::Foundation::LPARAM;
-use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HGLOBAL, HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HGLOBAL, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
     GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -2032,6 +2032,7 @@ fn act_double_click(state: &WorkerState, ref_id: &RefId) -> Result<ActionResult>
     let (cx, cy) = element_center_physical(&element)?;
     let (ax, ay) = screen_to_absolute(cx, cy);
     ensure_foreground(state, "double_click")?;
+    verify_unoccluded(&state.automation, &element, (cx, cy), "double_click")?;
     send_inputs(
         &[
             make_mouse_move_absolute(ax, ay),
@@ -2061,6 +2062,7 @@ fn pointer_click(
     let (cx, cy) = element_center_physical(element)?;
     let (ax, ay) = screen_to_absolute(cx, cy);
     ensure_foreground(state, action)?;
+    verify_unoccluded(&state.automation, element, (cx, cy), action)?;
     send_inputs(
         &[
             make_mouse_move_absolute(ax, ay),
@@ -2142,22 +2144,35 @@ fn act_drag(state: &WorkerState, from: &RefId, to: &RefId) -> Result<ActionResul
     let to_entry = lookup_ref(state, to)?;
 
     let from_element = resolve_element_for_action(&state.automation, hwnd, &from_entry)?;
-    let to_element = resolve_element_for_action(&state.automation, hwnd, &to_entry)?;
-
     let (fx, fy) = element_center_physical(&from_element)?;
-    let (tx, ty) = element_center_physical(&to_element)?;
     let (fax, fay) = screen_to_absolute(fx, fy);
-    let (tax, tay) = screen_to_absolute(tx, ty);
 
     ensure_foreground(state, "drag")?;
-    let mut inputs = Vec::with_capacity(10);
-    inputs.push(make_mouse_move_absolute(fax, fay));
-    inputs.push(make_mouse_button(MouseButton::Left, true));
-    for (x, y) in interpolate_absolute_points((fax, fay), (tax, tay), 8) {
-        inputs.push(make_mouse_move_absolute(x, y));
+    send_inputs(
+        &[
+            make_mouse_move_absolute(fax, fay),
+            make_mouse_button(MouseButton::Left, true),
+        ],
+        "drag",
+    )?;
+
+    let finish = (|| {
+        let to_element = resolve_element_for_action(&state.automation, hwnd, &to_entry)?;
+        let (tx, ty) = element_center_physical(&to_element)?;
+        let (tax, tay) = screen_to_absolute(tx, ty);
+
+        let mut inputs = Vec::with_capacity(9);
+        for (x, y) in interpolate_absolute_points((fax, fay), (tax, tay), 8) {
+            inputs.push(make_mouse_move_absolute(x, y));
+        }
+        inputs.push(make_mouse_button(MouseButton::Left, false));
+        send_inputs(&inputs, "drag")
+    })();
+
+    if finish.is_err() {
+        let _ = send_inputs(&[make_mouse_button(MouseButton::Left, false)], "drag");
     }
-    inputs.push(make_mouse_button(MouseButton::Left, false));
-    send_inputs(&inputs, "drag")
+    finish
 }
 
 // ---------- Window / process targeting ----------
@@ -2960,7 +2975,135 @@ fn element_center_physical(element: &IUIAutomationElement) -> Result<(i32, i32)>
         action: "mouse".into(),
         reason: format!("CurrentBoundingRectangle: {e}"),
     })?;
+    rect_center_physical(r)
+}
+
+fn rect_center_physical(r: RECT) -> Result<(i32, i32)> {
+    if r.right <= r.left || r.bottom <= r.top {
+        return Err(Error::Action {
+            action: "mouse".into(),
+            reason: format!(
+                "element has empty BoundingRectangle ({}, {}, {}, {})",
+                r.left, r.top, r.right, r.bottom
+            ),
+        });
+    }
     Ok(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+}
+
+/// Compare two UIA elements for identity via `IUIAutomation::CompareElements`.
+fn compare_elements(
+    automation: &IUIAutomation,
+    a: &IUIAutomationElement,
+    b: &IUIAutomationElement,
+) -> bool {
+    // SAFETY: all three are valid COM interfaces.
+    unsafe { automation.CompareElements(a, b) }.is_ok_and(BOOL::as_bool)
+}
+
+/// Whether `ancestor` lies on the Control-view parent chain of `descendant`.
+fn is_ancestor(
+    automation: &IUIAutomation,
+    walker: &IUIAutomationTreeWalker,
+    ancestor: &IUIAutomationElement,
+    descendant: &IUIAutomationElement,
+) -> bool {
+    // SAFETY: `walker` and `descendant` are valid COM interfaces; at the tree
+    // root `GetParentElement` returns Err, which ends the climb.
+    let mut current = unsafe { walker.GetParentElement(descendant) }.ok();
+    // Bound the climb - a real UIA tree is shallow, but never trust it to be.
+    for _ in 0..64 {
+        let Some(node) = current else { return false };
+        if compare_elements(automation, &node, ancestor) {
+            return true;
+        }
+        // SAFETY: `node` is a valid COM interface obtained from the walker.
+        current = unsafe { walker.GetParentElement(&node) }.ok();
+    }
+    false
+}
+
+/// Whether `a` and `b` are the same element, or one is an ancestor of the
+/// other - i.e. they sit on a single root-to-element path. A click whose
+/// hit-test element is on the target's line still reaches the target.
+fn elements_on_same_line(
+    automation: &IUIAutomation,
+    a: &IUIAutomationElement,
+    b: &IUIAutomationElement,
+) -> bool {
+    if compare_elements(automation, a, b) {
+        return true;
+    }
+    // SAFETY: `automation` is a valid COM interface.
+    let Ok(walker) = (unsafe { automation.ControlViewWalker() }) else {
+        // Without a walker we can't prove occlusion; don't block the click.
+        return true;
+    };
+    is_ancestor(automation, &walker, a, b) || is_ancestor(automation, &walker, b, a)
+}
+
+/// Short human description of an element, for occlusion error messages.
+fn describe_element(element: &IUIAutomationElement) -> String {
+    // SAFETY: `element` is a valid COM interface; failed reads fall back to defaults.
+    let name = unsafe { element.CurrentName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let ct = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+    let class = unsafe { element.CurrentClassName() }
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let role = promoted_role(element, ct, &class, None);
+    if name.is_empty() {
+        format!("a different element (role {role:?})")
+    } else {
+        format!("a different element (role {role:?}, name {name:?})")
+    }
+}
+
+/// Verify a synthetic click at `point` (physical screen pixels) will land on
+/// `target` rather than something stacked on top of it.
+///
+/// Asks UIA which element is actually at `point`. The click is fine when that
+/// element is `target`, a descendant of it, or an ancestor of it - all the
+/// same control as far as a click is concerned. It is occluded when the point
+/// belongs to an unrelated element (another window, a popup, a sibling
+/// control drawn on top); the caller then fails loudly with an actionable
+/// message instead of clicking the wrong thing. An inconclusive probe (UIA
+/// returns no element at the point) does not block the click.
+///
+/// Call this *after* `ensure_foreground`: occlusion is relative to the current
+/// z-order, and bringing the target's window forward is itself what clears the
+/// most common occluder - another application's window.
+fn verify_unoccluded(
+    automation: &IUIAutomation,
+    target: &IUIAutomationElement,
+    point: (i32, i32),
+    action: &str,
+) -> Result<()> {
+    let pt = POINT {
+        x: point.0,
+        y: point.1,
+    };
+    // SAFETY: `automation` is a valid COM interface; `ElementFromPoint` takes
+    // POINT by value and returns the topmost element at that screen point.
+    let Ok(hit) = (unsafe { automation.ElementFromPoint(pt) }) else {
+        return Ok(());
+    };
+    if elements_on_same_line(automation, &hit, target) {
+        return Ok(());
+    }
+    Err(Error::Action {
+        action: action.into(),
+        reason: format!(
+            "target is occluded - the point ({}, {}) is over {}; bring the target's \
+             window forward or move/close what is on top of it, then retry",
+            point.0,
+            point.1,
+            describe_element(&hit),
+        ),
+    })
 }
 
 fn element_region_physical(element: &IUIAutomationElement) -> Result<Region> {
@@ -4208,6 +4351,37 @@ mod tests {
         // Non-finite values fall back to the float formatting rather than
         // truncating into a bogus integer.
         assert_eq!(format_range_value(f64::INFINITY), "inf");
+    }
+
+    #[test]
+    fn rect_center_rejects_empty_bounds() {
+        use super::rect_center_physical;
+        use windows::Win32::Foundation::RECT;
+
+        assert_eq!(
+            rect_center_physical(RECT {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40,
+            })
+            .unwrap(),
+            (20, 30)
+        );
+        assert!(rect_center_physical(RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        })
+        .is_err());
+        assert!(rect_center_physical(RECT {
+            left: 50,
+            top: 50,
+            right: 40,
+            bottom: 60,
+        })
+        .is_err());
     }
 
     /// The snapshot walk and the action-time `nth` walk must agree on which

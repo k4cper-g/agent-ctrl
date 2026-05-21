@@ -72,6 +72,7 @@ fn run_fixture_flow() {
     run.exercise_text_field();
     run.exercise_selection();
     run.exercise_offscreen_item();
+    run.exercise_occlusion();
     run.exercise_checkbox();
     run.exercise_slider();
     run.exercise_password();
@@ -405,6 +406,26 @@ impl FixtureRun<'_> {
         );
     }
 
+    /// A control covered by another control must not be silently mis-clicked.
+    /// Occlusion detection probes `ElementFromPoint` at the target's centre;
+    /// for the fixture's "Covered" button that point belongs to "Overlay", so
+    /// a pointer action is rejected with an actionable error. `double-click`
+    /// is used deliberately - a `click` on a button takes the InvokePattern
+    /// path, which bypasses pointer hit-testing and so is not occludable.
+    fn exercise_occlusion(&self) {
+        self.snapshot();
+        let covered = self.find("Covered", "button");
+        let err = run_cli_failing(
+            self.cli,
+            self.home,
+            &["double-click", covered.trim(), "--session", "fixture"],
+        );
+        assert!(
+            err.contains("occluded"),
+            "expected a double-click on the covered button to be rejected as occluded, got: {err}"
+        );
+    }
+
     fn exercise_checkbox(&self) {
         let checkbox = self.find("Enable advanced mode", "checkbox");
         let checked = run_cli(
@@ -692,7 +713,14 @@ fn run_cli<const N: usize>(cli: &Path, home: &Path, args: [&str; N]) -> String {
     run_cli_vec(cli, home, &args)
 }
 
-fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
+/// Spawn agent-ctrl, drain its pipes concurrently, and return
+/// `(status, stdout, stderr)`. A 30s wall-clock overrun is always a hard test
+/// failure and panics here.
+fn run_cli_capture(
+    cli: &Path,
+    home: &Path,
+    args: &[&str],
+) -> (std::process::ExitStatus, String, String) {
     use std::io::Read;
 
     eprintln!("running agent-ctrl {args:?}");
@@ -742,16 +770,30 @@ fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
         std::thread::sleep(Duration::from_millis(25));
     };
 
-    let stdout = collect(stdout_reader);
-    if !status.success() {
-        let stderr = collect(stderr_reader);
-        panic!(
-            "agent-ctrl failed with status {:?}\nargs: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            status.code(),
-            args,
-        );
-    }
+    (status, collect(stdout_reader), collect(stderr_reader))
+}
+
+/// Run agent-ctrl expecting success; returns stdout. Panics on a non-zero exit.
+fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
+    let (status, stdout, stderr) = run_cli_capture(cli, home, args);
+    assert!(
+        status.success(),
+        "agent-ctrl failed with status {:?}\nargs: {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        status.code(),
+    );
     stdout
+}
+
+/// Run agent-ctrl expecting a *non-zero* exit; returns stdout+stderr joined so
+/// the caller can assert on the error text. Panics if the command unexpectedly
+/// succeeds.
+fn run_cli_failing(cli: &Path, home: &Path, args: &[&str]) -> String {
+    let (status, stdout, stderr) = run_cli_capture(cli, home, args);
+    assert!(
+        !status.success(),
+        "expected agent-ctrl to fail but it succeeded\nargs: {args:?}\nstdout:\n{stdout}"
+    );
+    format!("{stdout}{stderr}")
 }
 
 fn assert_png(path: &Path, min_width: u32, min_height: u32) {

@@ -174,6 +174,16 @@ item an agent referenced from a snapshot even if it has since scrolled out of
 view. `screenshot --target ref` deliberately skips this so a capture never
 scrolls the target app as a side effect.
 
+**Occlusion detection.** A synthetic pointer click (`click`'s pointer
+fallback, `double-click`, `right-click`) hits whatever is topmost at the
+target's centre point - so a popup, a sibling control, or another window
+drawn over the target would silently steal the click. After bringing the
+window forward, the surface asks UIA (`ElementFromPoint`) which element is
+actually at that point: if it is the target, a descendant, or an ancestor of
+it the click proceeds; otherwise the action fails with an error naming the
+obstruction. `InvokePattern`-based `click` is exempt - it activates the
+control directly and never depends on what is visually on top.
+
 ## 5. App and window context
 
 | Field | Source |

@@ -28,6 +28,11 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
   since the snapshot. `screenshot --target ref` is exempt so a capture never
   scrolls the app. The fixture listbox carries 30 items - most off-screen -
   to cover this.
+- Windows UIA synthetic pointer clicks (`click`'s pointer fallback,
+  `double-click`, `right-click`) now verify the target is not occluded: after
+  the window is brought forward, `ElementFromPoint` confirms the target (or a
+  relative of it) is topmost at the click point, otherwise the action fails
+  with an error naming what is in the way instead of clicking through to it.
 
 ### Changed
 
