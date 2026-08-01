@@ -7,7 +7,9 @@ use std::path::PathBuf;
 
 fn source(path: &str) -> String {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    std::fs::read_to_string(root.join(path)).expect("contract source should be readable")
+    std::fs::read_to_string(root.join(path))
+        .expect("contract source should be readable")
+        .replace("\r\n", "\n")
 }
 
 fn match_labels<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
