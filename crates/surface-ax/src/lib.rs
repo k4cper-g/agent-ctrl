@@ -14,6 +14,8 @@
 // generated code; the allow above suppresses the resulting clippy warnings
 // crate-wide so the workspace `-D warnings` lint stays clean.
 
+#[cfg(target_os = "macos")]
+use agent_ctrl_core::capability;
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Error, Result, Snapshot, SnapshotOptions, Surface,
     SurfaceKind, WindowInfo,
@@ -78,13 +80,14 @@ impl AxSurface {
             }
             Ok(Self {
                 capabilities: CapabilitySet::new()
-                    .with("snapshot")
-                    .with("windows")
-                    .with("keyboard")
-                    .with("mouse")
-                    .with("drag")
-                    .with("screenshot")
-                    .with("multi_app"),
+                    .with(capability::SNAPSHOT)
+                    .with(capability::ACTIONS)
+                    .with(capability::WINDOWS)
+                    .with(capability::KEYBOARD)
+                    .with(capability::MOUSE)
+                    .with(capability::DRAG)
+                    .with(capability::SCREENSHOT)
+                    .with(capability::MULTI_APP),
                 pinned: Mutex::new(None),
                 last_snapshot: Mutex::new(None),
             })

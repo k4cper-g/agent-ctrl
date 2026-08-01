@@ -1,21 +1,24 @@
-# Next.js template
+# agent-ctrl website
 
-This is a Next.js template with shadcn/ui.
+The public Next.js site for agent-ctrl.
 
-## Adding components
+## Develop
 
 To add components to your app, run the following command:
 
 ```bash
-npx shadcn@latest add button
+npm ci
+npm run dev
 ```
 
-This will place the ui components in the `components` directory.
+## Verify
 
-## Using components
-
-To use the components in your app, import them as follows:
-
-```tsx
-import { Button } from "@/components/ui/button";
+```bash
+npm run typecheck
+npm run lint
+npm run build
 ```
+
+GitHub Pages sets `AGENT_CTRL_STATIC_EXPORT=1` and
+`NEXT_PUBLIC_BASE_PATH=/agent-ctrl`; the deployment workflow uploads
+`site/out`, not the application source.

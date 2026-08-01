@@ -8,6 +8,51 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 ### Added
 
+- Windows UIA snapshot fidelity: nodes now carry `description` (from UIA
+  `HelpText`, kept only when it adds information beyond `name`), `level` (the
+  UIA hierarchy depth for tree items, list items, and headings), and a `value`
+  for sliders and spinners (read from `RangeValuePattern` when the control has
+  no `ValuePattern`).
+- Windows UIA ref emission now includes keyboard-focusable controls with a
+  non-structural role, so custom controls UIA does not classify as an
+  interactive role still get a `@eN` ref an agent can target. The snapshot
+  walk and the action-time resolver share one `qualifies_for_ref` predicate;
+  the fixture round-trips every emitted ref to guard them against drift.
+- UIA fixture gained a trackbar (slider) and a password edit for
+  deterministic `RangeValuePattern` and `IsPassword` coverage.
+- Windows UIA ref-targeted actions now handle off-screen and virtualized
+  targets: before acting, the resolver realizes a `VirtualizedItemPattern`
+  placeholder and scrolls an off-screen list/grid item into its container's
+  viewport (then re-resolves for a fresh handle), so `click` / `double-click`
+  / `drag` and the rest land correctly on an item that scrolled out of view
+  since the snapshot. `screenshot --target ref` is exempt so a capture never
+  scrolls the app. The fixture listbox carries 30 items - most off-screen -
+  to cover this.
+- Windows UIA synthetic pointer clicks (`click`'s pointer fallback,
+  `double-click`, `right-click`) now verify the target is not occluded: after
+  the window is brought forward, `ElementFromPoint` confirms the target (or a
+  relative of it) is topmost at the click point, otherwise the action fails
+  with an error naming what is in the way instead of clicking through to it.
+
+### Changed
+
+- Windows UIA snapshots no longer expose the contents of password-protected
+  fields (`IsPassword`): such a node keeps its ref and role but reports no
+  `value`.
+
+### Fixed
+
+- Windows UIA action-time resolution no longer takes the `AutomationId`
+  fast path for refs past the first occurrence of their `(role, name)` pair.
+  AutomationIds are duplicated across repeated templates, so `FindFirst`
+  could resolve a later ref onto the first matching element; non-zero `nth`
+  now falls through to the runtime-id and `(role, name, nth)` walk that
+  count correctly.
+- Windows UIA `snapshot` no longer fails outright when the target window
+  belongs to a process it cannot `OpenProcess` (a protected system service,
+  or an elevated app driven from an unelevated agent). The accessibility
+  tree is still captured; only the `app` id/name degrade to a `pid:<n>`
+  placeholder.
 - AX window listing and `focus-window` preview using session-oriented
   `pid:<pid>:window:<index>` ids and AX `AXRaise`.
 - **Linux AT-SPI surface (`agent-ctrl-surface-atspi`), snapshot-read path.**

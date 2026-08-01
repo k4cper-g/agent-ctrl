@@ -11,8 +11,8 @@ first for the cross-platform invariants (the `Surface` trait, the `RefMap`
 `snapshot`, `find`, the `get` / `is` inspect commands, and `list_windows` -
 against a GTK app (the `crates/atspi-fixture/` fixture, then real GTK/Qt apps).
 The action vocabulary (`click`, `focus`, `fill`, ...) returns `Unsupported` and
-is a follow-up PR; the §4 action table below is the design for that work.
-Items marked *deferred* are not implemented.
+is a follow-up PR. The §4 action table below is a future design, not a list of
+implemented behavior.
 
 ## 0. How it talks to AT-SPI
 
@@ -78,7 +78,7 @@ AT-SPI has ~75 roles; most map mechanically. Mapping by *target* `Role`:
 | `spin button` | `SpinButton` | |
 | `progress bar`, `level bar` | `Generic` | Emit; `state.enabled = false`. |
 | `scroll bar`, `scroll pane`, `separator`, `filler`, `panel`, `section`, `redundant object`, `unknown` | `Generic` | Structural; stripped in `compact` mode. |
-| `heading` | `Heading` | `level` from the `level` attribute. |
+| `heading` | `Heading` | Attribute-derived `level` is deferred; currently `None`. |
 | `status bar` | `Region` | Landmark-ish. |
 | `tool tip` | `Generic` | Captured, rarely useful. |
 | `application` | `Application` (the snapshot root's parent) | Not emitted as a tree node - it's the `app` context. |
@@ -108,16 +108,20 @@ with the `Modal` state → `Dialog`.
 | `description` | `Accessible.Description` if non-empty and ≠ `name`. |
 | `value` | `EditableText`/`Text.GetText(0, char_count)` for editable text roles; else `Value.CurrentValue` (`f64` → string) for slider/spin/progress; else `None`. |
 | `bounds` | `Component.GetExtents(ATSPI_COORD_TYPE_SCREEN)` → `(x, y, w, h)` in screen pixels. (HiDPI: AT-SPI extents are already in the toolkit's pixel space; we pass them through. Per-monitor scaling refinement deferred - X11 headless is 1x anyway.) |
-| `level` | `level` entry of `Accessible.GetAttributes()` for headings/tree items; else `None`. |
+| `level` | `None` in the current implementation. Attribute-derived levels are deferred. |
 | `role`, `state` | per §1, §2. |
-| `native` | `NativeHandle::AtSpi { bus_name, path }` (see §5). |
+| `native` | Internal `NativeHandle::AtSpi { bus_name, path }` used for rediscovery; omitted from serialized snapshots. |
 
-**Dropped:** the `Accessible.GetRelationSet` graph, `GetAttributes` beyond
-`level` (app-specific strings), `Hyperlink` ranges, `Text` attribute runs -
+**Dropped:** the `Accessible.GetRelationSet` graph, `GetAttributes` (including
+`level` and app-specific strings), `Hyperlink` ranges, `Text` attribute runs -
 deferred to a text-aware iteration. `Action` keybindings are dropped (we
 surface keyboard input separately).
 
 ## 4. Action mapping ([`Action`](../crates/core/src/action.rs) → AT-SPI calls)
+
+No row in this table is implemented yet. Every `act` request currently returns
+`Unsupported`; the daemon enforces that through the missing `actions`
+capability.
 
 | `Action` | AT-SPI call | Fallback |
 |---|---|---|
@@ -135,13 +139,10 @@ surface keyboard input separately).
 | `FocusWindow` | `Component.GrabFocus()` on the frame addressed by id | n/a |
 | `Screenshot` | *deferred* - no portable AT-SPI screenshot; would shell to `gnome-screenshot` / `grim` / `import`, or capture the X11/Wayland framebuffer. v0.1 advertises no `screenshot` capability. |
 
-**v0.1 capabilities:** `snapshot`, plus `keyboard`/`mouse` only if the
-device-event API works headlessly (TBD). Realistically v0.1 advertises
-`snapshot` and the pattern-driven actions (`click`, `focus`, `fill`, `check`,
-`select`), and *not* `screenshot`, `mouse`, raw `keyboard` - the
-`CapabilitySet` reflects that and the daemon won't dispatch the rest.
+**Current capabilities:** `snapshot` and `windows`. The daemon rejects every
+action before dispatch because AT-SPI does not advertise `actions`.
 
-## 5. `NativeHandle::AtSpi`
+## 5. Internal `NativeHandle::AtSpi`
 
 ```rust
 NativeHandle::AtSpi {
@@ -150,7 +151,8 @@ NativeHandle::AtSpi {
 }
 ```
 
-The `(bus_name, path)` pair is the AT-SPI handle and is **stable within a
+This structure stays inside the surface and `RefMap`; it is never serialized
+to CLI or TypeScript clients. The `(bus_name, path)` pair is **stable within a
 session** (a GTK widget keeps its path while it exists), so it's the fast-path
 hint at action-time re-resolution - the analog of UIA's `RuntimeId`:
 
@@ -165,8 +167,8 @@ the source of truth - exactly the `RefMap` discipline the other surfaces use.
 Walk `Accessible.GetChildren()` depth-first from the snapshot root (the app's
 active top-level frame, picked from `org.a11y.atspi.Registry` per
 `SnapshotOptions::target`). Same ref-emission rule as `surface-uia`: emit a
-`RefId` for ARIA-interactive roles OR elements exposing editable text
-(`EditableText`); `nth` is the global per-snapshot pre-order count of preceding
+`RefId` for interactive or content roles; `nth` is the global per-snapshot
+pre-order count of preceding
 elements with the same `(role, name)`. `compact` strips `Generic`/`panel`/
 `filler`/`separator`/`section` wrappers. `depth` bounds the walk.
 
@@ -196,7 +198,7 @@ snapshots: deferred; snapshot one app, switch sessions / re-snapshot for another
 ## 8. Gaps & intentional drops (v0.1)
 
 - **No screenshots** - see §4. Add a backend-shell or framebuffer capture later.
-- **Synthetic input** (`type`/`press`/`mouse`/`drag`/`hover`/`double/right-click`) - depends on the AT-SPI device-event API working headlessly under Xvfb, which is uncertain; v0.1 may ship without it. `fill` (`EditableText.SetTextContents`) is the text path; `click`/`check`/`select` go through `Action`.
+- **No actions yet** - semantic actions and synthetic input all return `Unsupported`. The calls in §4 describe intended future work.
 - **Wayland vs X11** - the AT-SPI bus is the same on both; only synthetic input and screenshots differ. v0.1 (and CI) run under Xvfb (X11).
 - **Qt apps** - need `QT_ACCESSIBILITY=1`; otherwise the same bus. Untested in v0.1; GTK is the reference.
 - **Per-monitor HiDPI scaling** of `Component` extents - passed through as-is for now (headless is 1x).

@@ -5,6 +5,7 @@ import { ImageResponse } from "next/og"
 export const alt = "agent-ctrl - OS automation for AI agents"
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"
+export const dynamic = "force-static"
 
 export default async function OG() {
   const logoBuf = await readFile(

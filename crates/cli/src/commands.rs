@@ -865,6 +865,7 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
 }
 
 async fn run_tcp_daemon(bind: &str, session_name: &str, surface: SurfaceKind) -> Result<()> {
+    agent_ctrl_daemon::validate_session_name(session_name).context("invalid session name")?;
     let state = std::sync::Arc::new(DaemonState::new());
 
     // Auto-open a single surface session up front; the session id goes in
@@ -872,6 +873,12 @@ async fn run_tcp_daemon(bind: &str, session_name: &str, surface: SurfaceKind) ->
     let surface_box = agent_ctrl_daemon::open_surface(surface)
         .await
         .with_context(|| format!("opening surface {}", surface.as_str()))?;
+    let mut capabilities = surface_box
+        .capabilities()
+        .iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    capabilities.sort_unstable();
     let session_id = state.open(surface_box).await;
 
     let session_name = session_name.to_owned();
@@ -894,28 +901,34 @@ async fn run_tcp_daemon(bind: &str, session_name: &str, surface: SurfaceKind) ->
         });
     }
 
-    let result = ipc::run_tcp(state, bind, auth_for_listener, move |addr| {
-        let info = SessionFile {
-            name: session_name.clone(),
-            pid: std::process::id(),
-            endpoint: addr.to_string(),
-            version: CRATE_VERSION.to_owned(),
-            protocol_version: agent_ctrl_daemon::PROTOCOL_VERSION,
-            surface: surface_label.clone(),
-            auth_token: auth_token.clone(),
-            started_at_unix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-            daemon_session_id: session_id_str.clone(),
-        };
-        async move {
-            if let Err(e) = session_file::write(&info) {
-                tracing::warn!("failed to write session file: {e}");
-            }
-        }
-    })
+    let result = ipc::run_tcp(
+        std::sync::Arc::clone(&state),
+        bind,
+        auth_for_listener,
+        move |addr| {
+            let info = SessionFile {
+                name: session_name.clone(),
+                pid: std::process::id(),
+                endpoint: addr.to_string(),
+                version: CRATE_VERSION.to_owned(),
+                protocol_version: agent_ctrl_daemon::PROTOCOL_VERSION,
+                surface: surface_label.clone(),
+                capabilities: capabilities.clone(),
+                auth_token: auth_token.clone(),
+                started_at_unix: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+                daemon_session_id: session_id_str.clone(),
+            };
+            async move { session_file::write(&info) }
+        },
+    )
     .await;
 
+    // A startup failure can happen after the surface opens but before the
+    // listener is announced. Always give the surface its explicit shutdown
+    // hook; a normal CLI close may already have removed it.
+    let _ = state.close(session_id).await;
     // Clean up the state file on graceful exit too.
     let _ = session_file::remove(&session_for_cleanup);
     result.map_err(Into::into)
@@ -925,6 +938,7 @@ async fn run_tcp_daemon(bind: &str, session_name: &str, surface: SurfaceKind) ->
 
 fn run_open(args: &OpenArgs) -> Result<()> {
     let kind = parse_surface(&args.surface)?;
+    agent_ctrl_daemon::validate_session_name(&args.session).context("invalid session name")?;
 
     if let Some(existing) = session_file::read_alive(&args.session) {
         bail!(
@@ -961,17 +975,18 @@ fn run_open(args: &OpenArgs) -> Result<()> {
         cmd.creation_flags(0x0000_0008 | 0x0000_0200);
     }
 
-    let child = spawn_detached_child(&mut cmd).context("spawning agent-ctrl daemon child")?;
+    let mut child = spawn_detached_child(&mut cmd).context("spawning agent-ctrl daemon child")?;
     let child_pid = child.id();
 
-    let info = session_file::wait_for_alive(&args.session, Duration::from_secs(10)).ok_or_else(
-        || {
-            anyhow!(
-                "daemon child (pid {child_pid}) did not become ready within 10s; check `~/.agent-ctrl/{}.json` and stderr",
-                args.session
-            )
-        },
-    )?;
+    let Some(info) = session_file::wait_for_alive(&args.session, Duration::from_secs(10)) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!(
+            "daemon child (pid {child_pid}) did not become ready within 10s and was stopped; run `agent-ctrl daemon --bind 127.0.0.1:0 --session {} --surface {}` in a terminal for startup diagnostics",
+            args.session,
+            kind.as_str()
+        );
+    };
 
     if args.json {
         print_json(&json!({
@@ -988,6 +1003,7 @@ fn run_open(args: &OpenArgs) -> Result<()> {
 }
 
 fn run_close(session: &str, json_output: bool) -> Result<()> {
+    agent_ctrl_daemon::validate_session_name(session).context("invalid session name")?;
     let info = session_file::read_alive(session)
         .ok_or_else(|| anyhow!("no live daemon for session {session:?}"))?;
 
@@ -1642,9 +1658,13 @@ fn run_wait_for(args: &WaitForArgs) -> Result<()> {
     match outcome {
         WaitOutcome::Matched { found, elapsed_ms } => {
             if let Some(m) = found {
+                let reference = m
+                    .ref_id
+                    .as_ref()
+                    .map_or_else(|| "unreferenced".to_owned(), |id| display_ref(&id.0));
                 println!(
                     "ok matched {} {} {:?} after {}ms",
-                    display_ref(&m.ref_id.0),
+                    reference,
                     role_label(&m.role),
                     m.name,
                     elapsed_ms
@@ -2355,6 +2375,7 @@ fn session_public_json(info: &SessionFile) -> serde_json::Value {
         "version": &info.version,
         "protocol_version": info.protocol_version,
         "surface": &info.surface,
+        "capabilities": &info.capabilities,
         "started_at_unix": info.started_at_unix,
         "daemon_session_id": &info.daemon_session_id,
     })
@@ -2424,11 +2445,20 @@ fn parse_region(s: &str) -> Result<Region> {
 }
 
 fn require_session(name: &str) -> Result<SessionFile> {
-    session_file::read_alive(name).ok_or_else(|| {
+    agent_ctrl_daemon::validate_session_name(name).context("invalid session name")?;
+    let info = session_file::read_alive(name).ok_or_else(|| {
         anyhow!(
             "no live daemon for session {name:?}. Run `agent-ctrl open <surface> --session {name}` first."
         )
-    })
+    })?;
+    if info.protocol_version != agent_ctrl_daemon::PROTOCOL_VERSION {
+        bail!(
+            "session {name:?} uses protocol version {}, but this CLI requires {}; close the session and reopen it with this agent-ctrl version",
+            info.protocol_version,
+            agent_ctrl_daemon::PROTOCOL_VERSION
+        );
+    }
+    Ok(info)
 }
 
 fn parse_session_id(id: &str) -> Result<SessionId> {

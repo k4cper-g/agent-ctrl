@@ -43,9 +43,11 @@ pub use inspect::{GetField, GetResult, IsResult, StateField};
 pub use node::{AppContext, Bounds, Checked, NativeHandle, Node, RefId, State, WindowContext};
 pub use role::Role;
 pub use snapshot::{
-    FindMatch, FindQuery, RefEntry, RefMap, Snapshot, SnapshotOptions, WindowTarget,
+    FindMatch, FindQuery, ObservedMatch, RefEntry, RefMap, Snapshot, SnapshotOptions, WindowTarget,
 };
-pub use surface::{CapabilitySet, Surface, SurfaceKind, WindowInfo};
+pub use surface::{
+    capability, required_capabilities, CapabilitySet, Surface, SurfaceKind, WindowInfo,
+};
 pub use wait::{tree_signature, WaitOptions, WaitOutcome, WaitPredicate};
 
 #[cfg(feature = "mock")]

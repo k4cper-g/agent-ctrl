@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::node::{AppContext, Bounds, Node, State, WindowContext};
 use crate::role::Role;
 use crate::snapshot::{RefMap, Snapshot, SnapshotOptions};
-use crate::surface::{CapabilitySet, Surface, SurfaceKind, WindowInfo};
+use crate::surface::{capability, CapabilitySet, Surface, SurfaceKind, WindowInfo};
 
 /// Surface that returns a fixed fake tree and records actions in memory.
 pub struct MockSurface {
@@ -35,9 +35,13 @@ impl MockSurface {
     pub fn new() -> Self {
         Self {
             capabilities: CapabilitySet::new()
-                .with("snapshot")
-                .with("keyboard")
-                .with("mouse"),
+                .with(capability::SNAPSHOT)
+                .with(capability::ACTIONS)
+                .with(capability::KEYBOARD)
+                .with(capability::MOUSE)
+                .with(capability::DRAG)
+                .with(capability::WINDOWS)
+                .with(capability::MULTI_APP),
             actions: Mutex::new(Vec::new()),
         }
     }

@@ -38,7 +38,7 @@ both UIA and our `Role` derive from the same ARIA-equivalent vocabulary.
 | `Pane`            | `Generic`         | UIA's catch-all container; carries little semantic value. |
 | `ProgressBar`     | `Generic`         | No interactive role; emit but mark `state.enabled = false`. |
 | `RadioButton`     | `Radio`           | |
-| `ScrollBar`       | `Generic`         | Skip in `interactive_only` snapshots. |
+| `ScrollBar`       | `Generic`         | Structural; unnamed wrappers are removed in `compact` mode. |
 | `SemanticZoom`    | `Group`           | Rare; deferred. |
 | `Separator`       | `Generic`         | Drop in `compact` snapshots. |
 | `Slider`          | `Slider`          | |
@@ -106,14 +106,14 @@ from the prefix) is intentionally deferred to v0.2.
 
 | `Node` field   | UIA source |
 |---|---|
-| `name`         | `Name` (after trimming control characters; if empty, fall back to `LocalizedControlType` for landmarks) |
-| `description`  | `HelpText` if non-empty and ≠ `Name`; else `None` |
-| `value`        | `ValuePattern.Value` if present and not a password field; else `RangeValuePattern.Value.to_string()` |
+| `name`         | `Name` as reported by UIA; empty string when the platform exposes none |
+| `description`  | `HelpText` when non-empty and ≠ `Name`; else `None` |
+| `value`        | `ValuePattern.Value` when present and `IsPassword=false`; else `RangeValuePattern.Value` formatted as a string (sliders, spinners - whole numbers render without a fractional part) |
 | `bounds`       | `BoundingRectangle` after DPI normalization (see §6) |
-| `level`        | `Level` property where applicable (tree items, headings); else `None` |
+| `level`        | UIA `Level` property when positive (tree items, list items, headings); else `None` |
 | `role`         | per §1 |
 | `state`        | per §2 |
-| `native`       | `NativeHandle::Uia { runtime_id, automation_id }` (see §7) |
+| `native`       | Internal `NativeHandle::Uia { runtime_id, automation_id }` (see §7); omitted from serialized snapshots |
 
 **Dropped fields** (intentionally not carried into `Node`):
 - `AcceleratorKey`, `AccessKey` - keyboard hints; agents rarely need them and we surface keyboard input separately.
@@ -154,8 +154,8 @@ For each action we accept, the UIA call we make. Falls back to synthetic
 | `FocusWindow`       | `WindowPattern.SetWindowVisualState(Normal)` (best-effort) + the `AttachThreadInput` foreground bringer; re-pins the session | n/a |
 | `Screenshot`        | `GetWindowDC` + `BitBlt` for the pinned window, screen DC for desktop / region / element-ref targets, optional cached-ref annotations | n/a |
 
-**Decision:** `surface-uia` advertises `snapshot`, `screenshot`, `keyboard`,
-`mouse`, `drag`, `multi_app`. Click / double-click / right-click / hover,
+**Decision:** `surface-uia` advertises `snapshot`, `actions`, `screenshot`,
+`keyboard`, `mouse`, `drag`, `windows`, and `multi_app`. Click / double-click / right-click / hover,
 drag, and screenshot (window / region / element-ref / desktop, with optional
 `@eN` annotations) are all wired. The `CapabilitySet` returned from
 `UiaSurface::open()` reflects this and the daemon won't dispatch anything
@@ -163,23 +163,45 @@ unsupported. Synthetic input (`SendInput`) requires the pinned window to be
 foreground; the surface brings it forward first and reports a clear error if
 UIPI/UAC blocks injection.
 
+**Off-screen / virtualized targets.** Every ref-targeted *action* routes
+through a resolve step that, when the target element is off-screen, realizes
+it (`VirtualizedItemPattern.Realize`), scrolls it into its container's
+viewport (`ScrollItemPattern.ScrollIntoView`), and then re-resolves for a
+fresh handle (a list/grid commonly rebuilds item elements as it scrolls, so
+the pre-scroll handle would report a stale `BoundingRectangle`). So
+`click` / `double-click` / `drag` / etc. land correctly on a list or grid
+item an agent referenced from a snapshot even if it has since scrolled out of
+view. `screenshot --target ref` deliberately skips this so a capture never
+scrolls the target app as a side effect.
+
+**Occlusion detection.** A synthetic pointer click (`click`'s pointer
+fallback, `double-click`, `right-click`) hits whatever is topmost at the
+target's centre point - so a popup, a sibling control, or another window
+drawn over the target would silently steal the click. After bringing the
+window forward, the surface asks UIA (`ElementFromPoint`) which element is
+actually at that point: if it is the target, a descendant, or an ancestor of
+it the click proceeds; otherwise the action fails with an error naming the
+obstruction. `InvokePattern`-based `click` is exempt - it activates the
+control directly and never depends on what is visually on top.
+
 ## 5. App and window context
 
 | Field | Source |
 |---|---|
-| `app.id`         | Application User Model ID (AUMID) when available; else process executable basename. AUMID lookup uses `SHGetPropertyStoreForWindow` + `PKEY_AppUserModel_ID`. |
-| `app.name`       | Process executable's `FileDescription` from version resources, falling back to executable basename. |
+| `app.id`         | Full executable path from `QueryFullProcessImageNameW`; falls back to `pid:<pid>` when process metadata is inaccessible. |
+| `app.name`       | Executable file stem; falls back to `pid_<pid>`. |
 | `window.id`      | Top-level `HWND` rendered as a hex string. |
 | `window.title`   | The top-level window's UIA `Name` (which on Windows is the title bar). |
 
 ### 5.1 Window targeting
 
 `SnapshotOptions::target` (a [`WindowTarget`](../crates/core/src/snapshot.rs))
-selects which window the snapshot captures. Three variants in v0.1:
+selects which window the snapshot captures. Four variants in v0.1:
 
 - `Foreground` *(default)* - `GetForegroundWindow()`. Original behavior.
 - `Pid { pid }` - first visible top-level window owned by `pid`. Found via `EnumWindows` + `GetWindowThreadProcessId`.
 - `Title { title }` - first visible top-level window whose title contains `title` (case-insensitive). Found via `EnumWindows` + `GetWindowTextW`.
+- `ProcessName { name }` - first visible top-level window whose executable file stem contains `name` (case-insensitive).
 
 Once a snapshot resolves a target, the worker stores the HWND on `WorkerState`
 and **subsequent actions reuse the same HWND**, even if the user changes focus.
@@ -206,7 +228,7 @@ monitor hosting the pinned window (`GetDpiForWindow`) and divide every
 setups with mixed DPI where one window spans monitors are edge-cased to the
 pinned window's monitor.
 
-## 7. `NativeHandle::Uia`
+## 7. Internal `NativeHandle::Uia`
 
 ```rust
 NativeHandle::Uia {
@@ -215,12 +237,18 @@ NativeHandle::Uia {
 }
 ```
 
-We populate both. `automation_id` is the most stable identifier UIA exposes
+We populate both internally and omit them from the wire snapshot. This avoids
+leaking platform handles while preserving fast action-time lookup.
+`automation_id` is the most stable identifier UIA exposes
 (set by the developer at design time on WPF / WinUI controls); `runtime_id`
 is what UIA itself uses to compare elements but is unstable across runs.
 
 At action-time re-resolution we try in order:
-1. `automation_id` lookup if set - fast and durable.
+1. `automation_id` lookup - fast and durable, but only for the first
+   occurrence of a `(role, name)` pair (`nth == 0`). AutomationIds are
+   duplicated across repeated templates (every list row's "Delete" button
+   shares one), so `FindFirst` cannot address a later occurrence; a non-zero
+   `nth` falls through to tiers 2-3.
 2. `runtime_id` comparison - works within the same UIA session.
 3. `(role, name, nth)` walk from the [`RefMap`](../crates/core/src/snapshot.rs) - durable across UIA invalidations.
 
@@ -230,8 +258,8 @@ For each interactive node we emit, the `RefMap` entry stores:
 
 - `role`     - per §1
 - `name`     - `Name` after trimming
-- `nth`      - 0-based count of preceding siblings with the same `(role, name)` under the same parent
-- `native`   - `NativeHandle::Uia` (per §7)
+- `nth`      - 0-based count of preceding nodes with the same `(role, name)` in the snapshot's global pre-order walk
+- `native`   - internal `NativeHandle::Uia` (per §7), never serialized
 
 `(role, name, nth)` is the durable lookup tuple. UIA-specific identifiers
 are a fast-path hint, never the source of truth.
@@ -260,24 +288,36 @@ calls - it stops at the target node, so the per-node cost matters less there.
 **`Generic` nodes are emitted by default.** They carry contextual labels
 (group headers, sections, panels) that an agent often needs to disambiguate
 controls that share names. To keep the tree small for token-budgeted agents,
-`SnapshotOptions::compact = true` strips `Generic`, `Pane`, `Group`,
-`Separator`, `TitleBar`, and `Thumb` from the emitted tree (children are
-still walked; structural ancestors are reattached to the nearest non-stripped
-ancestor).
+`SnapshotOptions::compact = true` strips *unnamed, unfocused* `Generic` nodes
+from the emitted tree - which covers UIA's `Pane`, `Separator`, `TitleBar`,
+and `Thumb` control types, since §1 already maps all of those to `Generic`.
+Named `Generic` nodes are kept (the name is the contextual label that earns
+their place), as are `Group` nodes. Children of a stripped node are still
+walked and reattached to the nearest surviving ancestor.
 
 The CLI `snapshot` command defaults to `compact = true` for terminal
 readability. Programmatic clients can opt into full fidelity by passing
 `compact: false`.
 
 Walk depth-first, stop at `SnapshotOptions::depth` if set. At each node
-decide whether to emit a `RefId` based on:
+decide whether to emit a `RefId`. An element earns one when **any** of these
+holds (this is the `qualifies_for_ref` predicate):
 
-- Role is interactive (per `Role::is_interactive`), OR
-- Has the `Invoke` or `Value` pattern, OR
-- `IsKeyboardFocusable` is true and role is not purely structural.
+- its role is interactive (per `Role::is_interactive`); OR
+- it exposes a non-read-only `ValuePattern` (an editable field whose role
+  isn't ARIA-interactive - e.g. Win11 Notepad's `Document`-typed canvas); OR
+- it is keyboard-focusable (`IsKeyboardFocusable`) and its role is **not**
+  purely structural (per `Role::is_structural`).
 
 That last rule catches custom controls that aren't ARIA-classified but the
-user can clearly act on.
+user can clearly Tab to and act on; excluding structural roles keeps a
+focusable pane or group from flooding the ref map.
+
+The action path re-resolves a `RefId` by re-walking the tree counting the
+same `(role, name, nth)`, so it **must** apply this identical predicate -
+`element_qualifies_as_ref` is the live-read mirror of `qualifies_for_ref`.
+If the two drift, refs silently stop resolving; the fixture integration test
+round-trips every emitted ref through the action path to guard this.
 
 ## 10. Threading and COM
 
@@ -296,7 +336,7 @@ Things UIA exposes that we are deliberately not surfacing in v0.1:
 
 - **Annotations / live regions** - `AnnotationPattern`, `LiveSetting`. Useful for screen readers; not for agents (yet).
 - **Text patterns** - full `TextPattern` access (text ranges, attributes, find). Massive surface, deferred to a separate text-aware iteration.
-- **Virtualization** - `VirtualizedItemPattern` realisation. We will hit this when snapshotting large list/grid controls (Outlook, Excel). Track as a known gap; for v0.1 we capture only realised items.
+- **Virtualization (snapshot side)** - a snapshot still captures only the *realised* items of a large virtualized list/grid; off-screen rows a provider hasn't materialised aren't in the tree. *Action-time* virtualization is handled (see §4): a ref-targeted action realises a `VirtualizedItemPattern` placeholder and scrolls an off-screen item into view before acting. Capturing unrealised items into the snapshot itself (walking a container via `ItemContainerPattern.FindItemByProperty`) remains a gap - for now, scroll and re-`snapshot` to bring more rows into the tree.
 - **Drag-and-drop** - `DragPattern` / `DropTargetPattern`. Deferred.
 - **Custom annotation properties** - UIA lets apps expose arbitrary string properties. Skip until a concrete use case appears.
 - **Direct MSAA path.** Older Win32 apps with no native UIA support fall through Windows' built-in UIA→MSAA bridge, which gives reduced-fidelity trees but is "good enough" for v0.1. If a critical real app needs more, we add a parallel `IAccessible` walker; until then, we trust the bridge.

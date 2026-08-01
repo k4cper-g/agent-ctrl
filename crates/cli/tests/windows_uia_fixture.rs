@@ -29,6 +29,13 @@ fn run_fixture_flow() {
         fixture.display()
     );
 
+    // Terminate any fixture left running by an earlier, improperly torn-down
+    // run. `snapshot --target-process` resolves the target window by its
+    // executable name, so a second live instance makes targeting ambiguous -
+    // actions could drive one process while reads observe the other, which
+    // surfaces as a "cleared" field still showing stale characters.
+    kill_stale_fixtures();
+
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -64,7 +71,11 @@ fn run_fixture_flow() {
     run.exercise_button_click();
     run.exercise_text_field();
     run.exercise_selection();
+    run.exercise_offscreen_item();
+    run.exercise_occlusion();
     run.exercise_checkbox();
+    run.exercise_slider();
+    run.exercise_password();
     run.exercise_screenshots();
     run.exercise_dialog_window();
 }
@@ -298,7 +309,18 @@ impl FixtureRun<'_> {
             self.home,
             ["clear", field.trim(), "--session", "fixture"],
         );
-        self.snapshot();
+        let snap = run_cli(
+            self.cli,
+            self.home,
+            [
+                "snapshot",
+                "--session",
+                "fixture",
+                "--target-process",
+                "agent-ctrl-uia-fixture",
+                "--json",
+            ],
+        );
         let field = run_cli(
             self.cli,
             self.home,
@@ -318,7 +340,7 @@ impl FixtureRun<'_> {
         );
         assert!(
             matches!(value.trim(), "\"\"" | "null"),
-            "expected cleared text field, got {value:?}"
+            "expected cleared text field, got {value:?}\nfield ref: {field:?}\npost-clear snapshot:\n{snap}"
         );
     }
 
@@ -351,6 +373,59 @@ impl FixtureRun<'_> {
         );
     }
 
+    /// A listbox option scrolled out of the viewport must still be
+    /// actionable. `double-click` is a pure pointer action - it positions the
+    /// cursor at the element's bounding-rectangle centre - so it only lands
+    /// on the right row if the action path first realized and scrolled the
+    /// off-screen item into view. An off-screen item reports a `{0,0,0,0}`
+    /// rectangle, so without that step the click would land at the screen
+    /// origin and the row would never become selected.
+    fn exercise_offscreen_item(&self) {
+        self.snapshot();
+        let option = self.find("Item 20", "option");
+        run_cli(
+            self.cli,
+            self.home,
+            ["double-click", option.trim(), "--session", "fixture"],
+        );
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "wait-for",
+                "Item 20",
+                "--role",
+                "option",
+                "--state",
+                "selected",
+                "--timeout",
+                "5000",
+                "--session",
+                "fixture",
+            ],
+        );
+    }
+
+    /// A control covered by another control must not be silently mis-clicked.
+    /// Occlusion detection probes `ElementFromPoint` at the target's centre;
+    /// for the fixture's "Covered" button that point belongs to "Overlay", so
+    /// a pointer action is rejected with an actionable error. `double-click`
+    /// is used deliberately - a `click` on a button takes the InvokePattern
+    /// path, which bypasses pointer hit-testing and so is not occludable.
+    fn exercise_occlusion(&self) {
+        self.snapshot();
+        let covered = self.find("Covered", "button");
+        let err = run_cli_failing(
+            self.cli,
+            self.home,
+            &["double-click", covered.trim(), "--session", "fixture"],
+        );
+        assert!(
+            err.contains("occluded"),
+            "expected a double-click on the covered button to be rejected as occluded, got: {err}"
+        );
+    }
+
     fn exercise_checkbox(&self) {
         let checkbox = self.find("Enable advanced mode", "checkbox");
         let checked = run_cli(
@@ -377,6 +452,72 @@ impl FixtureRun<'_> {
                 "--session",
                 "fixture",
             ],
+        );
+    }
+
+    /// The fixture trackbar exposes its position through `RangeValuePattern`,
+    /// not `ValuePattern`. A snapshot of it must surface `value` via the
+    /// range-value fallback, and the slider role must earn a ref.
+    fn exercise_slider(&self) {
+        self.snapshot();
+        let slider = run_cli(
+            self.cli,
+            self.home,
+            [
+                "find",
+                "--role",
+                "slider",
+                "--first",
+                "--session",
+                "fixture",
+            ],
+        );
+        assert!(
+            slider.trim().starts_with("@e") || slider.trim().starts_with("ref_"),
+            "expected a ref for the slider, got {slider:?}"
+        );
+        let value = run_cli(
+            self.cli,
+            self.home,
+            ["get", "value", slider.trim(), "--session", "fixture"],
+        );
+        assert!(
+            value.contains("40"),
+            "expected the fixture trackbar to report RangeValue 40, got {value:?}"
+        );
+    }
+
+    /// The fixture's password edit (`ES_PASSWORD`) must keep its ref - it is
+    /// still a text field an agent can focus and fill - while its content is
+    /// withheld from the snapshot entirely.
+    fn exercise_password(&self) {
+        let snapshot = run_cli(
+            self.cli,
+            self.home,
+            [
+                "snapshot",
+                "--session",
+                "fixture",
+                "--target-process",
+                "agent-ctrl-uia-fixture",
+                "--json",
+            ],
+        );
+        assert!(
+            !snapshot.contains("hunter2secret"),
+            "password edit content leaked into the snapshot:\n{snapshot}"
+        );
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+        let mut text_fields = Vec::new();
+        collect_role_nodes(&snapshot["root"], "text-field", &mut text_fields);
+        assert!(
+            text_fields.len() >= 2,
+            "expected the plain and password edits as text-field nodes, got {}",
+            text_fields.len()
+        );
+        assert!(
+            text_fields.iter().all(|node| node.get("ref_id").is_some()),
+            "every text field, the password edit included, must keep a ref"
         );
     }
 
@@ -531,6 +672,22 @@ impl FixtureRun<'_> {
     }
 }
 
+/// Depth-first collect every node whose `role` equals `role`.
+fn collect_role_nodes<'a>(
+    node: &'a serde_json::Value,
+    role: &str,
+    out: &mut Vec<&'a serde_json::Value>,
+) {
+    if node.get("role").and_then(serde_json::Value::as_str) == Some(role) {
+        out.push(node);
+    }
+    if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
+        for child in children {
+            collect_role_nodes(child, role, out);
+        }
+    }
+}
+
 /// Depth-first collect `(ref_id, role, name)` for every node carrying a ref.
 fn collect_refs(node: &serde_json::Value, out: &mut Vec<(String, String, String)>) {
     if let Some(ref_id) = node.get("ref_id").and_then(serde_json::Value::as_str) {
@@ -556,7 +713,16 @@ fn run_cli<const N: usize>(cli: &Path, home: &Path, args: [&str; N]) -> String {
     run_cli_vec(cli, home, &args)
 }
 
-fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
+/// Spawn agent-ctrl, drain its pipes concurrently, and return
+/// `(status, stdout, stderr)`. A 30s wall-clock overrun is always a hard test
+/// failure and panics here.
+fn run_cli_capture(
+    cli: &Path,
+    home: &Path,
+    args: &[&str],
+) -> (std::process::ExitStatus, String, String) {
+    use std::io::Read;
+
     eprintln!("running agent-ctrl {args:?}");
     let mut child = Command::new(cli)
         .args(args)
@@ -565,36 +731,69 @@ fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
         .stderr(Stdio::piped())
         .spawn()
         .expect("running agent-ctrl");
+
+    // Drain stdout and stderr on dedicated threads. A command like `batch`
+    // with many `screenshot` steps emits more than the OS pipe buffer holds;
+    // if we waited for the child to exit before reading, it would block
+    // writing into a full pipe and never exit (a classic deadlock). Reading
+    // concurrently keeps the pipe moving regardless of output size.
+    let mut stdout_pipe = child.stdout.take().expect("child stdout is piped");
+    let mut stderr_pipe = child.stderr.take().expect("child stderr is piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let collect = |reader: std::thread::JoinHandle<Vec<u8>>| {
+        String::from_utf8_lossy(&reader.join().expect("output reader thread")).into_owned()
+    };
+
     let started = Instant::now();
-    let output = loop {
-        if child.try_wait().expect("polling agent-ctrl").is_some() {
-            break child
-                .wait_with_output()
-                .expect("collecting agent-ctrl output");
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("polling agent-ctrl") {
+            break status;
         }
         if started.elapsed() > Duration::from_secs(30) {
             let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .expect("collecting timed-out agent-ctrl output");
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = child.wait();
+            let stdout = collect(stdout_reader);
+            let stderr = collect(stderr_reader);
             panic!(
                 "agent-ctrl command timed out after 30s\nargs: {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
             );
         }
         std::thread::sleep(Duration::from_millis(25));
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!(
-            "agent-ctrl failed with status {:?}\nargs: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            output.status.code(),
-            args,
-        );
-    }
+
+    (status, collect(stdout_reader), collect(stderr_reader))
+}
+
+/// Run agent-ctrl expecting success; returns stdout. Panics on a non-zero exit.
+fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
+    let (status, stdout, stderr) = run_cli_capture(cli, home, args);
+    assert!(
+        status.success(),
+        "agent-ctrl failed with status {:?}\nargs: {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        status.code(),
+    );
     stdout
+}
+
+/// Run agent-ctrl expecting a *non-zero* exit; returns stdout+stderr joined so
+/// the caller can assert on the error text. Panics if the command unexpectedly
+/// succeeds.
+fn run_cli_failing(cli: &Path, home: &Path, args: &[&str]) -> String {
+    let (status, stdout, stderr) = run_cli_capture(cli, home, args);
+    assert!(
+        !status.success(),
+        "expected agent-ctrl to fail but it succeeded\nargs: {args:?}\nstdout:\n{stdout}"
+    );
+    format!("{stdout}{stderr}")
 }
 
 fn assert_png(path: &Path, min_width: u32, min_height: u32) {
@@ -673,6 +872,17 @@ fn wait_for_ready(path: &Path) {
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("UIA fixture did not signal readiness at {}", path.display());
+}
+
+/// Best-effort termination of any leftover fixture process so this run's
+/// `--target-process` resolution is unambiguous. A missing process (nothing
+/// to kill) just makes `taskkill` exit non-zero, which we ignore.
+fn kill_stale_fixtures() {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "agent-ctrl-uia-fixture.exe"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn fixture_exe_path() -> PathBuf {

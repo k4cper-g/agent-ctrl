@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::inspect::StateField;
 use crate::node::{Checked, Node};
-use crate::snapshot::{FindMatch, FindQuery, Snapshot};
+use crate::snapshot::{FindQuery, ObservedMatch, Snapshot};
 
 /// What to wait for. The daemon evaluates this against a fresh snapshot on
 /// each poll iteration.
@@ -112,10 +112,11 @@ pub enum WaitOutcome {
     /// `Appears` predicate matched; `found` is the first matching node
     /// from the satisfying snapshot.
     Matched {
-        /// First match from the satisfying snapshot. `None` only if the
-        /// predicate was satisfied but the matching node had no ref (which
-        /// `Snapshot::find` already filters out, so in practice `Some`).
-        found: Option<FindMatch>,
+        /// First match from the satisfying snapshot. The contained ref is
+        /// optional because observation includes static content nodes.
+        /// `None` is used by matching predicates that do not target a node,
+        /// such as `WindowAppears`.
+        found: Option<ObservedMatch>,
         /// Wall-clock ms from the first poll to the satisfying poll.
         elapsed_ms: u64,
     },
@@ -143,8 +144,8 @@ pub enum WaitOutcome {
 /// `Stable` predicate's quiet timer:
 ///
 /// - **Excluded:** bounds, focused, description, level, native handle, opaque.
-/// - **Included:** ref_id presence, role, name, value, enabled, checked,
-///   expanded, selected, child count.
+/// - **Included:** ref_id presence, role, name, value, visible, enabled,
+///   checked, expanded, selected, child count.
 ///
 /// The included set is the minimum that captures "the user-visible state
 /// of every interactive control" - exactly the set an agent cares about
@@ -168,6 +169,7 @@ fn hash_node<H: Hasher>(node: &Node, h: &mut H) {
     node.role.hash(h);
     node.name.hash(h);
     node.value.as_deref().hash(h);
+    node.state.visible.hash(h);
     node.state.enabled.hash(h);
     encode_checked(node.state.checked).hash(h);
     encode_tristate(node.state.expanded).hash(h);
@@ -362,6 +364,22 @@ mod tests {
         });
         // a stays unchanged for contrast.
         let _ = a.refs.insert(Role::Button, "Untouched".into(), 0, None);
+        assert_ne!(tree_signature(&a), tree_signature(&b));
+    }
+
+    #[test]
+    fn signature_changes_when_visibility_changes() {
+        let a = make_snapshot(
+            "OK",
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                w: 80.0,
+                h: 30.0,
+            },
+        );
+        let mut b = a.clone();
+        b.root.children[0].state.visible = false;
         assert_ne!(tree_signature(&a), tree_signature(&b));
     }
 

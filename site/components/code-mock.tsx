@@ -55,7 +55,7 @@ const SNIPPETS: Record<Tab, React.ReactNode> = {
       </Line>
       <Line n={5}>{" "}</Line>
       <Line n={6}>
-        <Cm>// snapshot the current a11y tree</Cm>
+        <Cm>{"// snapshot the current a11y tree"}</Cm>
       </Line>
       <Line n={7}>
         <Kw>const</Kw> snap = <Kw>await</Kw> ctrl.<Fn>snapshot</Fn>(session)
@@ -81,16 +81,21 @@ const SNIPPETS: Record<Tab, React.ReactNode> = {
       </Line>
       <Line n={5}>{" "}</Line>
       <Line n={6}>
-        <Cm>// drive elements by ref</Cm>
+        <Cm>{"// query returns wire refs such as ref_0"}</Cm>
       </Line>
       <Line n={7}>
-        <Kw>await</Kw> ctrl.<Fn>act</Fn>(session, {"{ kind: "}
-        <Str>&quot;click&quot;</Str>, ref_id: <Str>&quot;@e0&quot;</Str> {"})"}
+        <Kw>await</Kw> ctrl.<Fn>snapshot</Fn>(session)
       </Line>
       <Line n={8}>
+        <Kw>const</Kw> [button] = <Kw>await</Kw> ctrl.<Fn>find</Fn>(session, {"{"}
+        name: <Str>&quot;Save&quot;</Str> {"}"})
+      </Line>
+      <Line n={9}>
+        <Kw>if</Kw> (!button) <Kw>throw new</Kw> Error(<Str>&quot;not found&quot;</Str>)
+      </Line>
+      <Line n={10}>
         <Kw>await</Kw> ctrl.<Fn>act</Fn>(session, {"{ kind: "}
-        <Str>&quot;fill&quot;</Str>, ref_id: <Str>&quot;@e2&quot;</Str>,
-        value: <Str>&quot;hello&quot;</Str> {"})"}
+        <Str>&quot;click&quot;</Str>, ref_id: button.ref_id {"})"}
       </Line>
     </>
   ),
@@ -110,7 +115,7 @@ const SNIPPETS: Record<Tab, React.ReactNode> = {
       </Line>
       <Line n={5}>{" "}</Line>
       <Line n={6}>
-        <Cm>// wait until the UI settles</Cm>
+        <Cm>{"// wait until the UI settles"}</Cm>
       </Line>
       <Line n={7}>
         <Kw>await</Kw> ctrl.<Fn>waitFor</Fn>(session, {"{"}
@@ -140,13 +145,20 @@ const SNIPPETS: Record<Tab, React.ReactNode> = {
       </Line>
       <Line n={5}>{" "}</Line>
       <Line n={6}>
-        <Cm>// query a property of an element by ref</Cm>
+        <Cm>{"// query a property of an element by ref"}</Cm>
       </Line>
       <Line n={7}>
-        <Kw>const</Kw> name = <Kw>await</Kw> ctrl.<Fn>get</Fn>(session,{" "}
-        <Str>&quot;name&quot;</Str>, <Str>&quot;@e0&quot;</Str>)
+        <Kw>await</Kw> ctrl.<Fn>snapshot</Fn>(session)
       </Line>
       <Line n={8}>
+        <Kw>const</Kw> [field] = <Kw>await</Kw> ctrl.<Fn>find</Fn>(session, {"{"}
+        role: <Str>&quot;text-field&quot;</Str> {"}"})
+      </Line>
+      <Line n={9}>
+        <Kw>const</Kw> name = field ? <Kw>await</Kw> ctrl.<Fn>get</Fn>(session,{" "}
+        <Str>&quot;name&quot;</Str>, field.ref_id) : <Kw>null</Kw>
+      </Line>
+      <Line n={10}>
         console.<Fn>log</Fn>(name?.value)
       </Line>
     </>
@@ -170,7 +182,7 @@ export function CodeMock() {
         <span className="font-mono text-xs text-muted-foreground">
           run with{" "}
           <span className="rounded-sm border border-border px-1.5 py-0.5 text-foreground">
-            agent-ctrl v0.1.1
+            agent-ctrl v0.1.3
           </span>
         </span>
       </div>

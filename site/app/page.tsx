@@ -23,6 +23,7 @@ function GithubIcon({ className }: { className?: string }) {
 const REPO_OWNER = "k4cper-g"
 const REPO_NAME = "agent-ctrl"
 const REPO_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}`
+const SITE_BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? ""
 
 async function getStarCount(): Promise<number | null> {
   try {
@@ -61,16 +62,16 @@ const features = [
   },
   {
     title: "Cross-platform.",
-    desc: "UIA on Windows, AX on macOS, AT-SPI on Linux. One schema, native binaries, no runtime.",
+    desc: "Action-ready UIA and AX, plus snapshot-read AT-SPI on Linux. One schema, native binaries, no runtime.",
   },
 ]
 
 export default async function Page() {
   const stars = await getStarCount()
-  const starsDisplay = stars !== null ? formatStars(stars) : "—"
+  const starsDisplay = stars !== null ? formatStars(stars) : "n/a"
 
   const stats = [
-    { value: "v0.1.1", label: "Latest release" },
+    { value: "v0.1.3", label: "Latest release" },
     { value: "Apache 2.0", label: "Open source" },
     { value: "Rust", label: "Native core" },
     { value: "5", label: "Target surfaces" },
@@ -95,7 +96,7 @@ function Header({ stars }: { stars: string }) {
     <header className="sticky top-0 z-50 flex items-center justify-between gap-4 border-b border-border bg-background px-6 py-4">
       <Link href="/" className="flex items-center gap-2">
         <Image
-          src="/site-logo.png"
+          src={`${SITE_BASE_PATH}/site-logo.png`}
           alt="agent-ctrl"
           width={20}
           height={20}

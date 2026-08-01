@@ -21,7 +21,7 @@ pub use dispatcher::{
 };
 pub use factory::{open_surface, surface_status, SurfaceStatus};
 pub use session_file::{
-    discovery_dir, list_alive, path_for, read_alive, remove, wait_for_alive, write, SessionFile,
-    DEFAULT_SESSION,
+    discovery_dir, list_alive, path_for, read_alive, remove, validate_session_name, wait_for_alive,
+    write, SessionFile, DEFAULT_SESSION,
 };
 pub use state::{DaemonState, SessionId};
