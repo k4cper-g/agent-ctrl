@@ -13,7 +13,8 @@ use crate::role::Role;
 /// Stable identifier for a node within a single snapshot.
 ///
 /// The id is opaque to the agent and only valid for the snapshot that
-/// produced it. After a fresh snapshot, refs must be re-issued.
+/// produced it. After a fresh snapshot, refs must be re-issued. Actionable
+/// refs use the `ref_N` namespace; structural, scope-only refs use `scope_N`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RefId(pub String);
@@ -23,6 +24,18 @@ impl RefId {
     #[must_use]
     pub fn new(n: usize) -> Self {
         Self(format!("ref_{n}"))
+    }
+
+    /// Build the canonical scope-only ref for a structural node.
+    #[must_use]
+    pub fn new_scope(n: usize) -> Self {
+        Self(format!("scope_{n}"))
+    }
+
+    /// Return whether this id is a structural scope rather than an action target.
+    #[must_use]
+    pub fn is_scope(&self) -> bool {
+        self.0.starts_with("scope_")
     }
 }
 
@@ -144,7 +157,11 @@ pub struct State {
 /// One element in the unified accessibility tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
-    /// Stable per-snapshot identifier; only assigned to nodes the agent can target.
+    /// Stable per-snapshot identifier.
+    ///
+    /// `ref_N` ids identify action targets. `scope_N` ids identify structural
+    /// subtree roots that can be inspected or passed to `find --in`, but not
+    /// acted on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_id: Option<RefId>,
 

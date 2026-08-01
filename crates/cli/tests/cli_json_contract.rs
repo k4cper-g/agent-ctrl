@@ -66,6 +66,9 @@ fn mock_session_json_success_shapes_are_stable() {
     ));
     assert_eq!(snapshot["surface_kind"], "mock");
     assert_eq!(snapshot["root"]["name"], "Mock Window");
+    assert_eq!(snapshot["root"]["ref_id"], "scope_0");
+
+    assert_scope_ref_contract(&cli, &home);
 
     let found = expect_success(run_cli(
         &cli,
@@ -127,6 +130,71 @@ fn mock_session_json_success_shapes_are_stable() {
         &["close", "--json", "--session", "contract"],
     ));
     assert_eq!(closed["ok"], true);
+}
+
+fn assert_scope_ref_contract(cli: &Path, home: &Path) {
+    let scope = expect_success(run_cli(
+        cli,
+        Some(home),
+        &[
+            "find",
+            "--role",
+            "window",
+            "--json",
+            "--session",
+            "contract",
+        ],
+    ));
+    assert_eq!(scope["first"]["ref_id"], "scope_0");
+
+    let scope_label = run_cli(
+        cli,
+        Some(home),
+        &[
+            "find",
+            "--role",
+            "window",
+            "--first",
+            "--session",
+            "contract",
+        ],
+    );
+    assert!(scope_label.status.success());
+    assert_eq!(String::from_utf8_lossy(&scope_label.stdout).trim(), "@s0");
+
+    let scoped = expect_success(run_cli(
+        cli,
+        Some(home),
+        &[
+            "find",
+            "OK",
+            "--in",
+            "@s0",
+            "--json",
+            "--session",
+            "contract",
+        ],
+    ));
+    assert_eq!(scoped["first"]["ref_id"], "ref_0");
+
+    let scope_name = expect_success(run_cli(
+        cli,
+        Some(home),
+        &["get", "name", "@s0", "--json", "--session", "contract"],
+    ));
+    assert_eq!(scope_name["value"], "Mock Window");
+
+    let rejected_scope_action = run_cli(
+        cli,
+        Some(home),
+        &["click", "@s0", "--json", "--session", "contract"],
+    );
+    assert_eq!(rejected_scope_action.status.code(), Some(1));
+    let rejected_scope_action = parse_json(&rejected_scope_action);
+    assert!(rejected_scope_action["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("scope-only"));
 }
 
 #[test]

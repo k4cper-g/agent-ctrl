@@ -129,7 +129,13 @@ impl FixtureRun<'_> {
         );
         let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
         let mut refs: Vec<(String, String, String)> = Vec::new();
-        collect_refs(&snapshot["root"], &mut refs);
+        collect_action_refs(&snapshot["root"], &mut refs);
+        assert!(
+            snapshot["root"]["ref_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("scope_")),
+            "fixture window root should carry a scope-only ref"
+        );
         assert!(
             refs.len() >= 5,
             "expected the fixture snapshot to emit several refs, got {}",
@@ -688,9 +694,13 @@ fn collect_role_nodes<'a>(
     }
 }
 
-/// Depth-first collect `(ref_id, role, name)` for every node carrying a ref.
-fn collect_refs(node: &serde_json::Value, out: &mut Vec<(String, String, String)>) {
-    if let Some(ref_id) = node.get("ref_id").and_then(serde_json::Value::as_str) {
+/// Collect action refs while deliberately excluding structural scope refs.
+fn collect_action_refs(node: &serde_json::Value, out: &mut Vec<(String, String, String)>) {
+    if let Some(ref_id) = node
+        .get("ref_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| id.starts_with("ref_"))
+    {
         let role = node
             .get("role")
             .map(ToString::to_string)
@@ -704,7 +714,7 @@ fn collect_refs(node: &serde_json::Value, out: &mut Vec<(String, String, String)
     }
     if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) {
         for child in children {
-            collect_refs(child, out);
+            collect_action_refs(child, out);
         }
     }
 }

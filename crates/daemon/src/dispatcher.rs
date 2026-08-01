@@ -463,6 +463,11 @@ fn unsupported_message(surface: &dyn Surface, action: &str, capability: &str) ->
 }
 
 fn ensure_action_supported(surface: &dyn Surface, action: &Action) -> Result<(), String> {
+    if let Some(ref_id) = action.scope_ref() {
+        return Err(format!(
+            "ref {ref_id} is scope-only; use it with `find --in`, `get`, or `is`, then act on an @eN element ref"
+        ));
+    }
     for capability in required_capabilities(action) {
         if !surface.capabilities().supports(capability) {
             return Err(unsupported_message(surface, action.kind_name(), capability));
@@ -693,11 +698,13 @@ async fn batch_list_windows(
 
 /// Run a wait-for polling loop against `cell`.
 ///
-/// Each iteration acquires the session lock briefly to take a snapshot and
-/// cache it, then releases the lock before sleeping - so other CLI
+/// Each iteration acquires the session lock briefly to take an observation
+/// snapshot, then releases the lock before sleeping - so other CLI
 /// invocations (a `find`, a `close`, an `act`) on the same session can
-/// interleave between polls. The minimum poll interval is clamped at
-/// [`MIN_POLL_MS`] to prevent CPU thrash on heavy a11y trees.
+/// interleave between polls without having their action refs replaced. The
+/// terminal observation is committed exactly once before this function
+/// returns. The minimum poll interval is clamped at [`MIN_POLL_MS`] to prevent
+/// CPU thrash on heavy a11y trees.
 ///
 /// Each poll uses the same `SnapshotOptions` that produced the session's
 /// most recent snapshot - without that, `target: Foreground` would
@@ -708,7 +715,7 @@ async fn batch_list_windows(
 /// Returns `Err` only for fatal session-state problems (closed surface,
 /// snapshot error, no prior snapshot). Timeout is a normal
 /// `Ok(WaitOutcome::Timeout)` so the CLI can map it to its own exit code.
-// The wait loop is kept together so timeout, polling, and cache updates stay coupled.
+// The wait loop is kept together so timeout, polling, and ref promotion stay coupled.
 #[allow(clippy::too_many_lines)]
 async fn run_wait(
     cell: &crate::state::SurfaceCell,
@@ -745,10 +752,10 @@ async fn run_wait(
     let mut stable_since: Option<Instant> = None;
 
     loop {
-        // Take a snapshot inside a short lock window. The lock is released
-        // before we evaluate or sleep so other ops can interleave.
+        // Take an observation snapshot inside a short lock window. This does
+        // not mutate the surface's committed action refs.
         let snap = {
-            let mut guard = cell.lock().await;
+            let guard = cell.lock().await;
             let Some(surface) = guard.surface.as_ref() else {
                 return Err("session is closed".into());
             };
@@ -759,113 +766,117 @@ async fn run_wait(
                     capability::SNAPSHOT,
                 ));
             }
-            let snap = surface
-                .snapshot(&snap_opts)
+            surface
+                .snapshot_for_observation(&snap_opts)
                 .await
-                .map_err(|e| format!("wait: snapshot failed: {e}"))?;
-            // Cache so a follow-up action sees fresh refs without an extra
-            // OS round-trip.
-            guard.last_snapshot = Some(snap.clone());
-            snap
+                .map_err(|e| format!("wait: snapshot failed: {e}"))?
         };
 
         // Evaluate the predicate against the snapshot we just took.
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        match &opts.predicate {
+        let outcome = match &opts.predicate {
             WaitPredicate::Appears { query } => {
-                if let Some(found) = snap.observe(query).into_iter().next() {
-                    return Ok(WaitOutcome::Matched {
+                snap.observe(query)
+                    .into_iter()
+                    .next()
+                    .map(|found| WaitOutcome::Matched {
                         found: Some(found),
                         elapsed_ms,
-                    });
-                }
+                    })
             }
-            WaitPredicate::Gone { query } => {
-                if snap.observe(query).is_empty() {
-                    return Ok(WaitOutcome::Gone { elapsed_ms });
-                }
-            }
+            WaitPredicate::Gone { query } => snap
+                .observe(query)
+                .is_empty()
+                .then_some(WaitOutcome::Gone { elapsed_ms }),
             WaitPredicate::Stable { idle_ms } => {
                 let sig = tree_signature(&snap);
                 if last_signature == Some(sig) {
                     let since = stable_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= Duration::from_millis(*idle_ms) {
-                        return Ok(WaitOutcome::Stable { elapsed_ms });
+                        Some(WaitOutcome::Stable { elapsed_ms })
+                    } else {
+                        None
                     }
                 } else {
                     last_signature = Some(sig);
                     stable_since = None;
+                    None
                 }
             }
             WaitPredicate::State {
                 query,
                 field,
                 value,
-            } => {
-                if let Some(found) = first_observation_where(&snap, query, |observed| {
-                    observed_state_value(observed, *field) == *value
-                }) {
-                    return Ok(WaitOutcome::Matched {
-                        found: Some(found),
-                        elapsed_ms,
-                    });
-                }
-            }
+            } => first_observation_where(&snap, query, |observed| {
+                observed_state_value(observed, *field) == *value
+            })
+            .map(|found| WaitOutcome::Matched {
+                found: Some(found),
+                elapsed_ms,
+            }),
             WaitPredicate::TextContains { query, text } => {
                 let needle = text.to_lowercase();
-                if let Some(found) = first_observation_where(&snap, query, |observed| {
+                first_observation_where(&snap, query, |observed| {
                     observed
                         .value
                         .as_deref()
                         .unwrap_or(&observed.name)
                         .to_lowercase()
                         .contains(&needle)
-                }) {
-                    return Ok(WaitOutcome::Matched {
-                        found: Some(found),
-                        elapsed_ms,
-                    });
-                }
+                })
+                .map(|found| WaitOutcome::Matched {
+                    found: Some(found),
+                    elapsed_ms,
+                })
             }
             WaitPredicate::ValueContains { query, value } => {
                 let needle = value.to_lowercase();
-                if let Some(found) = first_observation_where(&snap, query, |observed| {
+                first_observation_where(&snap, query, |observed| {
                     observed
                         .value
                         .as_deref()
                         .unwrap_or_default()
                         .to_lowercase()
                         .contains(&needle)
-                }) {
-                    return Ok(WaitOutcome::Matched {
-                        found: Some(found),
-                        elapsed_ms,
-                    });
-                }
+                })
+                .map(|found| WaitOutcome::Matched {
+                    found: Some(found),
+                    elapsed_ms,
+                })
             }
-            WaitPredicate::WindowAppears { title } => {
-                if window_title_present(cell, title).await? {
-                    return Ok(WaitOutcome::Matched {
-                        found: None,
-                        elapsed_ms,
-                    });
-                }
-            }
-            WaitPredicate::WindowGone { title } => {
-                if !window_title_present(cell, title).await? {
-                    return Ok(WaitOutcome::Gone { elapsed_ms });
-                }
-            }
+            WaitPredicate::WindowAppears { .. } | WaitPredicate::WindowGone { .. } => None,
+        };
+
+        if let Some(outcome) = outcome {
+            commit_wait_snapshot(cell, &snap).await?;
+            return Ok(outcome);
         }
 
         // Check the timeout *before* sleeping - overruns of one poll
         // duration are tolerable, but two polls past the deadline isn't.
         if started.elapsed() >= timeout {
+            commit_wait_snapshot(cell, &snap).await?;
             return Ok(WaitOutcome::Timeout { elapsed_ms });
         }
 
         tokio::time::sleep(poll).await;
     }
+}
+
+async fn commit_wait_snapshot(
+    cell: &crate::state::SurfaceCell,
+    snapshot: &Snapshot,
+) -> Result<(), String> {
+    let mut guard = cell.lock().await;
+    let Some(surface) = guard.surface.as_ref() else {
+        return Err("session is closed".into());
+    };
+    surface
+        .commit_observation(snapshot)
+        .await
+        .map_err(|e| format!("wait: committing observation failed: {e}"))?;
+    guard.last_snapshot = Some(snapshot.clone());
+    Ok(())
 }
 
 async fn run_window_wait(
@@ -952,7 +963,13 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use agent_ctrl_core::{AppContext, MockSurface, RefMap, Role, State};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use agent_ctrl_core::{
+        ActionResult, AppContext, CapabilitySet, MockSurface, RefMap, Role, State, Surface,
+    };
+    use async_trait::async_trait;
 
     #[test]
     fn request_roundtrips_with_correlation_id() {
@@ -1019,6 +1036,20 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("not supported"));
         assert!(error.contains("screenshot"));
+    }
+
+    #[test]
+    fn action_gate_rejects_scope_refs_before_dispatch() {
+        let surface = MockSurface::new();
+        let error = ensure_action_supported(
+            &surface,
+            &Action::Click {
+                ref_id: RefId::new_scope(2),
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("scope-only"));
+        assert!(error.contains("find --in"));
     }
 
     #[test]
@@ -1136,5 +1167,101 @@ mod tests {
         )
         .await;
         assert!(matches!(closed.body, ResponseBody::Closed));
+    }
+
+    struct TrackingSurface {
+        capabilities: CapabilitySet,
+        normal_captures: Arc<AtomicUsize>,
+        observations: Arc<AtomicUsize>,
+        commits: Arc<AtomicUsize>,
+        committed_name: Arc<StdMutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl Surface for TrackingSurface {
+        fn kind(&self) -> SurfaceKind {
+            SurfaceKind::Mock
+        }
+
+        fn capabilities(&self) -> &CapabilitySet {
+            &self.capabilities
+        }
+
+        async fn snapshot(&self, opts: &SnapshotOptions) -> agent_ctrl_core::Result<Snapshot> {
+            self.normal_captures.fetch_add(1, Ordering::SeqCst);
+            MockSurface::new().snapshot(opts).await
+        }
+
+        async fn snapshot_for_observation(
+            &self,
+            opts: &SnapshotOptions,
+        ) -> agent_ctrl_core::Result<Snapshot> {
+            let capture = self.observations.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut snapshot = MockSurface::new().snapshot(opts).await?;
+            if capture < 3 {
+                snapshot.root.children[0].name = "Not yet".into();
+            }
+            Ok(snapshot)
+        }
+
+        async fn commit_observation(&self, snapshot: &Snapshot) -> agent_ctrl_core::Result<()> {
+            self.commits.fetch_add(1, Ordering::SeqCst);
+            *self.committed_name.lock().expect("committed-name lock") =
+                snapshot.root.children.first().map(|node| node.name.clone());
+            Ok(())
+        }
+
+        async fn act(&self, _action: &Action) -> agent_ctrl_core::Result<ActionResult> {
+            Ok(ActionResult::ok())
+        }
+
+        async fn shutdown(&mut self) -> agent_ctrl_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_observations_commit_only_the_terminal_snapshot() {
+        let normal_captures = Arc::new(AtomicUsize::new(0));
+        let observations = Arc::new(AtomicUsize::new(0));
+        let commits = Arc::new(AtomicUsize::new(0));
+        let committed_name = Arc::new(StdMutex::new(None));
+        let surface = TrackingSurface {
+            capabilities: CapabilitySet::new().with(capability::SNAPSHOT),
+            normal_captures: Arc::clone(&normal_captures),
+            observations: Arc::clone(&observations),
+            commits: Arc::clone(&commits),
+            committed_name: Arc::clone(&committed_name),
+        };
+        let initial = MockSurface::new()
+            .snapshot(&SnapshotOptions::default())
+            .await
+            .unwrap();
+        let cell = Arc::new(tokio::sync::Mutex::new(crate::state::SessionCell {
+            surface: Some(Box::new(surface)),
+            last_snapshot: Some(initial),
+            last_snapshot_options: Some(SnapshotOptions::default()),
+        }));
+        let outcome = run_wait(
+            &cell,
+            &WaitOptions {
+                predicate: WaitPredicate::Appears {
+                    query: FindQuery {
+                        name: Some("OK".into()),
+                        ..FindQuery::default()
+                    },
+                },
+                timeout_ms: 1_000,
+                poll_ms: MIN_POLL_MS,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, WaitOutcome::Matched { .. }));
+        assert_eq!(normal_captures.load(Ordering::SeqCst), 0);
+        assert_eq!(observations.load(Ordering::SeqCst), 3);
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert_eq!(committed_name.lock().unwrap().as_deref(), Some("OK"));
     }
 }

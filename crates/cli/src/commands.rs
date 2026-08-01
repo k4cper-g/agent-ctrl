@@ -1794,11 +1794,15 @@ fn state_summary(state: &agent_ctrl_core::State) -> String {
     }
 }
 
-/// Render an internal `ref_N` id as the agent-friendly `@eN` form.
+/// Render internal action/scope ids as agent-friendly `@eN` / `@sN` refs.
 fn display_ref(internal: &str) -> String {
-    internal
-        .strip_prefix("ref_")
-        .map_or_else(|| internal.to_owned(), |n| format!("@e{n}"))
+    if let Some(n) = internal.strip_prefix("ref_") {
+        format!("@e{n}")
+    } else if let Some(n) = internal.strip_prefix("scope_") {
+        format!("@s{n}")
+    } else {
+        internal.to_owned()
+    }
 }
 
 // ---------- Action helpers ----------
@@ -2410,19 +2414,23 @@ fn parse_surface(s: &str) -> Result<SurfaceKind> {
     }
 }
 
-/// Parse the agent-friendly `@eN` form (and accept the raw `ref_N` form
-/// that the wire protocol carries). The internal representation stays
-/// `ref_N` so the JSON-RPC envelope is unchanged.
+/// Parse agent-friendly action refs (`@eN`) and scope refs (`@sN`), accepting
+/// their raw wire forms (`ref_N` / `scope_N`) too.
 fn parse_ref(s: &str) -> Result<RefId> {
     let internal = if let Some(n) = s.strip_prefix("@e") {
-        if !n.chars().all(|c| c.is_ascii_digit()) {
-            bail!("invalid ref {s:?}; expected `@eN` or `ref_N` with N a non-negative integer");
+        if n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
+            bail!("invalid ref {s:?}; expected `@eN`, `@sN`, `ref_N`, or `scope_N`");
         }
         format!("ref_{n}")
-    } else if s.starts_with("ref_") {
+    } else if let Some(n) = s.strip_prefix("@s") {
+        if n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
+            bail!("invalid ref {s:?}; expected `@eN`, `@sN`, `ref_N`, or `scope_N`");
+        }
+        format!("scope_{n}")
+    } else if s.starts_with("ref_") || s.starts_with("scope_") {
         s.to_owned()
     } else {
-        bail!("invalid ref {s:?}; expected `@eN` or `ref_N`")
+        bail!("invalid ref {s:?}; expected `@eN`, `@sN`, `ref_N`, or `scope_N`")
     };
     Ok(RefId(internal))
 }
@@ -2468,7 +2476,7 @@ fn parse_session_id(id: &str) -> Result<SessionId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_error_code, error_hint, strip_leading_json_bom};
+    use super::{classify_error_code, display_ref, error_hint, parse_ref, strip_leading_json_bom};
 
     #[test]
     fn batch_json_allows_leading_utf8_bom() {
@@ -2508,5 +2516,15 @@ mod tests {
             error_hint("ref not found in cached snapshot: ref_99"),
             Some("Refs are snapshot-scoped. Re-run `agent-ctrl snapshot`, then find the element again.")
         );
+    }
+
+    #[test]
+    fn ref_display_and_parsing_cover_action_and_scope_namespaces() {
+        assert!(matches!(parse_ref("@e12"), Ok(id) if id.0 == "ref_12"));
+        assert!(matches!(parse_ref("@s3"), Ok(id) if id.0 == "scope_3"));
+        assert_eq!(display_ref("ref_12"), "@e12");
+        assert_eq!(display_ref("scope_3"), "@s3");
+        assert!(parse_ref("@e").is_err());
+        assert!(parse_ref("@s").is_err());
     }
 }

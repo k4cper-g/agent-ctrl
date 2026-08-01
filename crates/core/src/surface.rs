@@ -201,6 +201,21 @@ pub trait Surface: Send + Sync {
     /// Capture a snapshot of the current accessibility tree.
     async fn snapshot(&self, opts: &SnapshotOptions) -> Result<Snapshot>;
 
+    /// Capture a snapshot without replacing the refs used by [`Self::act`].
+    ///
+    /// Wait loops use this while polling so an action interleaved from another
+    /// client keeps resolving against the last committed user snapshot. The
+    /// returned capture may later be installed with
+    /// [`Self::commit_observation`].
+    async fn snapshot_for_observation(&self, opts: &SnapshotOptions) -> Result<Snapshot>;
+
+    /// Install a capture returned by [`Self::snapshot_for_observation`].
+    ///
+    /// Implementations must replace their action-time ref state with the
+    /// exact refs and native handles in `snapshot`, without recapturing the OS
+    /// tree. The daemon calls this only when a wait reaches a terminal outcome.
+    async fn commit_observation(&self, snapshot: &Snapshot) -> Result<()>;
+
     /// Execute an action against the most recent snapshot's [`RefMap`].
     ///
     /// The surface is responsible for re-resolving any [`RefId`](crate::node::RefId)

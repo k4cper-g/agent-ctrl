@@ -68,9 +68,7 @@ Examples:
   virtual X server, `dbus-run-session` a private session bus, and
   `at-spi-bus-launcher` the AT-SPI registry on it. Same recipe GTK's own CI
   uses.
-- **CI-ready.** The headless stack is plain `apt` packages plus the
-  `entrypoint.sh` preamble, so a CI job can run the same `RUN_ATSPI_TESTS=1`
-  fixture test inline without building the full image. Today the test is
-  opt-in, like the Windows UIA (`RUN_UIA_TESTS`) and macOS AX (`RUN_AX_TESTS`)
-  fixture tests; wiring an `ubuntu-latest` AT-SPI job into
-  `.github/workflows/ci.yml` is a follow-up.
+- **CI-backed.** The headless stack is plain `apt` packages plus the
+  `entrypoint.sh` preamble. The `atspi-smoke` job in
+  `.github/workflows/ci.yml` runs the same `RUN_ATSPI_TESTS=1` fixture test on
+  `ubuntu-latest` without building the full image. Local runs remain opt-in.

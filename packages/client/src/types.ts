@@ -11,7 +11,10 @@ export const PROTOCOL_VERSION = 2;
 /** Opaque session id allocated by `OpenSession`. */
 export type SessionId = string;
 
-/** Stable per-snapshot reference to a node. Only valid for the snapshot that produced it. */
+/**
+ * Stable per-snapshot node reference. `ref_N` values are action targets;
+ * `scope_N` values are structural roots for inspection and `find.in_ref`.
+ */
 export type RefId = string;
 
 // ---------- Surface ----------
@@ -186,9 +189,8 @@ export interface ActionResult {
  * Filter set for `find` / `wait-for` queries against a snapshot's tree.
  *
  * All fields are filters; an unset filter matches anything. Multiple filters
- * AND together. Matching always requires the node to carry a `RefId` -
- * non-interactive structural nodes are never returned because they cannot
- * be acted on.
+ * AND together. Normal queries return action/content refs. A query with an
+ * explicit structural role can return a scope-only `scope_N` ref.
  */
 export interface FindQuery {
   /**
@@ -201,8 +203,8 @@ export interface FindQuery {
   /** Restrict matches to a single role. */
   role?: Role;
   /**
-   * Restrict the search to the subtree rooted at this ref. The root node
-   * itself is included in the search.
+   * Restrict the search to the subtree rooted at an action or scope ref. The
+   * root node itself is included in the search.
    */
   in_ref?: RefId;
   /** Cap on the number of matches returned. Omit for unlimited. */
@@ -211,7 +213,7 @@ export interface FindQuery {
 
 /** One row of `AgentCtrl.find` output. */
 export interface FindMatch {
-  /** Ref the agent uses to target this node. */
+  /** Action ref (`ref_N`) or structural scope ref (`scope_N`). */
   ref_id: RefId;
   /** Role at the time the snapshot was taken. */
   role: Role;

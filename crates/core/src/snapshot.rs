@@ -12,9 +12,9 @@ use crate::surface::SurfaceKind;
 /// Query used by [`Snapshot::find`] to locate refs without re-snapshotting.
 ///
 /// All fields are filters; an unset filter matches anything. Multiple filters
-/// AND together. Matching always requires the node to carry a [`RefId`] -
-/// non-interactive structural nodes are not returned because they cannot be
-/// acted on.
+/// AND together. Actionable/content nodes carry `ref_N` ids. Structural scope
+/// nodes carry `scope_N` ids and participate in results when a structural role
+/// is explicitly requested.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FindQuery {
     /// Match against `node.name`. Case-insensitive substring by default;
@@ -30,8 +30,8 @@ pub struct FindQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
 
-    /// Restrict the search to the subtree rooted at this ref. The root node
-    /// itself is included in the search.
+    /// Restrict the search to the subtree rooted at this action or scope ref.
+    /// The root node itself is included in the search.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_ref: Option<RefId>,
 
@@ -48,7 +48,7 @@ fn is_false(b: &bool) -> bool {
 /// One row of [`Snapshot::find`] output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindMatch {
-    /// Ref the agent uses to target this node.
+    /// Action ref (`ref_N`) or structural scope ref (`scope_N`).
     pub ref_id: RefId,
     /// Role at the time the snapshot was taken.
     pub role: Role,
@@ -149,7 +149,8 @@ pub struct Snapshot {
     /// Root of the captured tree.
     pub root: Node,
 
-    /// Lookup table from agent-facing [`RefId`] to platform hints.
+    /// Lookup table from actionable agent-facing [`RefId`]s to platform hints.
+    /// Scope-only refs live on tree nodes and are intentionally absent here.
     pub refs: RefMap,
 }
 
@@ -162,10 +163,10 @@ impl Snapshot {
 
     /// Search this snapshot's tree for nodes matching `query`.
     ///
-    /// Returns matches in tree order (pre-order DFS). Only nodes that carry a
-    /// [`RefId`] are returned, since the agent needs a ref to act on them.
-    /// When `query.in_ref` is set but no node in the tree carries that ref,
-    /// the result is empty.
+    /// Returns matches in tree order (pre-order DFS). Action refs are returned
+    /// for normal queries. Scope-only refs are returned when `query.role`
+    /// explicitly names a structural role, keeping an unfiltered `find` free
+    /// of container noise. When `query.in_ref` is unknown, the result is empty.
     #[must_use]
     pub fn find(&self, query: &FindQuery) -> Vec<FindMatch> {
         let mut out = Vec::new();
@@ -221,7 +222,9 @@ fn collect_matches(node: &Node, query: &FindQuery, limit: usize, out: &mut Vec<F
         return;
     }
     if let Some(ref_id) = &node.ref_id {
-        if matches_filters(node, query) {
+        let include_scope =
+            !ref_id.is_scope() || query.role.as_ref().is_some_and(Role::is_structural);
+        if include_scope && matches_filters(node, query) {
             out.push(FindMatch {
                 ref_id: ref_id.clone(),
                 role: node.role.clone(),
@@ -235,6 +238,29 @@ fn collect_matches(node: &Node, query: &FindQuery, limit: usize, out: &mut Vec<F
         }
         collect_matches(child, query, limit, out);
     }
+}
+
+/// Assign deterministic `scope_N` refs to useful structural subtree roots.
+///
+/// Surfaces call this after compaction so ids follow the exact tree exposed to
+/// clients. Action/content refs are never replaced, and scope refs are not
+/// inserted into [`RefMap`], which prevents them from reaching an action-time
+/// native resolver.
+pub fn assign_scope_refs(root: &mut Node) {
+    fn visit(node: &mut Node, next: &mut usize) {
+        let named_wrapper = matches!(node.role, Role::Group | Role::Generic)
+            && (!node.name.is_empty() || node.description.is_some());
+        if node.ref_id.is_none() && (node.role.is_scope_container() || named_wrapper) {
+            node.ref_id = Some(RefId::new_scope(*next));
+            *next += 1;
+        }
+        for child in &mut node.children {
+            visit(child, next);
+        }
+    }
+
+    let mut next = 0;
+    visit(root, &mut next);
 }
 
 fn collect_observations(
@@ -281,8 +307,8 @@ fn matches_filters(node: &Node, query: &FindQuery) -> bool {
     true
 }
 
-/// Bidirectional map from agent-facing [`RefId`]s to the data needed to
-/// rediscover the underlying native element at action time.
+/// Bidirectional map from actionable agent-facing [`RefId`]s to the data
+/// needed to rediscover the underlying native element at action time.
 ///
 /// Native a11y handles are routinely invalidated by the OS (window relayouts,
 /// tree mutations, focus changes), so we never expose them to the agent.
@@ -432,10 +458,11 @@ mod tests {
             ],
             ..leaf(Role::Document, "", None)
         };
-        let root = Node {
+        let mut root = Node {
             children: vec![menubar, document],
             ..leaf(Role::Window, "Editor", None)
         };
+        assign_scope_refs(&mut root);
 
         Snapshot {
             captured_at: SystemTime::UNIX_EPOCH,
@@ -501,6 +528,40 @@ mod tests {
         };
         let names: Vec<_> = snap.find(&q).into_iter().map(|m| m.name).collect();
         assert_eq!(names, vec!["File"]);
+    }
+
+    #[test]
+    fn structural_role_returns_scope_ref_for_subtree_queries() {
+        let snap = fixture();
+        let scope = snap
+            .find(&FindQuery {
+                role: Some(Role::MenuBar),
+                ..FindQuery::default()
+            })
+            .into_iter()
+            .next()
+            .expect("menu bar should have a scope ref")
+            .ref_id;
+        assert!(scope.is_scope());
+        assert!(snap.refs.get(&scope).is_none());
+
+        let names = snap
+            .find(&FindQuery {
+                in_ref: Some(scope),
+                ..FindQuery::default()
+            })
+            .into_iter()
+            .map(|m| m.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["File", "Edit"]);
+    }
+
+    #[test]
+    fn unfiltered_find_excludes_scope_refs() {
+        let snap = fixture();
+        let matches = snap.find(&FindQuery::default());
+        assert_eq!(matches.len(), 5);
+        assert!(matches.iter().all(|m| !m.ref_id.is_scope()));
     }
 
     #[test]

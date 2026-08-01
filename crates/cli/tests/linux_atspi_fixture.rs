@@ -5,7 +5,7 @@
 //! `RUN_ATSPI_TESTS=1` and a Linux host, and expects the headless a11y stack
 //! from `docker/linux-dev/` (Xvfb + a private session bus + the AT-SPI
 //! registry). The action vocabulary is a follow-up, so this test only covers
-//! `snapshot`, `find`, `get`, `is`, and `window-list`.
+//! `snapshot`, `find`, `get`, `is`, `wait-for`, and `window-list`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -74,6 +74,7 @@ fn run_fixture_flow() {
 
     run.exercise_snapshot();
     run.exercise_find_and_inspect();
+    run.exercise_wait();
     run.exercise_window_list();
 }
 
@@ -122,6 +123,9 @@ impl FixtureRun<'_> {
         let snap: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(snap["surface_kind"], "atspi");
         assert_eq!(snap["app"]["name"], "agent-ctrl-atspi-fixture");
+        assert!(snap["root"]["ref_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("scope_")));
 
         let mut refs = Vec::new();
         collect_refs(&snap["root"], &mut refs);
@@ -140,6 +144,32 @@ impl FixtureRun<'_> {
                 "snapshot is missing the {role} {name:?}; captured refs: {refs:?}"
             );
         }
+    }
+
+    fn exercise_wait(&self) {
+        self.snapshot();
+        let waited = run_cli(
+            self.cli,
+            self.home,
+            [
+                "wait-for",
+                "Increment",
+                "--role",
+                "button",
+                "--timeout",
+                "2000",
+                "--poll",
+                "50",
+                "--json",
+                "--session",
+                "fixture",
+            ],
+        );
+        let waited: serde_json::Value = serde_json::from_str(&waited).unwrap();
+        assert_eq!(waited["outcome"], "matched");
+        assert!(waited["found"]["ref_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("ref_")));
     }
 
     fn exercise_find_and_inspect(&self) {

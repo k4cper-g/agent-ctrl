@@ -193,6 +193,32 @@ impl Role {
                 | Self::Frame
         )
     }
+
+    /// Returns `true` for structural roles that form useful query scopes.
+    ///
+    /// Named [`Self::Group`] and [`Self::Generic`] nodes are handled
+    /// separately because unnamed wrappers would create noisy scope refs.
+    #[must_use]
+    pub fn is_scope_container(&self) -> bool {
+        matches!(
+            self,
+            Self::List
+                | Self::Table
+                | Self::Grid
+                | Self::TreeGrid
+                | Self::Menu
+                | Self::MenuBar
+                | Self::Toolbar
+                | Self::TabList
+                | Self::Tree
+                | Self::Document
+                | Self::Application
+                | Self::Window
+                | Self::Dialog
+                | Self::App
+                | Self::Frame
+        )
+    }
 }
 
 #[cfg(test)]
@@ -215,5 +241,15 @@ mod tests {
     fn role_serializes_kebab_case() {
         let json = serde_json::to_string(&Role::TextField).unwrap();
         assert_eq!(json, "\"text-field\"");
+    }
+
+    #[test]
+    fn scope_containers_exclude_noisy_generic_wrappers() {
+        assert!(Role::Dialog.is_scope_container());
+        assert!(Role::Menu.is_scope_container());
+        assert!(Role::Window.is_scope_container());
+        assert!(!Role::Group.is_scope_container());
+        assert!(!Role::Generic.is_scope_container());
+        assert!(!Role::Button.is_scope_container());
     }
 }

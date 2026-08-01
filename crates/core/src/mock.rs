@@ -14,7 +14,7 @@ use crate::action::{Action, ActionResult};
 use crate::error::{Error, Result};
 use crate::node::{AppContext, Bounds, Node, State, WindowContext};
 use crate::role::Role;
-use crate::snapshot::{RefMap, Snapshot, SnapshotOptions};
+use crate::snapshot::{assign_scope_refs, RefMap, Snapshot, SnapshotOptions};
 use crate::surface::{capability, CapabilitySet, Surface, SurfaceKind, WindowInfo};
 
 /// Surface that returns a fixed fake tree and records actions in memory.
@@ -81,7 +81,7 @@ impl Surface for MockSurface {
             ..State::default()
         };
 
-        let root = Node {
+        let mut root = Node {
             ref_id: None,
             role: Role::Window,
             name: "Mock Window".into(),
@@ -121,6 +121,7 @@ impl Surface for MockSurface {
             opaque: false,
             native: None,
         };
+        assign_scope_refs(&mut root);
 
         Ok(Snapshot {
             captured_at: SystemTime::now(),
@@ -136,6 +137,15 @@ impl Surface for MockSurface {
             root,
             refs,
         })
+    }
+
+    async fn snapshot_for_observation(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
+        self.snapshot(opts).await
+    }
+
+    async fn commit_observation(&self, _snapshot: &Snapshot) -> Result<()> {
+        // The mock tree is immutable and actions do not resolve native refs.
+        Ok(())
     }
 
     async fn act(&self, action: &Action) -> Result<ActionResult> {

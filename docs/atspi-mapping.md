@@ -166,11 +166,13 @@ the source of truth - exactly the `RefMap` discipline the other surfaces use.
 
 Walk `Accessible.GetChildren()` depth-first from the snapshot root (the app's
 active top-level frame, picked from `org.a11y.atspi.Registry` per
-`SnapshotOptions::target`). Same ref-emission rule as `surface-uia`: emit a
-`RefId` for interactive or content roles; `nth` is the global per-snapshot
-pre-order count of preceding
+`SnapshotOptions::target`). The surface emits action refs for interactive or
+content roles; `nth` is the global per-snapshot pre-order count of preceding
 elements with the same `(role, name)`. `compact` strips `Generic`/`panel`/
-`filler`/`separator`/`section` wrappers. `depth` bounds the walk.
+`filler`/`separator`/`section` wrappers. After compaction, the core assigns
+scope-only refs to useful structural containers. Scope refs are serialized for
+`find --in`, `get`, and `is`, but never enter the action `RefMap`. `depth`
+bounds the walk.
 
 There is no AT-SPI equivalent of a property-batch cache like UIA's
 `BuildUpdatedCache`; each `Accessible`/`Component`/`State` read is its own D-Bus

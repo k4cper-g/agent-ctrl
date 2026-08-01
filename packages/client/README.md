@@ -115,6 +115,12 @@ clipboard operations, raw mouse events, screenshot targets, drag, scroll,
 select, switch-app, and highlight requests. See
 [`src/types.ts`](src/types.ts) for the exact wire shapes.
 
+Snapshot `ref_id` values have two namespaces. `ref_N` identifies an actionable
+element and may be passed to `act`. `scope_N` identifies a structural container
+and may be passed to `find` as `within_ref`, or to `get` and `is`; the daemon
+rejects actions that target it. Explicit structural role queries return scope
+refs, while an unfiltered `find` returns actionable refs only.
+
 The TypeScript wire types in [`src/types.ts`](src/types.ts) are hand-maintained.
 Rust contract tests verify protocol version plus every surface and action label
 so closed-union drift fails CI.

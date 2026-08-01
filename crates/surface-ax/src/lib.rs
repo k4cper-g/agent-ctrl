@@ -16,6 +16,8 @@
 
 #[cfg(target_os = "macos")]
 use agent_ctrl_core::capability;
+#[cfg(target_os = "macos")]
+use agent_ctrl_core::WindowTarget;
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Error, Result, Snapshot, SnapshotOptions, Surface,
     SurfaceKind, WindowInfo,
@@ -141,6 +143,57 @@ impl Surface for AxSurface {
             Err(Error::Unsupported {
                 surface: SurfaceKind::Ax.as_str().into(),
                 action: "snapshot".into(),
+            })
+        }
+    }
+
+    async fn snapshot_for_observation(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
+        #[cfg(target_os = "macos")]
+        {
+            let pinned = *self
+                .pinned
+                .lock()
+                .map_err(|_| Error::Surface(PINNED_LOCK_ERR.into()))?;
+            if pinned.is_none() {
+                return Err(Error::Snapshot(
+                    "no snapshot committed for this session - run `agent-ctrl snapshot` first"
+                        .into(),
+                ));
+            }
+            let mut observation_opts = opts.clone();
+            observation_opts.target = WindowTarget::Foreground;
+            Ok(macos::snapshot(&observation_opts, pinned)?.snapshot)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = opts;
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Ax.as_str().into(),
+                action: "snapshot_for_observation".into(),
+            })
+        }
+    }
+
+    async fn commit_observation(&self, snapshot: &Snapshot) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            if snapshot.surface_kind != SurfaceKind::Ax {
+                return Err(Error::Surface(
+                    "cannot commit a non-AX observation to an AX session".into(),
+                ));
+            }
+            *self
+                .last_snapshot
+                .lock()
+                .map_err(|_| Error::Surface(SNAPSHOT_LOCK_ERR.into()))? = Some(snapshot.clone());
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = snapshot;
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Ax.as_str().into(),
+                action: "commit_observation".into(),
             })
         }
     }

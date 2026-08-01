@@ -29,9 +29,10 @@ use accessibility_sys::{
     AXValueRef, CGKeyCode,
 };
 use agent_ctrl_core::{
-    Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error, MouseButton, MouseOp,
-    NativeHandle, Node, RefEntry, RefId, RefMap, Region, Result, Role, ScreenshotTarget, Snapshot,
-    SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
+    assign_scope_refs, Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error,
+    MouseButton, MouseOp, NativeHandle, Node, RefEntry, RefId, RefMap, Region, Result, Role,
+    ScreenshotTarget, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo,
+    WindowTarget,
 };
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 use core_foundation_sys::base::{kCFAllocatorDefault, CFGetTypeID, CFRelease, CFRetain, CFTypeRef};
@@ -221,7 +222,8 @@ pub(super) fn snapshot(
     let max_depth = opts.depth.unwrap_or(DEFAULT_DEPTH);
     let mut refs = RefMap::new();
     let mut nth_seen = HashMap::new();
-    let node = build_node(root, 0, max_depth, opts.compact, &mut refs, &mut nth_seen);
+    let mut node = build_node(root, 0, max_depth, opts.compact, &mut refs, &mut nth_seen);
+    assign_scope_refs(&mut node);
     let window_id = window_id(pinned);
     // SAFETY: `root` is returned by a create/copy rule helper.
     unsafe { CFRelease(root.cast::<c_void>()) };

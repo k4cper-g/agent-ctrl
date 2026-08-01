@@ -18,8 +18,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 use agent_ctrl_core::{
-    AppContext, Bounds, Checked, Error, NativeHandle, Node, RefMap, Result, Role, Snapshot,
-    SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
+    assign_scope_refs, AppContext, Bounds, Checked, Error, NativeHandle, Node, RefMap, Result,
+    Role, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
 };
 use atspi::connection::AccessibilityConnection;
 use atspi::proxy::accessible::AccessibleProxy;
@@ -110,8 +110,30 @@ impl AtSpiInner {
 
     /// Capture the pinned window's accessibility tree.
     pub(crate) async fn snapshot(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
+        self.capture(opts, true).await
+    }
+
+    /// Capture the pinned tree without replacing session targeting state.
+    pub(crate) async fn snapshot_for_observation(
+        &self,
+        opts: &SnapshotOptions,
+    ) -> Result<Snapshot> {
+        self.capture(opts, false).await
+    }
+
+    async fn capture(&self, opts: &SnapshotOptions, commit: bool) -> Result<Snapshot> {
         let hint = self.pinned.lock().map_err(|_| lock_err())?.clone();
-        let frame = self.resolve_target(&opts.target, hint.as_ref()).await?;
+        if !commit && hint.is_none() {
+            return Err(Error::Snapshot(
+                "no snapshot committed for this session - run `agent-ctrl snapshot` first".into(),
+            ));
+        }
+        let target = if commit {
+            opts.target.clone()
+        } else {
+            WindowTarget::Foreground
+        };
+        let frame = self.resolve_target(&target, hint.as_ref()).await?;
         let conn = self.conn.connection().clone();
 
         let mut walk = Walk {
@@ -122,22 +144,25 @@ impl AtSpiInner {
             compact: opts.compact,
             budget: MAX_NODES,
         };
-        let root = build_subtree(&mut walk, frame.bus.clone(), frame.frame_path.clone(), 0)
+        let mut root = build_subtree(&mut walk, frame.bus.clone(), frame.frame_path.clone(), 0)
             .await
             .ok_or_else(|| {
                 Error::Snapshot("AT-SPI returned no accessible for the target window".into())
             })?;
+        assign_scope_refs(&mut root);
 
         let pid = pid_for_bus(&conn, &frame.bus).await.unwrap_or(0);
         let window_id = format!("{}@{}", frame.bus, frame.frame_path);
         let window_title = (!root.name.is_empty()).then(|| root.name.clone());
 
-        *self.pinned.lock().map_err(|_| lock_err())? = Some(Pinned {
-            bus: frame.bus.clone(),
-            app_path: frame.app_path.clone(),
-            app_name: frame.app_name.clone(),
-            frame_path: frame.frame_path.clone(),
-        });
+        if commit {
+            *self.pinned.lock().map_err(|_| lock_err())? = Some(Pinned {
+                bus: frame.bus.clone(),
+                app_path: frame.app_path.clone(),
+                app_name: frame.app_name.clone(),
+                frame_path: frame.frame_path.clone(),
+            });
+        }
 
         Ok(Snapshot {
             captured_at: SystemTime::now(),
