@@ -476,10 +476,11 @@ cargo build -p agent-ctrl-ax-fixture
 RUN_AX_TESTS=1 cargo test -p agent-ctrl-cli --test macos_ax_fixture
 ```
 
-The AX fixture covers the deterministic macOS loop for snapshots, `find`,
-`click`, `fill`, `check`, `uncheck`, `toggle`, and `window-list`. Keyboard
-actions exist, but are still validated manually because host focus and event-tap
-behavior can vary under the Rust test harness.
+The AX fixture exercises the full macOS action loop against real Cocoa
+controls, including Unicode keyboard input, popup selection, screenshots,
+duplicate accessibility identifiers, and scope-ref navigation through an
+attached sheet and popover. It also verifies that check-state actions reject
+ordinary buttons without mutating them.
 
 Linux AT-SPI fixture:
 

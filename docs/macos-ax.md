@@ -1,9 +1,9 @@
 # macOS AX Surface
 
-`surface-ax` is the next native surface after Windows UIA. It is now a partial
-automation backend: snapshots, window listing, window focus, first element
-actions, checkable controls, and keyboard input are implemented, but it is not
-at Windows UIA parity.
+`surface-ax` is the action-ready native macOS backend. It implements the full
+core action vocabulary together with snapshots, scoped structural refs, window
+selection, and screenshots. Native AX and Windows UIA expose different control
+semantics, so the reliability guides remain platform-specific.
 
 ## Current Coverage
 
@@ -13,30 +13,44 @@ at Windows UIA parity.
 - Captures a focused or first window for `WindowTarget::ProcessName`.
 - Captures the first window whose title contains `WindowTarget::Title`.
 - Walks `AXChildren` up to the requested snapshot depth.
-- Maps common AX roles to the shared `Role` taxonomy.
-- Reads common AX state: enabled, focused, selected, checked, and expanded.
+- Applies a bounded AX messaging timeout to system-wide and application
+  elements so an unresponsive target cannot block the daemon indefinitely.
+- Maps common native, AppKit subrole, and web AX roles to the shared `Role`
+  taxonomy.
+- Reads common AX state: enabled, focused, selected, checked, expanded, hidden,
+  and visible.
+- Reads scalar AX values and uses title, description, placeholder, then textual
+  value as the node-name fallback chain. Non-redundant `AXHelp` becomes the
+  shared node description.
 - Reads AX position/size into shared bounds.
 - Assigns actionable refs to interactive and content nodes, plus scope-only
   refs to useful structural containers after tree compaction.
 - Lists top-level AX windows for the pinned app using session-oriented ids like
   `pid:123:window:0`.
-- Supports `focus-window` for those ids through the AX `AXRaise` action.
-- Stores the latest snapshot refs on the session and rediscover elements by
-  `(role, name, nth)` before acting.
+- Keeps attached sheets and popovers nested under their parent pinned window,
+  even when the nested modal owns keyboard focus.
+- Supports `focus-window` for those ids by activating the owning app and using
+  the AX `AXRaise` action.
+- Stores the latest snapshot refs on the session and rediscovers elements by a
+  unique `AXIdentifier`, or by `(role, name, nth)` when the identifier is absent
+  or duplicated.
 - Supports `click` through `AXPress`.
 - Supports `focus` by setting `AXFocused`.
 - Supports `fill` by setting `AXValue`.
 - Supports `check`, `uncheck`, and `toggle` for AX controls with readable
-  `AXValue` check state.
+  `AXValue` check state. These actions reject ordinary controls and press a
+  checkable target at most once while waiting for the requested transition.
 - Supports `type`, `press`, `key-down`, and `key-up` through
-  CoreGraphics keyboard events.
+  CoreGraphics keyboard events. `type` posts the complete UTF-16 sequence in
+  one event pair so supplementary characters remain intact.
 - Captures `screenshot` for `--target window` (default), `--target desktop`,
   `--target region`, and `--target ref` through `CGWindowListCreateImage`,
   including `--annotated` overlays driven by the cached snapshot bounds.
 - Drives `double-click`, `right-click`, `hover`, `highlight`, `drag`,
   `scroll`, and raw `mouse move/down/up/wheel` through CoreGraphics events.
-  These actions raise the pinned window first, then post the event at the
-  element's center (or the supplied screen coordinates).
+  These actions activate and raise the pinned window first, then post the event
+  at the element's center (or the supplied screen coordinates). Invalid or
+  empty bounds are rejected before posting pointer events.
 - Supports `select-all` (focus + `Cmd+A`), `clear` (focus + `AXValue=""`),
   `scroll-into-view` (`AXScrollToVisible` on the resolved element), and
   `clipboard` read/write through `pbpaste`/`pbcopy` plus copy/paste through
@@ -49,10 +63,10 @@ at Windows UIA parity.
   popup the same way a user would. Falls back to setting `AXValue` on
   other roles.
 - Captures `AXIdentifier` (AppKit `accessibilityIdentifier`) into the internal
-  `NativeHandle::Ax::identifier`, omits it from serialized snapshots, and prefers it over the
-  `(role, name, nth)` triple when re-resolving refs at action time. This
-  is the AX equivalent of UIA's `AutomationId` fast path: it survives
-  tree mutations that rename or reorder the captured node.
+  `NativeHandle::Ax::identifier` and omits it from serialized snapshots. A
+  unique identifier is preferred over the `(role, name, nth)` triple when
+  re-resolving refs at action time; a duplicate identifier deliberately falls
+  back to the triple instead of selecting the first element.
 - Supports `switch-app` through `NSRunningApplication`/`NSWorkspace`. Accepts
   either a bundle id (e.g., `com.apple.Safari`) or an executable file stem
   (e.g., `agent-ctrl-ax-fixture`); the bundle-id path is preferred when both
@@ -117,13 +131,13 @@ RUN_AX_TESTS=1 cargo test -p agent-ctrl-cli --test macos_ax_fixture
 If `open ax` fails with a permission error, grant Accessibility permission and
 retry from a new terminal.
 
-## Roadmap
+## Next Reliability Targets
 
-1. Stabilize keyboard-action validation under the Rust test harness.
-2. Replace `/bin/ps` shell-outs in `process_name` / `process_ids_by_name`
+1. Replace `/bin/ps` shell-outs in `process_name` / `process_ids_by_name`
    with `libproc` for lower latency and structured errors.
-3. Drive the surface against real apps (Safari, TextEdit, Finder, Mail)
+2. Continue driving the surface against real apps (Safari, TextEdit, Finder,
+   Mail)
    and feed the findings back into
    [docs/macos-ax-reliability.md](macos-ax-reliability.md).
-4. Expand the fixture with a scroll view and a sheet/dialog control so we
-   can deterministically test scroll-into-view and modal dialog handling.
+3. Expand deterministic coverage for virtualized and off-screen scroll-view
+   content.

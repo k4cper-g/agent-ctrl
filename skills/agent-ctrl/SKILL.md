@@ -17,9 +17,9 @@ structural scope refs.
 npm i -g @agent-ctrl/cli
 ```
 
-v0.1.x ships Windows x64. macOS AX is preview. Linux AT-SPI supports
-snapshot, queries, inspection, and window listing but not actions yet.
-Android and iOS are planned.
+v0.1.x ships Windows and macOS binaries with action-ready UIA and AX surfaces.
+Linux AT-SPI supports snapshot, queries, inspection, and window listing but
+not actions yet. Android and iOS are planned.
 
 ## First command
 
