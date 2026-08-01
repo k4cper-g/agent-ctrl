@@ -94,7 +94,11 @@ agent-ctrl screenshot result.png                 # PNG of the pinned window
 agent-ctrl close                                 # stop the daemon
 ```
 
-Every action follows the same pattern: `snapshot` once to learn what's on screen, then issue actions by ref. Refs are valid only for the snapshot that produced them - re-snapshot before acting on a tree that has changed.
+Every action follows the same pattern: `snapshot` once to learn what's on screen,
+then issue actions by ref. Actionable elements use `@eN`; structural containers
+such as windows and dialogs use scope-only `@sN` refs. Both are valid only for
+the snapshot that produced them. Use scope refs with `find --in`, `get`, and
+`is`; actions reject them. Re-snapshot before acting on a tree that has changed.
 
 Surfaces advertise capabilities when a session opens, and the daemon enforces
 them before dispatch. Native OS handles stay inside the surface process and are
@@ -179,15 +183,27 @@ agent-ctrl find "Save"                   # case-insensitive substring on name
 agent-ctrl find "Save" --role button     # narrow by role (kebab-case)
 agent-ctrl find "Save" --exact           # case-sensitive equality
 agent-ctrl find --role menu-item         # all nodes of a role; no name filter
-agent-ctrl find "OK" --in @e2            # restrict to subtree under @e2
+agent-ctrl find --role dialog --first     # structural container as a scope ref
+agent-ctrl find "OK" --in @s0            # restrict to subtree under a scope
 agent-ctrl find "Save" --first           # bare ref for shell substitution
 agent-ctrl find --limit 5                # cap result count
 ```
 
-`find` queries the *cached* snapshot - it does not re-walk the OS tree. With no match, writes `no match` to stderr and exits non-zero. `--first` prints just `@eN` so the canonical "find then act" pattern composes:
+`find` queries the *cached* snapshot - it does not re-walk the OS tree. With no
+match, it writes `no match` to stderr and exits non-zero. `--first` prints a
+bare ref, so the canonical "find then act" pattern composes:
 
 ```bash
 agent-ctrl click "$(agent-ctrl find "Save" --role button --first)"
+```
+
+Actionable matches are `@eN`. An explicit structural role query can return an
+`@sN` scope ref, which is useful for narrowing a later query without making a
+window, dialog, toolbar, or other container accidentally actionable:
+
+```bash
+DIALOG="$(agent-ctrl find --role dialog --first)"
+agent-ctrl click "$(agent-ctrl find "OK" --role button --in "$DIALOG" --first)"
 ```
 
 ### Inspect
@@ -209,7 +225,8 @@ agent-ctrl is checked @eN
 agent-ctrl is expanded @eN
 ```
 
-Inspect commands read the cached snapshot. They are fast and deterministic, but require a prior `snapshot`.
+Inspect commands read the cached snapshot and accept both `@eN` and `@sN` refs.
+They are fast and deterministic, but require a prior `snapshot`.
 
 ### Wait
 
@@ -224,7 +241,11 @@ agent-ctrl wait-for --stable [--idle-ms 500]        # wait for the tree signatur
 agent-ctrl wait-for ... --timeout 10000 --poll 250  # tune the poll loop
 ```
 
-Three reliability tiers. Use `--stable` after a click to let the UI settle before the next action. Exit codes: 0 satisfied, 1 bad args, 2 timeout - branch on those in shell pipelines instead of parsing strings.
+Three reliability tiers. Use `--stable` after a click to let the UI settle before
+the next action. Polling observations do not replace the session's committed
+action refs. When the wait matches or times out, its terminal observation is
+promoted once as the new cached snapshot. Exit codes: 0 satisfied, 1 bad args,
+2 timeout - branch on those in shell pipelines instead of parsing strings.
 
 ### Windows
 
@@ -473,9 +494,10 @@ docker run --rm -v "$PWD:/work" -w /work agent-ctrl-linux-dev \
   bash -c 'RUN_ATSPI_TESTS=1 cargo test -p agent-ctrl-cli --test linux_atspi_fixture'
 ```
 
-The opt-in `linux_atspi_fixture` test (gated by `RUN_ATSPI_TESTS=1`, like the
-UIA and AX fixture tests) opens an `atspi` session, launches the GTK fixture,
-and exercises `snapshot`, `find`, `get`, `is`, and `window-list`. See
+The `linux_atspi_fixture` test is gated by `RUN_ATSPI_TESTS=1` for local runs
+and runs automatically in CI's headless `atspi-smoke` job. It opens an `atspi`
+session, launches the GTK fixture, and exercises `snapshot`, `find`, `get`,
+`is`, `wait-for`, and `window-list`. See
 [`docker/linux-dev/README.md`](docker/linux-dev/README.md) for the full
 container invocation.
 
@@ -546,7 +568,10 @@ These are real today - the goal is to fix or document them as the project mature
 - **Windows and macOS are the action-ready surfaces.** Linux (AT-SPI) is snapshot-read only - it captures trees, resolves `find`/inspect refs, and lists windows, but cannot yet click, type, or focus; Android / iOS / browser flows are not implemented in this project yet. macOS additionally requires Screen Recording permission for `screenshot` and may require Automation permission for some Apple system apps (Notes, Calendar, Music) - see [docs/macos-ax-reliability.md](docs/macos-ax-reliability.md).
 - **Linux apps must have accessibility enabled to be visible.** GTK and Qt only build their AT-SPI tree when `org.a11y.Status.IsEnabled` is set; `agent-ctrl open atspi` flips it, but an app already running may take a moment to register its tree (use `snapshot --settle`). Headless geometry is approximate - GTK under Xvfb reports no screen coordinates, so `bounds` may be absent.
 - **Local TCP daemon auth is developer-machine scoped.** TCP session files include a random bearer token and the daemon rejects missing or incorrect tokens, but anyone who can read `~/.agent-ctrl/<session>.json` can still use that session. Treat sessions as a local developer-machine boundary, not a multi-user security sandbox.
-- **Refs are valid only against the snapshot that produced them.** If `wait-for` runs in parallel with another command on the same session (across two shells), the wait loop refreshes the cached refs on each poll, and a previously-issued ref may resolve to a different element. Sequential CLI usage in one shell - the realistic flow - doesn't trip this.
+- **Refs are valid only against the snapshot that produced them.** `wait-for`
+  keeps intermediate polling observations isolated, then promotes its terminal
+  capture once. After a wait returns, use its returned ref or run `find` again
+  before acting.
 - **Modern Win11 file dialogs and popup menus open as sibling top-level windows**, not as children of the app's main window. Use `window-list` + `focus-window` to discover and switch to them.
 - **`type` bypasses IME.** Synthetic Unicode keystrokes via `SendInput` are reliable for ASCII; CJK with IME composition is not supported yet. `fill` (UIA `ValuePattern`) is the right escape hatch for non-ASCII text input.
 - **HWND recycling.** Windows reassigns numeric HWNDs after a window closes; `window-list` shows whatever currently holds an id, with no UIA-runtime-id verification. Theoretical, never observed in practice.

@@ -8,6 +8,12 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 ### Added
 
+- Scope-only structural refs (`scope_N` in JSON, `@sN` in CLI output) for
+  windows, dialogs, and other useful containers. They can narrow `find --in`
+  queries and support `get` / `is`, while the daemon rejects action dispatch
+  before it reaches a platform surface.
+- A headless Linux AT-SPI fixture job and aggregate `CI complete` status so
+  branch protection can require the full cross-platform matrix with one check.
 - Windows UIA snapshot fidelity: nodes now carry `description` (from UIA
   `HelpText`, kept only when it adds information beyond `name`), `level` (the
   UIA hierarchy depth for tree items, list items, and headings), and a `value`
@@ -42,6 +48,9 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 ### Fixed
 
+- `wait-for` polling observations no longer replace the action ref map on each
+  poll. Only the terminal matching, stable, gone, or timeout snapshot is
+  committed, and it is promoted without a second native capture.
 - Windows UIA action-time resolution no longer takes the `AutomationId`
   fast path for refs past the first occurrence of their `(role, name)` pair.
   AutomationIds are duplicated across repeated templates, so `FindFirst`

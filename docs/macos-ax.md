@@ -16,7 +16,8 @@ at Windows UIA parity.
 - Maps common AX roles to the shared `Role` taxonomy.
 - Reads common AX state: enabled, focused, selected, checked, and expanded.
 - Reads AX position/size into shared bounds.
-- Assigns refs to interactive and content nodes.
+- Assigns actionable refs to interactive and content nodes, plus scope-only
+  refs to useful structural containers after tree compaction.
 - Lists top-level AX windows for the pinned app using session-oriented ids like
   `pid:123:window:0`.
 - Supports `focus-window` for those ids through the AX `AXRaise` action.

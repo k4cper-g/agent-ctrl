@@ -95,6 +95,36 @@ impl Surface for UiaSurface {
         }
     }
 
+    async fn snapshot_for_observation(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
+        #[cfg(target_os = "windows")]
+        {
+            self.inner.snapshot_for_observation(opts).await
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = opts;
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Uia.as_str().into(),
+                action: "snapshot_for_observation".into(),
+            })
+        }
+    }
+
+    async fn commit_observation(&self, snapshot: &Snapshot) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            self.inner.commit_observation(snapshot).await
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = snapshot;
+            Err(Error::Unsupported {
+                surface: SurfaceKind::Uia.as_str().into(),
+                action: "commit_observation".into(),
+            })
+        }
+    }
+
     async fn act(&self, action: &Action) -> Result<ActionResult> {
         #[cfg(target_os = "windows")]
         {

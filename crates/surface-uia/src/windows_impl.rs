@@ -100,9 +100,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use agent_ctrl_core::{
-    Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error, MouseButton, MouseOp,
-    NativeHandle, Node, RefEntry, RefId, RefMap, Region, Result, Role, ScreenshotTarget, Snapshot,
-    SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo, WindowTarget,
+    assign_scope_refs, Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error,
+    MouseButton, MouseOp, NativeHandle, Node, RefEntry, RefId, RefMap, Region, Result, Role,
+    ScreenshotTarget, Snapshot, SnapshotOptions, State, SurfaceKind, WindowContext, WindowInfo,
+    WindowTarget,
 };
 
 // ---------- Worker thread ----------
@@ -347,6 +348,40 @@ impl UiaInner {
             .await
     }
 
+    /// Capture the pinned window without replacing action-time refs.
+    pub(crate) async fn snapshot_for_observation(
+        &self,
+        opts: &SnapshotOptions,
+    ) -> Result<Snapshot> {
+        let opts = opts.clone();
+        self.run(move |state| {
+            let hwnd = state.last_hwnd.ok_or_else(|| {
+                Error::Snapshot(
+                    "no snapshot committed for this session - run `agent-ctrl snapshot` first"
+                        .into(),
+                )
+            })?;
+            capture_with_options(&state.automation, &state.cache_request, &opts, hwnd)
+        })
+        .await
+    }
+
+    /// Promote an observation capture to the action-time snapshot.
+    pub(crate) async fn commit_observation(&self, snapshot: &Snapshot) -> Result<()> {
+        let snapshot = snapshot.clone();
+        self.run(move |state| {
+            if snapshot.surface_kind != SurfaceKind::Uia {
+                return Err(Error::Surface(
+                    "cannot commit a non-UIA observation to a UIA session".into(),
+                ));
+            }
+            state.last_refs = snapshot.refs.clone();
+            state.last_snapshot = Some(snapshot);
+            Ok(())
+        })
+        .await
+    }
+
     /// Execute an action against the most recent snapshot's refs.
     pub(crate) async fn act(&self, action: Action) -> Result<ActionResult> {
         // `Action::Wait { ms }` deliberately blocks the worker for `ms`, so its
@@ -493,6 +528,7 @@ fn capture_with_options(
         root.ref_id = Some(id);
     }
     root.children = walk_children(&root_element, &mut refs, &mut nth_seen, 1, opts, dpi_scale)?;
+    assign_scope_refs(&mut root);
 
     let window_title = if root.name.is_empty() {
         None

@@ -8,7 +8,8 @@ hidden: true
 # agent-ctrl
 
 Cross-platform desktop automation CLI for AI agents. Drives native desktop
-apps via the OS accessibility tree with compact `@eN` element refs.
+apps via the OS accessibility tree with compact `@eN` action refs and `@sN`
+structural scope refs.
 
 ## Install
 
@@ -35,7 +36,7 @@ agent-ctrl info
 # Open a session against the OS surface (uia | ax | atspi | mock)
 agent-ctrl open uia --session demo
 
-# Snapshot the focused window - returns a compact a11y tree with @eN refs
+# Snapshot the focused window - returns @eN action and @sN scope refs
 agent-ctrl snapshot --session demo
 
 # Drive elements by ref
@@ -54,15 +55,17 @@ agent-ctrl close --session demo
 ## Snapshot output
 
 ```
-window "Untitled - Notepad" [focused]
+@s0 window "Untitled - Notepad" [focused]
   @e0 menu-item "File"
   @e1 menu-item "Edit"
   @e2 edit "Document" = ""
 ```
 
-Each `@eN` is a stable ref into the cached snapshot. Pass it to any action
-(`click`, `fill`, `focus`, `hover`, `scroll-into-view`, ...) without
-re-walking the tree.
+Each `@eN` is an actionable ref into the cached snapshot. Pass it to actions
+such as `click`, `fill`, `focus`, `hover`, and `scroll-into-view` without
+re-walking the tree. Each `@sN` is a scope-only structural ref. Use it with
+`find --in`, `get`, or `is`; actions reject it. Both namespaces are valid only
+for the snapshot that produced them.
 
 ## Searching the cached snapshot
 
@@ -70,6 +73,8 @@ After `snapshot`, query without re-walking the OS:
 
 ```bash
 agent-ctrl find "Save"                  # case-insensitive substring
+agent-ctrl find --role dialog --first    # returns a structural @sN scope
+agent-ctrl find "OK" --in @s0            # search only inside that scope
 agent-ctrl get name @e0                  # one field from a ref
 agent-ctrl is enabled @e2                # boolean state
 ```

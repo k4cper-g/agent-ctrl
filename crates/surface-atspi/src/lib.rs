@@ -93,6 +93,32 @@ impl Surface for AtSpiSurface {
         }
     }
 
+    async fn snapshot_for_observation(&self, opts: &SnapshotOptions) -> Result<Snapshot> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.snapshot_for_observation(opts).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = opts;
+            Err(Error::Unsupported {
+                surface: SurfaceKind::AtSpi.as_str().into(),
+                action: "snapshot_for_observation".into(),
+            })
+        }
+    }
+
+    async fn commit_observation(&self, snapshot: &Snapshot) -> Result<()> {
+        if snapshot.surface_kind != SurfaceKind::AtSpi {
+            return Err(Error::Surface(
+                "cannot commit a non-AT-SPI observation to an AT-SPI session".into(),
+            ));
+        }
+        // AT-SPI has no action path yet. Its pinned window remains unchanged,
+        // while the daemon installs the exact observation for find/get/is.
+        Ok(())
+    }
+
     async fn act(&self, action: &Action) -> Result<ActionResult> {
         // The AT-SPI action vocabulary (Action.DoAction, Component.GrabFocus,
         // EditableText.SetTextContents) is a follow-up PR; this surface ships

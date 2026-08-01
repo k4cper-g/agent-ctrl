@@ -224,7 +224,8 @@ Framework notes:
   navigation through the URL bar (`@e7 text-field "smart search field"`
   in the toolbar), 200+ refs captured for a typical content page.
   Long pages with lots of `AXGroup` nesting can produce huge snapshots;
-  use `--depth`, role filters, or `find --in @eN` to scope.
+  use `--depth`, role filters, or `find --in @sN` to scope. Explicit structural
+  role queries such as `find --role dialog` produce scope refs.
 - **Electron / Chromium** apps expose a Chromium accessibility tree that
   is rich but uses a lot of `AXGroup` nesting. Use `--depth`, role
   filters, and `--first` to keep agent prompts compact. Identifiers are

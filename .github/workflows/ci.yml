@@ -157,3 +157,65 @@ jobs:
       - run: ./target/debug/agent-ctrl close --session mock
         if: always()
         continue-on-error: true
+
+  atspi-smoke:
+    name: Linux AT-SPI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install headless accessibility stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            at-spi2-core \
+            dbus-x11 \
+            xvfb \
+            x11-utils \
+            libglib2.0-bin \
+            python3-gi \
+            gir1.2-gtk-4.0 \
+            gir1.2-atspi-2.0 \
+            libgtk-4-1
+      - name: Run deterministic GTK fixture
+        run: |
+          chmod +x docker/linux-dev/entrypoint.sh
+          ./docker/linux-dev/entrypoint.sh bash -c \
+            'RUN_ATSPI_TESTS=1 cargo test -p agent-ctrl-cli --test linux_atspi_fixture'
+
+  ci-complete:
+    name: CI complete
+    if: always()
+    needs:
+      - fmt
+      - msrv
+      - clippy
+      - test
+      - ts
+      - site
+      - windows-smoke
+      - macos-smoke
+      - atspi-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every required job passed
+        env:
+          FMT: ${{ needs.fmt.result }}
+          MSRV: ${{ needs.msrv.result }}
+          CLIPPY: ${{ needs.clippy.result }}
+          TEST: ${{ needs.test.result }}
+          TYPESCRIPT: ${{ needs.ts.result }}
+          SITE: ${{ needs.site.result }}
+          WINDOWS_SMOKE: ${{ needs['windows-smoke'].result }}
+          MACOS_SMOKE: ${{ needs['macos-smoke'].result }}
+          ATSPI_SMOKE: ${{ needs['atspi-smoke'].result }}
+        run: |
+          for result in \
+            "$FMT" "$MSRV" "$CLIPPY" "$TEST" "$TYPESCRIPT" \
+            "$SITE" "$WINDOWS_SMOKE" "$MACOS_SMOKE" "$ATSPI_SMOKE"; do
+            if [ "$result" != "success" ]; then
+              echo "required CI job did not pass: $result" >&2
+              exit 1
+            fi
+          done

@@ -202,6 +202,78 @@ impl Action {
             Self::Screenshot { .. } => "screenshot",
         }
     }
+
+    /// Return the first scope-only ref incorrectly supplied as an action target.
+    ///
+    /// Scope refs are valid for inspection and subtree queries, but must never
+    /// reach platform input APIs. Callers should reject a returned id before
+    /// capability checks or surface dispatch.
+    #[must_use]
+    pub fn scope_ref(&self) -> Option<&RefId> {
+        let refs: [Option<&RefId>; 2] = match self {
+            Self::Click { ref_id }
+            | Self::DoubleClick { ref_id }
+            | Self::RightClick { ref_id }
+            | Self::Hover { ref_id }
+            | Self::Focus { ref_id }
+            | Self::Fill { ref_id, .. }
+            | Self::Select { ref_id, .. }
+            | Self::Check { ref_id }
+            | Self::Uncheck { ref_id }
+            | Self::Toggle { ref_id }
+            | Self::Clear { ref_id }
+            | Self::Highlight { ref_id, .. }
+            | Self::ScrollIntoView { ref_id }
+            | Self::Screenshot {
+                target: Some(ScreenshotTarget::Ref { ref_id }),
+                ..
+            } => [Some(ref_id), None],
+            Self::Scroll { ref_id, .. } | Self::SelectAll { ref_id } => [ref_id.as_ref(), None],
+            Self::Drag { from, to } => [Some(from), Some(to)],
+            Self::Type { .. }
+            | Self::Press { .. }
+            | Self::KeyDown { .. }
+            | Self::KeyUp { .. }
+            | Self::Clipboard { .. }
+            | Self::Mouse { .. }
+            | Self::Wait { .. }
+            | Self::SwitchApp { .. }
+            | Self::FocusWindow { .. }
+            | Self::Screenshot { .. } => [None, None],
+        };
+        refs.into_iter().flatten().find(|ref_id| ref_id.is_scope())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_ref_checks_all_multi_or_optional_ref_positions() {
+        let scope = RefId::new_scope(4);
+        let action = Action::Drag {
+            from: RefId::new(0),
+            to: scope.clone(),
+        };
+        assert_eq!(action.scope_ref(), Some(&scope));
+
+        let action = Action::Scroll {
+            ref_id: Some(scope.clone()),
+            dx: 0.0,
+            dy: 1.0,
+        };
+        assert_eq!(action.scope_ref(), Some(&scope));
+
+        let action = Action::Screenshot {
+            region: None,
+            target: Some(ScreenshotTarget::Ref {
+                ref_id: scope.clone(),
+            }),
+            annotated: false,
+        };
+        assert_eq!(action.scope_ref(), Some(&scope));
+    }
 }
 
 /// Clipboard operation.

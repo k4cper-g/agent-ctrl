@@ -119,6 +119,19 @@ describe("AgentCtrl driving the mock surface", () => {
 
     const limited = await client.find(session, { limit: 1 });
     expect(limited).toHaveLength(1);
+
+    const scopes = await client.find(session, { role: "window" });
+    expect(scopes).toHaveLength(1);
+    expect(scopes[0]?.ref_id).toBe("scope_0");
+
+    const insideWindow = await client.find(session, {
+      in_ref: scopes[0]?.ref_id,
+      role: "button",
+    });
+    expect(insideWindow).toHaveLength(2);
+    await expect(
+      client.act(session, { kind: "click", ref_id: scopes[0]!.ref_id }),
+    ).rejects.toThrow(/scope-only/);
   }, 120_000);
 
   it("find errors before any snapshot has been taken", async () => {

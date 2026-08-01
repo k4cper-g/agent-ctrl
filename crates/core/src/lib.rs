@@ -14,8 +14,9 @@
 //! ## Design rules
 //!
 //! - **Single-snapshot stable refs.** A [`RefId`](node::RefId) is only valid for
-//!   the snapshot that produced it. Surfaces re-resolve refs to real native
-//!   elements at action time.
+//!   the snapshot that produced it. Action refs are re-resolved to real native
+//!   elements at action time; scope refs identify structural containers for
+//!   cached queries and inspection only.
 //! - **Capability negotiation.** Surfaces advertise a [`CapabilitySet`](surface::CapabilitySet);
 //!   callers must check `supports(...)` before invoking optional actions.
 //! - **No platform leakage.** Anything OS-specific is hidden behind
@@ -43,7 +44,8 @@ pub use inspect::{GetField, GetResult, IsResult, StateField};
 pub use node::{AppContext, Bounds, Checked, NativeHandle, Node, RefId, State, WindowContext};
 pub use role::Role;
 pub use snapshot::{
-    FindMatch, FindQuery, ObservedMatch, RefEntry, RefMap, Snapshot, SnapshotOptions, WindowTarget,
+    assign_scope_refs, FindMatch, FindQuery, ObservedMatch, RefEntry, RefMap, Snapshot,
+    SnapshotOptions, WindowTarget,
 };
 pub use surface::{
     capability, required_capabilities, CapabilitySet, Surface, SurfaceKind, WindowInfo,

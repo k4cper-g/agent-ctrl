@@ -254,7 +254,7 @@ At action-time re-resolution we try in order:
 
 ## 8. Ref-map keying
 
-For each interactive node we emit, the `RefMap` entry stores:
+For each actionable node we emit, the `RefMap` entry stores:
 
 - `role`     - per §1
 - `name`     - `Name` after trimming
@@ -263,6 +263,12 @@ For each interactive node we emit, the `RefMap` entry stores:
 
 `(role, name, nth)` is the durable lookup tuple. UIA-specific identifiers
 are a fast-path hint, never the source of truth.
+
+After compaction, the shared core assigns `scope_N` refs to useful structural
+containers such as windows and dialogs. These refs are serialized as `@sN` by
+the CLI and support `find --in`, `get`, and `is`, but are deliberately absent
+from the action `RefMap`. The daemon rejects an action containing a scope ref
+before it reaches UIA.
 
 ## 9. Tree walking strategy
 
