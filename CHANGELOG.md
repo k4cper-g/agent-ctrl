@@ -6,6 +6,8 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-02
+
 ### Added
 
 - Scope-only structural refs (`scope_N` in JSON, `@sN` in CLI output) for
@@ -39,12 +41,23 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
   the window is brought forward, `ElementFromPoint` confirms the target (or a
   relative of it) is topmost at the click point, otherwise the action fails
   with an error naming what is in the way instead of clicking through to it.
+- macOS AX snapshots now recognize more native and web roles, preserve scalar
+  values, use placeholder text as a name fallback, expose useful `AXHelp` as a
+  description, and honor the native hidden state.
+- The native Cocoa fixture now includes duplicate accessibility identifiers,
+  an attached sheet, and a popover. Its real-AX integration test covers scoped
+  modal discovery, Unicode keyboard input, and safe check-state behavior.
 
 ### Changed
 
 - Windows UIA snapshots no longer expose the contents of password-protected
   fields (`IsPassword`): such a node keeps its ref and role but reports no
   `value`.
+- macOS AX application objects use a bounded messaging timeout, and pointer
+  actions activate and raise the pinned app before posting CoreGraphics
+  events.
+- The TypeScript client's Vitest development toolchain is updated to a patched
+  release with a clean npm audit.
 
 ### Fixed
 
@@ -62,6 +75,19 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
   or an elevated app driven from an unelevated agent). The accessibility
   tree is still captured; only the `app` id/name degrade to a `pid:<n>`
   placeholder.
+- macOS AX keeps the parent top-level window pinned when an attached sheet or
+  popover owns focus, so modal content remains nested and addressable through
+  scope refs without changing the session window id.
+- macOS AX only takes the `AXIdentifier` fast path when the identifier is
+  unique. Duplicate identifiers fall back to `(role, name, nth)` resolution
+  instead of silently acting on the first matching control.
+- macOS AX `check`, `uncheck`, and `toggle` reject controls without readable
+  check state and press a valid control at most once while waiting for its
+  state transition.
+- macOS AX `type` posts the complete UTF-16 sequence in one event pair, which
+  preserves supplementary Unicode characters such as emoji.
+- macOS AX raw wheel events now honor their requested screen coordinates, and
+  pointer fallbacks reject empty or non-finite element bounds.
 - AX window listing and `focus-window` preview using session-oriented
   `pid:<pid>:window:<index>` ids and AX `AXRaise`.
 - **Linux AT-SPI surface (`agent-ctrl-surface-atspi`), snapshot-read path.**

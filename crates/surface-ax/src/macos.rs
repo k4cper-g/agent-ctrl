@@ -3,30 +3,34 @@
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 
 use accessibility_sys::{
-    kAXButtonRole, kAXCellRole, kAXCheckBoxRole, kAXChildrenAttribute, kAXComboBoxRole,
-    kAXDescriptionAttribute, kAXDialogSubrole, kAXDisclosureTriangleRole, kAXEnabledAttribute,
-    kAXErrorAPIDisabled, kAXErrorActionUnsupported, kAXErrorAttributeUnsupported,
-    kAXErrorCannotComplete, kAXErrorFailure, kAXErrorIllegalArgument, kAXErrorInvalidUIElement,
-    kAXErrorNoValue, kAXErrorNotImplemented, kAXErrorParameterizedAttributeUnsupported,
-    kAXErrorSuccess, kAXExpandedAttribute, kAXFocusedApplicationAttribute, kAXFocusedAttribute,
-    kAXFocusedWindowAttribute, kAXGridRole, kAXGroupRole, kAXIdentifierAttribute, kAXImageRole,
-    kAXListRole, kAXMenuBarItemRole, kAXMenuBarRole, kAXMenuButtonRole, kAXMenuItemRole,
-    kAXMenuRole, kAXOutlineRole, kAXPopUpButtonRole, kAXPopoverRole, kAXPositionAttribute,
-    kAXPressAction, kAXProgressIndicatorRole, kAXRadioButtonRole, kAXRaiseAction, kAXRoleAttribute,
-    kAXRowRole, kAXScrollAreaRole, kAXSearchFieldSubrole, kAXSelectedAttribute, kAXSheetRole,
+    kAXBrowserRole, kAXButtonRole, kAXCellRole, kAXCheckBoxRole, kAXChildrenAttribute,
+    kAXColorWellRole, kAXComboBoxRole, kAXDateFieldRole, kAXDescriptionAttribute, kAXDialogSubrole,
+    kAXDisclosureTriangleRole, kAXDockItemRole, kAXEnabledAttribute, kAXErrorAPIDisabled,
+    kAXErrorActionUnsupported, kAXErrorAttributeUnsupported, kAXErrorCannotComplete,
+    kAXErrorFailure, kAXErrorIllegalArgument, kAXErrorInvalidUIElement, kAXErrorNoValue,
+    kAXErrorNotImplemented, kAXErrorParameterizedAttributeUnsupported, kAXErrorSuccess,
+    kAXExpandedAttribute, kAXFocusedApplicationAttribute, kAXFocusedAttribute,
+    kAXFocusedWindowAttribute, kAXGridRole, kAXGroupRole, kAXHelpAttribute, kAXHiddenAttribute,
+    kAXIdentifierAttribute, kAXImageRole, kAXIncrementorRole, kAXLevelIndicatorRole, kAXListRole,
+    kAXMenuBarItemRole, kAXMenuBarRole, kAXMenuButtonRole, kAXMenuItemRole, kAXMenuRole,
+    kAXOutlineRole, kAXParentAttribute, kAXPlaceholderValueAttribute, kAXPopUpButtonRole,
+    kAXPopoverRole, kAXPositionAttribute, kAXPressAction, kAXProgressIndicatorRole,
+    kAXRadioButtonRole, kAXRadioGroupRole, kAXRaiseAction, kAXRoleAttribute, kAXRowRole,
+    kAXScrollAreaRole, kAXScrollBarRole, kAXSearchFieldSubrole, kAXSelectedAttribute, kAXSheetRole,
     kAXSizeAttribute, kAXSliderRole, kAXSplitGroupRole, kAXSplitterRole, kAXStaticTextRole,
-    kAXSubroleAttribute, kAXTabGroupRole, kAXTableRole, kAXTextAreaRole, kAXTextFieldRole,
-    kAXTitleAttribute, kAXToolbarRole, kAXValueAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize,
-    kAXWindowsAttribute, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
+    kAXSubroleAttribute, kAXSwitchSubrole, kAXSystemDialogSubrole, kAXTabGroupRole, kAXTableRole,
+    kAXTextAreaRole, kAXTextFieldRole, kAXTimeFieldRole, kAXTitleAttribute, kAXToggleSubrole,
+    kAXToolbarRole, kAXValueAttribute, kAXValueIndicatorRole, kAXValueTypeCGPoint,
+    kAXValueTypeCGSize, kAXWindowsAttribute, AXIsProcessTrusted, AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication, AXUIElementCreateSystemWide, AXUIElementGetPid,
-    AXUIElementPerformAction, AXUIElementRef, AXUIElementSetAttributeValue, AXValueGetValue,
-    AXValueRef, CGKeyCode,
+    AXUIElementPerformAction, AXUIElementRef, AXUIElementSetAttributeValue,
+    AXUIElementSetMessagingTimeout, AXValueGetValue, AXValueRef, CGKeyCode,
 };
 use agent_ctrl_core::{
     assign_scope_refs, Action, ActionResult, AppContext, Bounds, Checked, ClipboardOp, Error,
@@ -39,7 +43,7 @@ use core_foundation_sys::base::{kCFAllocatorDefault, CFGetTypeID, CFRelease, CFR
 use core_foundation_sys::dictionary::{CFDictionaryGetValue, CFDictionaryRef};
 use core_foundation_sys::number::{
     kCFBooleanTrue, kCFNumberDoubleType, kCFNumberIntType, CFBooleanGetTypeID, CFBooleanGetValue,
-    CFNumberGetTypeID, CFNumberGetValue,
+    CFNumberGetTypeID, CFNumberGetValue, CFNumberIsFloatType,
 };
 use core_foundation_sys::string::{
     kCFStringEncodingUTF8, CFStringCreateWithCString, CFStringGetCString,
@@ -47,6 +51,9 @@ use core_foundation_sys::string::{
 };
 
 const DEFAULT_DEPTH: usize = 12;
+const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 3.0;
+const APP_ACTIVATION_TIMEOUT: Duration = Duration::from_millis(750);
+const CHECK_STATE_TIMEOUT: Duration = Duration::from_millis(500);
 const K_CG_HID_EVENT_TAP: u32 = 0;
 const CG_FLAG_SHIFT: u64 = 1 << 17;
 const CG_FLAG_CONTROL: u64 = 1 << 18;
@@ -112,6 +119,7 @@ extern "C" {
         unicodeString: *const u16,
     );
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
+    fn CGEventSetLocation(event: CGEventRef, location: CGPoint);
     fn CGEventPost(tap: u32, event: CGEventRef);
 
     fn CGEventCreateMouseEvent(
@@ -289,6 +297,11 @@ pub(super) fn list_windows(pinned: Option<AxPinnedWindow>) -> Result<AxWindowLis
 pub(super) fn focus_window(id: &str) -> Result<AxPinnedWindow> {
     let pinned = parse_window_id(id)?;
     let window = window_by_index(pinned.pid, pinned.index)?;
+    let app = running_app_by_pid(pinned.pid).ok_or_else(|| Error::Action {
+        action: "focus_window".into(),
+        reason: format!("no running application found for pid {}", pinned.pid),
+    })?;
+    activate_app_object(app, &format!("pid {}", pinned.pid), "focus_window")?;
     let action = cf_string(kAXRaiseAction)
         .ok_or_else(|| Error::Surface("failed to allocate AXRaise action string".into()))?;
     // SAFETY: window and action are valid AX/Core Foundation refs.
@@ -298,14 +311,14 @@ pub(super) fn focus_window(id: &str) -> Result<AxPinnedWindow> {
         CFRelease(action.cast::<c_void>());
         CFRelease(window.cast::<c_void>());
     }
-    if err == kAXErrorSuccess {
-        Ok(pinned)
-    } else {
-        Err(Error::Action {
+    if err != kAXErrorSuccess {
+        return Err(Error::Action {
             action: "focus_window".into(),
             reason: format!("AXRaise failed with {}", ax_error_message(err)),
-        })
+        });
     }
+    wait_until_active(app, &format!("pid {}", pinned.pid), "focus_window")?;
+    Ok(pinned)
 }
 
 pub(super) fn act(
@@ -368,6 +381,7 @@ fn focused_window() -> Result<AXUIElementRef> {
     if system.is_null() {
         return Err(Error::Surface("AX system-wide element was null".into()));
     }
+    set_ax_messaging_timeout(system);
     let window = element_attr(system, kAXFocusedWindowAttribute)
         .or_else(|| focused_application_window(system));
     // SAFETY: release the create-rule system object after copying the window.
@@ -389,9 +403,10 @@ fn focused_application_window(system: AXUIElementRef) -> Option<CFTypeRef> {
 
 fn focused_window_with_pin() -> Result<(AXUIElementRef, AxPinnedWindow)> {
     let window = focused_window()?;
-    let pid = element_pid(window).unwrap_or_default();
-    let index = window_index(pid, window).unwrap_or(0);
-    Ok((window, AxPinnedWindow { pid, index }))
+    let pid = element_pid(window)
+        .filter(|pid| *pid != 0)
+        .ok_or_else(|| Error::Surface("focused AX window has no pid".into()))?;
+    normalize_window_for_pin(window, pid)
 }
 
 fn focused_window_pin() -> Result<AxPinnedWindow> {
@@ -412,15 +427,7 @@ fn focused_window_pid() -> Result<u32> {
 }
 
 fn app_focused_window(pid: u32) -> Result<(AXUIElementRef, AxPinnedWindow)> {
-    let original_pid = pid;
-    let pid = i32::try_from(pid).map_err(|_| Error::Surface("pid out of range".into()))?;
-    // SAFETY: create rule returns an AX application object for pid or null.
-    let app = unsafe { AXUIElementCreateApplication(pid) };
-    if app.is_null() {
-        return Err(Error::Surface(format!(
-            "AX application for pid {pid} was null"
-        )));
-    }
+    let app = ax_application(pid)?;
     let window = element_attr(app, kAXFocusedWindowAttribute)
         .or_else(|| first_array_element(app, kAXWindowsAttribute));
     // SAFETY: release the create-rule app object after copying the window.
@@ -428,14 +435,45 @@ fn app_focused_window(pid: u32) -> Result<(AXUIElementRef, AxPinnedWindow)> {
     let Some(window) = window else {
         return Err(Error::Surface(format!("pid {pid} has no AX window")));
     };
-    let index = window_index(original_pid, window.cast_mut().cast()).unwrap_or(0);
-    Ok((
-        window.cast_mut().cast(),
-        AxPinnedWindow {
-            pid: original_pid,
-            index,
-        },
-    ))
+    normalize_window_for_pin(window.cast_mut().cast(), pid)
+}
+
+/// Normalize a focused attached sheet or popover to its listed parent window.
+///
+/// `AXFocusedWindow` can return an attached surface that is absent from
+/// `AXWindows`. Saving a fallback index for that element makes the next action
+/// reopen a different root and invalidates every ref captured from the modal.
+fn normalize_window_for_pin(
+    window: AXUIElementRef,
+    pid: u32,
+) -> Result<(AXUIElementRef, AxPinnedWindow)> {
+    let mut candidate = window;
+    for _ in 0..32 {
+        if let Some(index) = window_index(pid, candidate) {
+            return Ok((candidate, AxPinnedWindow { pid, index }));
+        }
+        if string_attr(candidate, kAXRoleAttribute).as_deref() == Some("AXApplication") {
+            break;
+        }
+        let Some(parent) = element_attr(candidate, kAXParentAttribute) else {
+            break;
+        };
+        if std::ptr::eq(parent, candidate.cast::<c_void>()) {
+            // SAFETY: parent is a copy-rule element returned above.
+            unsafe { CFRelease(parent) };
+            break;
+        }
+        // SAFETY: candidate is a copy-rule element owned by this traversal.
+        unsafe { CFRelease(candidate.cast::<c_void>()) };
+        candidate = parent.cast_mut().cast();
+    }
+    // SAFETY: candidate is the last copy-rule element owned by this traversal.
+    unsafe { CFRelease(candidate.cast::<c_void>()) };
+
+    // Some framework popovers omit a complete AXParent chain. Keep the root
+    // and pin consistent by falling back to the first listed app window.
+    let root = window_by_index(pid, 0)?;
+    Ok((root, AxPinnedWindow { pid, index: 0 }))
 }
 
 fn app_window_by_process_name(name: &str) -> Result<(AXUIElementRef, AxPinnedWindow)> {
@@ -496,13 +534,12 @@ fn build_node(
     let role_raw = string_attr(element, kAXRoleAttribute).unwrap_or_else(|| "AXUnknown".into());
     let subrole = string_attr(element, kAXSubroleAttribute);
     let role = map_role(&role_raw, subrole.as_deref());
-    let name = string_attr(element, kAXTitleAttribute)
-        .or_else(|| string_attr(element, kAXDescriptionAttribute))
-        .or_else(|| value_string(element))
-        .unwrap_or_default();
-    let value = value_string(element).filter(|value| value != &name);
+    let name = element_name(element);
+    let description =
+        non_empty_string_attr(element, kAXHelpAttribute).filter(|description| description != &name);
+    let value = scalar_value_string(element).filter(|value| value != &name);
     let state = State {
-        visible: true,
+        visible: !bool_attr(element, kAXHiddenAttribute).unwrap_or(false),
         enabled: bool_attr(element, kAXEnabledAttribute).unwrap_or(true),
         focused: bool_attr(element, kAXFocusedAttribute).unwrap_or(false),
         selected: bool_attr(element, kAXSelectedAttribute),
@@ -535,7 +572,7 @@ fn build_node(
         ref_id,
         role,
         name,
-        description: None,
+        description,
         value,
         state,
         bounds,
@@ -552,7 +589,11 @@ fn map_role(role: &str, subrole: Option<&str>) -> Role {
     {
         return Role::SearchBox;
     }
-    if matches!(subrole, Some(value) if value == kAXDialogSubrole) {
+    if matches!(subrole, Some(value) if value == kAXSwitchSubrole || value == kAXToggleSubrole) {
+        return Role::Switch;
+    }
+    if matches!(subrole, Some(value) if value == kAXDialogSubrole || value == kAXSystemDialogSubrole)
+    {
         return Role::Dialog;
     }
 
@@ -569,7 +610,11 @@ fn map_role(role: &str, subrole: Option<&str>) -> Role {
         value if value == kAXRadioButtonRole => Role::Radio,
         value if value == kAXComboBoxRole => Role::ComboBox,
         v if v == kAXMenuItemRole || v == kAXMenuBarItemRole => Role::MenuItem,
-        value if value == kAXSliderRole => Role::Slider,
+        v if v == kAXSliderRole || v == kAXScrollBarRole || v == kAXLevelIndicatorRole => {
+            Role::Slider
+        }
+        value if value == kAXIncrementorRole => Role::SpinButton,
+        v if v == kAXDateFieldRole || v == kAXTimeFieldRole => Role::TextField,
         value if value == kAXStaticTextRole => Role::Region,
         value if value == kAXImageRole => Role::Image,
         value if value == kAXMenuRole => Role::Menu,
@@ -583,8 +628,17 @@ fn map_role(role: &str, subrole: Option<&str>) -> Role {
         value if value == kAXGridRole => Role::Grid,
         value if value == kAXToolbarRole => Role::Toolbar,
         v if v == kAXSheetRole || v == kAXPopoverRole => Role::Dialog,
-        v if v == kAXProgressIndicatorRole || v == kAXSplitterRole => Role::Generic,
-        v if v == kAXScrollAreaRole || v == kAXGroupRole || v == kAXSplitGroupRole => Role::Group,
+        v if v == kAXProgressIndicatorRole || v == kAXValueIndicatorRole => Role::Region,
+        value if value == kAXSplitterRole => Role::Generic,
+        v if v == kAXScrollAreaRole
+            || v == kAXGroupRole
+            || v == kAXSplitGroupRole
+            || v == kAXRadioGroupRole
+            || v == kAXBrowserRole =>
+        {
+            Role::Group
+        }
+        v if v == kAXColorWellRole || v == kAXDockItemRole => Role::Button,
         "AXWindow" => Role::Window,
         "AXApplication" => Role::Application,
         // Web content from Safari, Chromium, and other browsers exposes
@@ -594,6 +648,16 @@ fn map_role(role: &str, subrole: Option<&str>) -> Role {
         "AXLink" => Role::Link,
         "AXHeading" => Role::Heading,
         "AXWebArea" => Role::Document,
+        "AXListBox" => Role::ListBox,
+        "AXListBoxOption" => Role::Option,
+        "AXSwitch" | "AXToggle" => Role::Switch,
+        "AXTab" => Role::Tab,
+        "AXTreeItem" => Role::TreeItem,
+        "AXGridCell" => Role::GridCell,
+        "AXColumnHeader" => Role::ColumnHeader,
+        "AXRowHeader" => Role::RowHeader,
+        "AXLandmarkMain" => Role::Main,
+        "AXLandmarkNavigation" => Role::Navigation,
         other => Role::Unknown(other.to_owned()),
     }
 }
@@ -676,11 +740,11 @@ fn act_click(
         action: "click".into(),
         reason: "AXPress failed and element has no AX bounds for CGEvent fallback".into(),
     })?;
-    raise_pinned_app(pinned);
-    let center = CGPoint {
-        x: logical.x + logical.w / 2.0,
-        y: logical.y + logical.h / 2.0,
-    };
+    raise_pinned_app(pinned)?;
+    let center = bounds_center(logical).ok_or_else(|| Error::Action {
+        action: "click".into(),
+        reason: "AXPress failed and element bounds are empty or invalid".into(),
+    })?;
     post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
     post_mouse(
         CG_EVENT_LEFT_MOUSE_DOWN,
@@ -761,7 +825,7 @@ fn act_toggle(
     ref_id: &RefId,
 ) -> Result<ActionResult> {
     let element = resolve_element(pinned, refs, ref_id, "toggle")?;
-    let result = perform_action(element, kAXPressAction, "toggle");
+    let result = toggle_checked(element);
     // SAFETY: `resolve_element` returns a retained AX element.
     unsafe { CFRelease(element.cast::<c_void>()) };
     result.map(|()| action_result_with_method("ax-press"))
@@ -773,7 +837,7 @@ fn act_double_click(
     ref_id: &RefId,
 ) -> Result<ActionResult> {
     let center = element_center(pinned, refs, ref_id, "double_click")?;
-    raise_pinned_app(pinned);
+    raise_pinned_app(pinned)?;
     post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
     post_mouse(
         CG_EVENT_LEFT_MOUSE_DOWN,
@@ -808,7 +872,7 @@ fn act_right_click(
     ref_id: &RefId,
 ) -> Result<ActionResult> {
     let center = element_center(pinned, refs, ref_id, "right_click")?;
-    raise_pinned_app(pinned);
+    raise_pinned_app(pinned)?;
     post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_RIGHT, None)?;
     post_mouse(
         CG_EVENT_RIGHT_MOUSE_DOWN,
@@ -831,7 +895,7 @@ fn act_hover(
     ref_id: &RefId,
 ) -> Result<ActionResult> {
     let center = element_center(pinned, refs, ref_id, "hover")?;
-    raise_pinned_app(pinned);
+    raise_pinned_app(pinned)?;
     post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
     Ok(action_result_with_method("cg-mouse-moved"))
 }
@@ -843,7 +907,7 @@ fn act_highlight(
     duration_ms: Option<u64>,
 ) -> Result<ActionResult> {
     let center = element_center(pinned, refs, ref_id, "highlight")?;
-    raise_pinned_app(pinned);
+    raise_pinned_app(pinned)?;
     post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
     let duration = duration_ms.unwrap_or(800);
     if duration > 0 {
@@ -864,7 +928,7 @@ fn act_drag(
 ) -> Result<ActionResult> {
     let from_center = element_center(pinned, refs, from, "drag")?;
     let to_center = element_center(pinned, refs, to, "drag")?;
-    raise_pinned_app(pinned);
+    raise_pinned_app(pinned)?;
     post_mouse(
         CG_EVENT_MOUSE_MOVED,
         from_center,
@@ -925,7 +989,7 @@ fn act_mouse(op: MouseOp) -> Result<ActionResult> {
             "cg-mouse-up"
         }
         MouseOp::Wheel { x, y, dx, dy } => {
-            post_scroll(point_from(x, y), dx, dy)?;
+            post_scroll(Some(point_from(x, y)), dx, dy)?;
             "cg-scroll-wheel"
         }
     };
@@ -939,15 +1003,15 @@ fn act_scroll(
     dx: f64,
     dy: f64,
 ) -> Result<ActionResult> {
-    raise_pinned_app(pinned);
+    raise_pinned_app(pinned)?;
     let position = if let Some(ref_id) = ref_id {
         let center = element_center(pinned, refs, ref_id, "scroll")?;
         post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
-        center
+        Some(center)
     } else {
         // No target ref: scroll wherever the cursor already is. CGEvent scroll
-        // wheels are screen-global so we just need a position to anchor to.
-        CGPoint { x: 0.0, y: 0.0 }
+        // wheels are screen-global, so leave the event location unchanged.
+        None
     };
     let horizontal = round_to_i32(dx);
     let vertical = round_to_i32(dy);
@@ -995,6 +1059,7 @@ fn act_select(
     ref_id: &RefId,
     value: &str,
 ) -> Result<ActionResult> {
+    raise_pinned_app(pinned)?;
     let element = resolve_element(pinned, refs, ref_id, "select")?;
     let role = string_attr(element, kAXRoleAttribute);
     let (result, method) = match role.as_deref() {
@@ -1027,10 +1092,10 @@ fn select_via_menu(button: AXUIElementRef, value: &str) -> Result<()> {
         action: "select".into(),
         reason: "popup has no AX bounds".into(),
     })?;
-    let popup_center = CGPoint {
-        x: popup_bounds.x + popup_bounds.w / 2.0,
-        y: popup_bounds.y + popup_bounds.h / 2.0,
-    };
+    let popup_center = bounds_center(popup_bounds).ok_or_else(|| Error::Action {
+        action: "select".into(),
+        reason: "popup AX bounds are empty or invalid".into(),
+    })?;
     post_mouse(
         CG_EVENT_MOUSE_MOVED,
         popup_center,
@@ -1085,10 +1150,10 @@ fn click_menu_item(item: AXUIElementRef) -> Result<()> {
         action: "select".into(),
         reason: "menu item has no AX bounds".into(),
     })?;
-    let center = CGPoint {
-        x: logical.x + logical.w / 2.0,
-        y: logical.y + logical.h / 2.0,
-    };
+    let center = bounds_center(logical).ok_or_else(|| Error::Action {
+        action: "select".into(),
+        reason: "menu item AX bounds are empty or invalid".into(),
+    })?;
     post_mouse(CG_EVENT_MOUSE_MOVED, center, CG_MOUSE_BUTTON_LEFT, None)?;
     post_mouse(
         CG_EVENT_LEFT_MOUSE_DOWN,
@@ -1261,10 +1326,20 @@ fn element_center(
         action: action.into(),
         reason: format!("ref {} has no AX bounds", ref_id.0),
     })?;
-    Ok(CGPoint {
-        x: logical.x + logical.w / 2.0,
-        y: logical.y + logical.h / 2.0,
+    bounds_center(logical).ok_or_else(|| Error::Action {
+        action: action.into(),
+        reason: format!("ref {} has empty or invalid AX bounds", ref_id.0),
     })
+}
+
+fn bounds_center(bounds: Bounds) -> Option<CGPoint> {
+    let values = [bounds.x, bounds.y, bounds.w, bounds.h];
+    (values.iter().all(|value| value.is_finite()) && bounds.w > 0.0 && bounds.h > 0.0).then_some(
+        CGPoint {
+            x: bounds.x + bounds.w / 2.0,
+            y: bounds.y + bounds.h / 2.0,
+        },
+    )
 }
 
 fn point_from(x: i32, y: i32) -> CGPoint {
@@ -1312,7 +1387,7 @@ fn post_mouse(
     Ok(())
 }
 
-fn post_scroll(_anchor: CGPoint, dx: i32, dy: i32) -> Result<()> {
+fn post_scroll(anchor: Option<CGPoint>, dx: i32, dy: i32) -> Result<()> {
     // Apple's macOS variadic ABI passes args in registers same as fixed args,
     // so calling with wheelCount=2 and two i32 deltas through this fixed-arity
     // declaration matches what the C variadic call would emit. wheel1 is the
@@ -1326,35 +1401,67 @@ fn post_scroll(_anchor: CGPoint, dx: i32, dy: i32) -> Result<()> {
             reason: "CGEventCreateScrollWheelEvent returned null".into(),
         });
     }
+    if let Some(anchor) = anchor {
+        // SAFETY: event is valid and anchor uses logical screen coordinates.
+        unsafe { CGEventSetLocation(event, anchor) };
+    }
     post_event(event);
     Ok(())
 }
 
-fn raise_pinned_app(pinned: Option<AxPinnedWindow>) {
+fn raise_pinned_app(pinned: Option<AxPinnedWindow>) -> Result<()> {
     // Mouse events go to whatever window is under the cursor at the OS level,
     // not to a particular AXUIElement. To make actions on the pinned window
-    // deterministic we raise it first; ignore failures because the frontmost
-    // app may already be us.
+    // deterministic we activate the owning app and raise its pinned window.
     if let Some(pinned) = pinned {
-        let _ = focus_window(&window_id(pinned));
+        focus_window(&window_id(pinned))?;
     }
+    Ok(())
 }
 
 fn press_until_checked(element: AXUIElementRef, desired: bool, action: &str) -> Result<()> {
-    if checked_state(element).is_some_and(|state| state_matches(state, desired)) {
+    let initial = checked_state(element).ok_or_else(|| Error::Action {
+        action: action.into(),
+        reason: "control does not expose a readable check state".into(),
+    })?;
+    if state_matches(initial, desired) {
         return Ok(());
     }
-    for _ in 0..3 {
-        perform_action(element, kAXPressAction, action)?;
-        std::thread::sleep(std::time::Duration::from_millis(30));
+    perform_action(element, kAXPressAction, action)?;
+    let started = Instant::now();
+    loop {
         if checked_state(element).is_some_and(|state| state_matches(state, desired)) {
             return Ok(());
         }
+        if started.elapsed() >= CHECK_STATE_TIMEOUT {
+            return Err(Error::Action {
+                action: action.into(),
+                reason: "control did not reach requested check state after one AXPress".into(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    Err(Error::Action {
-        action: action.into(),
-        reason: "control did not reach requested check state".into(),
-    })
+}
+
+fn toggle_checked(element: AXUIElementRef) -> Result<()> {
+    let initial = checked_state(element).ok_or_else(|| Error::Action {
+        action: "toggle".into(),
+        reason: "control does not expose a readable check state".into(),
+    })?;
+    perform_action(element, kAXPressAction, "toggle")?;
+    let started = Instant::now();
+    loop {
+        if checked_state(element).is_some_and(|state| state != initial) {
+            return Ok(());
+        }
+        if started.elapsed() >= CHECK_STATE_TIMEOUT {
+            return Err(Error::Action {
+                action: "toggle".into(),
+                reason: "control check state did not change after one AXPress".into(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn state_matches(state: Checked, desired: bool) -> bool {
@@ -1423,18 +1530,16 @@ fn resolve_element(
         reason: "no prior snapshot - call snapshot before act".into(),
     })?;
     let root = window_by_index(pinned.pid, pinned.index)?;
-    // Fast path: when the captured element carried an AXIdentifier the app
-    // had explicitly set, prefer that over the (role, name, nth) walk. The
-    // identifier is stable across tree mutations that would change the
-    // node's name or position (e.g., a Status label updating its text), so
-    // it lets us follow the same logical control even when the snapshot's
-    // labels have drifted from what's currently on screen.
+    // Fast path: when the captured element carried a unique AXIdentifier the
+    // app had explicitly set, prefer that over the (role, name, nth) walk. The
+    // identifier is stable across tree mutations that would change the node's
+    // name or position. Duplicate identifiers deliberately fall through.
     if let Some(NativeHandle::Ax {
         identifier: Some(id),
         ..
     }) = &entry.native
     {
-        if let Some(element) = find_by_identifier(root, id) {
+        if let Some(element) = find_unique_by_identifier(root, id) {
             // SAFETY: `root` is returned by a copy-rule helper.
             unsafe { CFRelease(root.cast::<c_void>()) };
             return Ok(element);
@@ -1453,29 +1558,56 @@ fn resolve_element(
     })
 }
 
-fn find_by_identifier(element: AXUIElementRef, identifier: &str) -> Option<AXUIElementRef> {
-    if string_attr(element, kAXIdentifierAttribute).as_deref() == Some(identifier) {
-        // SAFETY: retain the matched element so the caller can release.
-        unsafe { CFRetain(element.cast::<c_void>()) };
-        return Some(element);
+fn find_unique_by_identifier(element: AXUIElementRef, identifier: &str) -> Option<AXUIElementRef> {
+    let mut found = None;
+    let mut duplicate = false;
+    collect_identifier_matches(element, identifier, &mut found, &mut duplicate);
+    if duplicate {
+        if let Some(element) = found {
+            // SAFETY: collect_identifier_matches retained the first match.
+            unsafe { CFRelease(element.cast::<c_void>()) };
+        }
+        None
+    } else {
+        found
     }
-    let array = array_attr(element, kAXChildrenAttribute)?;
+}
+
+fn collect_identifier_matches(
+    element: AXUIElementRef,
+    identifier: &str,
+    found: &mut Option<AXUIElementRef>,
+    duplicate: &mut bool,
+) {
+    if *duplicate {
+        return;
+    }
+    if string_attr(element, kAXIdentifierAttribute).as_deref() == Some(identifier) {
+        if found.is_some() {
+            *duplicate = true;
+            return;
+        }
+        // SAFETY: retain the first match so it survives traversal arrays.
+        unsafe { CFRetain(element.cast::<c_void>()) };
+        *found = Some(element);
+    }
+    let Some(array) = array_attr(element, kAXChildrenAttribute) else {
+        return;
+    };
     // SAFETY: array is a copy-rule CFArray.
     let count = unsafe { CFArrayGetCount(array) };
-    let mut found = None;
     for idx in 0..count {
         // SAFETY: idx is in bounds.
         let child = unsafe { CFArrayGetValueAtIndex(array, idx) };
         if !child.is_null() {
-            if let Some(hit) = find_by_identifier(child as AXUIElementRef, identifier) {
-                found = Some(hit);
+            collect_identifier_matches(child as AXUIElementRef, identifier, found, duplicate);
+            if *duplicate {
                 break;
             }
         }
     }
     // SAFETY: release the copy-rule array.
     unsafe { CFRelease(array.cast::<c_void>()) };
-    found
 }
 
 fn app_for_keyboard(pinned: Option<AxPinnedWindow>, action: &str) -> Result<AXUIElementRef> {
@@ -1484,23 +1616,13 @@ fn app_for_keyboard(pinned: Option<AxPinnedWindow>, action: &str) -> Result<AXUI
         reason: "no prior snapshot - call snapshot before keyboard input".into(),
     })?;
     focus_window(&window_id(pinned))?;
-    let pid = i32::try_from(pinned.pid).map_err(|_| Error::Surface("pid out of range".into()))?;
-    // SAFETY: create rule returns an AX application object for pid or null.
-    let app = unsafe { AXUIElementCreateApplication(pid) };
-    if app.is_null() {
-        return Err(Error::Surface(format!(
-            "AX application for pid {pid} was null"
-        )));
-    }
-    Ok(app)
+    ax_application(pinned.pid)
 }
 
 fn send_text(app: AXUIElementRef, text: &str) -> Result<()> {
     let _ = app;
-    for unit in text.encode_utf16() {
-        post_unicode_unit(unit)?;
-    }
-    Ok(())
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    post_unicode_text(&units)
 }
 
 fn send_chord(_app: AXUIElementRef, chord: &Chord, action: &str) -> Result<()> {
@@ -1518,15 +1640,15 @@ fn send_chord(_app: AXUIElementRef, chord: &Chord, action: &str) -> Result<()> {
     Ok(())
 }
 
-fn post_unicode_unit(unit: u16) -> Result<()> {
+fn post_unicode_text(units: &[u16]) -> Result<()> {
     let down = create_keyboard_event(0, true, "type")?;
-    // SAFETY: down is a valid CGEvent and unit points to one UTF-16 code unit.
-    unsafe { CGEventKeyboardSetUnicodeString(down, 1, &raw const unit) };
+    // SAFETY: down is valid and units remains alive for the duration of the call.
+    unsafe { CGEventKeyboardSetUnicodeString(down, units.len(), units.as_ptr()) };
     post_event(down);
 
     let up = create_keyboard_event(0, false, "type")?;
-    // SAFETY: up is a valid CGEvent and unit points to one UTF-16 code unit.
-    unsafe { CGEventKeyboardSetUnicodeString(up, 1, &raw const unit) };
+    // SAFETY: up is valid and units remains alive for the duration of the call.
+    unsafe { CGEventKeyboardSetUnicodeString(up, units.len(), units.as_ptr()) };
     post_event(up);
     Ok(())
 }
@@ -1736,10 +1858,7 @@ fn find_element(
     let role_raw = string_attr(element, kAXRoleAttribute).unwrap_or_else(|| "AXUnknown".into());
     let subrole = string_attr(element, kAXSubroleAttribute);
     let role = map_role(&role_raw, subrole.as_deref());
-    let name = string_attr(element, kAXTitleAttribute)
-        .or_else(|| string_attr(element, kAXDescriptionAttribute))
-        .or_else(|| value_string(element))
-        .unwrap_or_default();
+    let name = element_name(element);
 
     if is_ref_target(&role) {
         let key = (role.clone(), name.clone());
@@ -1959,6 +2078,14 @@ fn first_array_element(element: AXUIElementRef, attr: &str) -> Option<CFTypeRef>
 }
 
 fn app_windows(pid: u32) -> Result<CFArrayRef> {
+    let app = ax_application(pid)?;
+    let windows = array_attr(app, kAXWindowsAttribute);
+    // SAFETY: release app after copying the windows array.
+    unsafe { CFRelease(app.cast::<c_void>()) };
+    windows.ok_or_else(|| Error::Surface(format!("pid {pid} has no AX windows")))
+}
+
+fn ax_application(pid: u32) -> Result<AXUIElementRef> {
     let pid_i32 = i32::try_from(pid).map_err(|_| Error::Surface("pid out of range".into()))?;
     // SAFETY: create rule returns an AX application object for pid or null.
     let app = unsafe { AXUIElementCreateApplication(pid_i32) };
@@ -1967,10 +2094,14 @@ fn app_windows(pid: u32) -> Result<CFArrayRef> {
             "AX application for pid {pid_i32} was null"
         )));
     }
-    let windows = array_attr(app, kAXWindowsAttribute);
-    // SAFETY: release app after copying the windows array.
-    unsafe { CFRelease(app.cast::<c_void>()) };
-    windows.ok_or_else(|| Error::Surface(format!("pid {pid} has no AX windows")))
+    set_ax_messaging_timeout(app);
+    Ok(app)
+}
+
+fn set_ax_messaging_timeout(element: AXUIElementRef) {
+    // SAFETY: element is a valid AX object. A bounded timeout prevents a hung
+    // target app from wedging the daemon indefinitely.
+    let _ = unsafe { AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS) };
 }
 
 fn window_by_index(pid: u32, index: usize) -> Result<AXUIElementRef> {
@@ -1994,6 +2125,9 @@ fn window_by_index(pid: u32, index: usize) -> Result<AXUIElementRef> {
 }
 
 fn window_index(pid: u32, target: AXUIElementRef) -> Option<usize> {
+    if string_attr(target, kAXRoleAttribute).as_deref() != Some("AXWindow") {
+        return None;
+    }
     let array = app_windows(pid).ok()?;
     // SAFETY: `array` is a valid CFArray copied from AX.
     let count = unsafe { CFArrayGetCount(array) };
@@ -2067,6 +2201,58 @@ fn string_attr(element: AXUIElementRef, attr: &str) -> Option<String> {
 
 fn value_string(element: AXUIElementRef) -> Option<String> {
     string_attr(element, kAXValueAttribute)
+}
+
+fn non_empty_string_attr(element: AXUIElementRef, attr: &str) -> Option<String> {
+    string_attr(element, attr).filter(|value| !value.trim().is_empty())
+}
+
+fn element_name(element: AXUIElementRef) -> String {
+    non_empty_string_attr(element, kAXTitleAttribute)
+        .or_else(|| non_empty_string_attr(element, kAXDescriptionAttribute))
+        .or_else(|| non_empty_string_attr(element, kAXPlaceholderValueAttribute))
+        .or_else(|| value_string(element).filter(|value| !value.trim().is_empty()))
+        .unwrap_or_default()
+}
+
+fn scalar_value_string(element: AXUIElementRef) -> Option<String> {
+    let value = element_attr(element, kAXValueAttribute)?;
+    // SAFETY: value is a valid Core Foundation object.
+    let type_id = unsafe { CFGetTypeID(value) };
+    let out = if type_id == unsafe { CFStringGetTypeID() } {
+        cf_string_to_string(value.cast())
+    } else if type_id == unsafe { CFBooleanGetTypeID() } {
+        // SAFETY: type was verified as CFBoolean.
+        Some(
+            unsafe { CFBooleanGetValue(value.cast::<core_foundation_sys::number::__CFBoolean>()) }
+                .to_string(),
+        )
+    } else if type_id == unsafe { CFNumberGetTypeID() } {
+        let number = value.cast::<core_foundation_sys::number::__CFNumber>();
+        // SAFETY: type was verified as CFNumber.
+        if unsafe { CFNumberIsFloatType(number) } != 0 {
+            let mut number_value = 0.0_f64;
+            // SAFETY: number is a CFNumber and number_value is a valid out pointer.
+            unsafe { CFNumberGetValue(number, kCFNumberDoubleType, (&raw mut number_value).cast()) }
+                .then(|| number_value.to_string())
+        } else {
+            let mut number_value = 0_i64;
+            // SAFETY: number is a CFNumber and number_value is a valid out pointer.
+            unsafe {
+                CFNumberGetValue(
+                    number,
+                    core_foundation_sys::number::kCFNumberLongLongType,
+                    (&raw mut number_value).cast(),
+                )
+            }
+            .then(|| number_value.to_string())
+        }
+    } else {
+        None
+    };
+    // SAFETY: release the copy-rule AXValue.
+    unsafe { CFRelease(value) };
+    out
 }
 
 fn bool_attr(element: AXUIElementRef, attr: &str) -> Option<bool> {
@@ -2246,6 +2432,10 @@ const NS_APPLICATION_ACTIVATE_ALL_WINDOWS: u64 = 1 << 0;
 const NS_APPLICATION_ACTIVATE_IGNORING_OTHER_APPS: u64 = 1 << 1;
 
 fn activate_running_app(app: *mut Object, app_id: &str) -> Result<()> {
+    activate_app_object(app, app_id, "switch_app")
+}
+
+fn activate_app_object(app: *mut Object, app_id: &str, action: &str) -> Result<()> {
     // SAFETY: app is a valid NSRunningApplication pointer returned by the
     // helpers above; activateWithOptions: returns BOOL.
     let activated: bool = unsafe {
@@ -2257,9 +2447,27 @@ fn activate_running_app(app: *mut Object, app_id: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Action {
-            action: "switch_app".into(),
+            action: action.into(),
             reason: format!("activateWithOptions: returned NO for {app_id:?}"),
         })
+    }
+}
+
+fn wait_until_active(app: *mut Object, app_id: &str, action: &str) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        // SAFETY: app is a valid NSRunningApplication pointer.
+        let active: bool = unsafe { msg_send![app, isActive] };
+        if active {
+            return Ok(());
+        }
+        if started.elapsed() >= APP_ACTIVATION_TIMEOUT {
+            return Err(Error::Action {
+                action: action.into(),
+                reason: format!("application {app_id:?} did not become active within 750ms"),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -2282,6 +2490,17 @@ fn running_app_by_bundle_id(bundle_id: &str) -> Option<*mut Object> {
             return None;
         }
         let app: *mut Object = msg_send![array, objectAtIndex: 0_usize];
+        (!app.is_null()).then_some(app)
+    }
+}
+
+fn running_app_by_pid(pid: u32) -> Option<*mut Object> {
+    let pid = i32::try_from(pid).ok()?;
+    // SAFETY: NSRunningApplication classmethod returns an autoreleased object
+    // or nil for a process that is no longer registered with AppKit.
+    unsafe {
+        let cls = class!(NSRunningApplication);
+        let app: *mut Object = msg_send![cls, runningApplicationWithProcessIdentifier: pid];
         (!app.is_null()).then_some(app)
     }
 }
@@ -3172,4 +3391,69 @@ fn blend_pixel(image: &mut CapturedImage, x: i32, y: i32, color: [u8; 4]) {
         image.pixels[idx + channel] = u8::try_from((src * alpha + dst * inv) / 255).unwrap_or(255);
     }
     image.pixels[idx + 3] = 255;
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn role_mapping_covers_modern_ax_controls_and_web_roles() {
+        assert_eq!(
+            map_role(kAXButtonRole, Some(kAXSwitchSubrole)),
+            Role::Switch
+        );
+        assert_eq!(
+            map_role(kAXButtonRole, Some(kAXToggleSubrole)),
+            Role::Switch
+        );
+        assert_eq!(
+            map_role("AXWindow", Some(kAXSystemDialogSubrole)),
+            Role::Dialog
+        );
+        assert_eq!(map_role(kAXScrollBarRole, None), Role::Slider);
+        assert_eq!(map_role(kAXIncrementorRole, None), Role::SpinButton);
+        assert_eq!(map_role("AXListBoxOption", None), Role::Option);
+        assert_eq!(map_role("AXLandmarkNavigation", None), Role::Navigation);
+    }
+
+    #[test]
+    fn bounds_center_rejects_empty_and_non_finite_rectangles() {
+        assert!(bounds_center(Bounds {
+            x: 1.0,
+            y: 2.0,
+            w: 10.0,
+            h: 20.0,
+        })
+        .is_some());
+        assert!(bounds_center(Bounds {
+            x: 1.0,
+            y: 2.0,
+            w: 0.0,
+            h: 20.0,
+        })
+        .is_none());
+        assert!(bounds_center(Bounds {
+            x: f64::NAN,
+            y: 2.0,
+            w: 10.0,
+            h: 20.0,
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn window_ids_and_key_chords_reject_malformed_input() {
+        assert_eq!(
+            parse_window_id("pid:42:window:3").unwrap(),
+            AxPinnedWindow { pid: 42, index: 3 }
+        );
+        assert!(parse_window_id("42:3").is_err());
+        assert!(parse_chord("Cmd++S").is_err());
+        let chord = parse_chord("Cmd+Shift+S").unwrap();
+        assert_eq!(chord.key, 0x01);
+        assert_eq!(chord.modifiers.len(), 2);
+    }
 }

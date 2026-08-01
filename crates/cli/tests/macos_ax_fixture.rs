@@ -44,6 +44,7 @@ fn run_fixture_flow() {
         .arg("60000")
         .spawn()
         .expect("launching AX fixture");
+    let fixture_pid = fixture_child.id();
     let _guard = Cleanup {
         cli: cli.clone(),
         home: home.clone(),
@@ -56,19 +57,25 @@ fn run_fixture_flow() {
     let run = FixtureRun {
         cli: &cli,
         home: &home,
+        pid: fixture_pid,
     };
     run.open();
     run.snapshot();
     run.exercise_native_handles_stay_private();
     run.exercise_button_click();
     run.exercise_double_click();
+    run.exercise_non_checkable_actions_are_rejected();
+    run.exercise_duplicate_identifiers();
     run.exercise_hover();
     run.exercise_fill();
     run.exercise_clear();
+    run.exercise_unicode_keyboard_input();
     run.exercise_clipboard();
     run.exercise_select();
     run.exercise_checkbox();
     run.exercise_window_list();
+    run.exercise_attached_sheet_scope();
+    run.exercise_popover_scope();
     run.exercise_screenshot();
     run.exercise_switch_app();
 }
@@ -76,6 +83,7 @@ fn run_fixture_flow() {
 struct FixtureRun<'a> {
     cli: &'a Path,
     home: &'a Path,
+    pid: u32,
 }
 
 impl FixtureRun<'_> {
@@ -169,6 +177,46 @@ impl FixtureRun<'_> {
         );
     }
 
+    fn exercise_non_checkable_actions_are_rejected(&self) {
+        let button = self.find("Increment", "button");
+        let check_error = run_cli_expect_failure(
+            self.cli,
+            self.home,
+            ["check", button.trim(), "--session", "fixture"],
+        );
+        assert!(
+            check_error.contains("does not expose a readable check state"),
+            "unexpected check error: {check_error:?}"
+        );
+        self.snapshot();
+        let _ = self.find("Status: count 3", "region");
+
+        let button = self.find("Increment", "button");
+        let toggle_error = run_cli_expect_failure(
+            self.cli,
+            self.home,
+            ["toggle", button.trim(), "--session", "fixture"],
+        );
+        assert!(
+            toggle_error.contains("does not expose a readable check state"),
+            "unexpected toggle error: {toggle_error:?}"
+        );
+        self.snapshot();
+        let _ = self.find("Status: count 3", "region");
+    }
+
+    fn exercise_duplicate_identifiers(&self) {
+        self.snapshot();
+        let second = self.find("Duplicate Second", "button");
+        run_cli(
+            self.cli,
+            self.home,
+            ["click", second.trim(), "--session", "fixture"],
+        );
+        self.snapshot();
+        let _ = self.find("Status: duplicate second", "region");
+    }
+
     fn exercise_fill(&self) {
         let field = self.find("", "text-field");
         run_cli(
@@ -233,6 +281,35 @@ impl FixtureRun<'_> {
             value["value"]
         );
         // Restore the original value so downstream assertions stay stable.
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "fill",
+                field.trim(),
+                "fixture edited",
+                "--session",
+                "fixture",
+            ],
+        );
+        self.snapshot();
+    }
+
+    fn exercise_unicode_keyboard_input(&self) {
+        let field = self.find("fixture edited", "text-field");
+        run_cli(
+            self.cli,
+            self.home,
+            ["fill", field.trim(), "", "--session", "fixture"],
+        );
+        run_cli(
+            self.cli,
+            self.home,
+            ["type", "AX unicode 🙂", "--session", "fixture"],
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        self.snapshot();
+        let field = self.find("AX unicode 🙂", "text-field");
         run_cli(
             self.cli,
             self.home,
@@ -407,6 +484,160 @@ impl FixtureRun<'_> {
         }));
     }
 
+    fn exercise_attached_sheet_scope(&self) {
+        self.snapshot();
+        let opener = self.find("Open attached sheet", "button");
+        run_cli(
+            self.cli,
+            self.home,
+            ["click", opener.trim(), "--session", "fixture"],
+        );
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "wait-for",
+                "Attached sheet content",
+                "--role",
+                "region",
+                "--timeout",
+                "5000",
+                "--session",
+                "fixture",
+            ],
+        );
+
+        let pinned = self.snapshot_json(&[]);
+        assert_eq!(pinned["root"]["role"], "window");
+        let dialog = find_node_by_role(&pinned["root"], "dialog")
+            .expect("attached sheet should be nested under the pinned window");
+        assert!(dialog["ref_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("scope_")));
+
+        let scope = self.find("", "dialog");
+        assert!(scope.trim().starts_with("@s"));
+        let _confirm = run_cli(
+            self.cli,
+            self.home,
+            [
+                "find",
+                "Sheet Confirm",
+                "--role",
+                "button",
+                "--in",
+                scope.trim(),
+                "--first",
+                "--session",
+                "fixture",
+            ],
+        );
+
+        let windows = run_cli(
+            self.cli,
+            self.home,
+            ["window-list", "--json", "--session", "fixture"],
+        );
+        let windows: serde_json::Value = serde_json::from_str(&windows).unwrap();
+        assert_eq!(windows["windows"].as_array().unwrap().len(), 1);
+        assert_eq!(windows["windows"][0]["pinned"], true);
+
+        // Re-targeting by PID while the sheet owns focus must normalize back
+        // to its listed parent window. Otherwise the next action reopens
+        // window index 0 and cannot rediscover refs captured from the sheet.
+        let pid = self.pid.to_string();
+        let retargeted = self.snapshot_json(&["--target-pid", &pid]);
+        assert_eq!(retargeted["root"]["role"], "window");
+        assert!(find_node_by_role(&retargeted["root"], "dialog").is_some());
+
+        let scope = self.find("", "dialog");
+        let confirm = run_cli(
+            self.cli,
+            self.home,
+            [
+                "find",
+                "Sheet Confirm",
+                "--role",
+                "button",
+                "--in",
+                scope.trim(),
+                "--first",
+                "--session",
+                "fixture",
+            ],
+        );
+        run_cli(
+            self.cli,
+            self.home,
+            ["click", confirm.trim(), "--session", "fixture"],
+        );
+        self.snapshot();
+        let _ = self.find("Status: sheet confirmed", "region");
+    }
+
+    fn exercise_popover_scope(&self) {
+        self.snapshot();
+        let opener = self.find("Show popover", "button");
+        run_cli(
+            self.cli,
+            self.home,
+            ["click", opener.trim(), "--session", "fixture"],
+        );
+        run_cli(
+            self.cli,
+            self.home,
+            [
+                "wait-for",
+                "Fixture Popover",
+                "--role",
+                "region",
+                "--timeout",
+                "5000",
+                "--session",
+                "fixture",
+            ],
+        );
+
+        let snapshot = self.snapshot_json(&[]);
+        assert_eq!(snapshot["root"]["role"], "window");
+        let dialog = find_node_by_role(&snapshot["root"], "dialog")
+            .expect("popover should be nested under the pinned window");
+        assert!(dialog["ref_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("scope_")));
+
+        let scope = self.find("", "dialog");
+        let close = run_cli(
+            self.cli,
+            self.home,
+            [
+                "find",
+                "Popover Close",
+                "--role",
+                "button",
+                "--in",
+                scope.trim(),
+                "--first",
+                "--session",
+                "fixture",
+            ],
+        );
+        run_cli(
+            self.cli,
+            self.home,
+            ["click", close.trim(), "--session", "fixture"],
+        );
+        self.snapshot();
+        let _ = self.find("Status: popover closed", "region");
+    }
+
+    fn snapshot_json(&self, target_args: &[&str]) -> serde_json::Value {
+        let mut args = vec!["snapshot", "--json", "--session", "fixture"];
+        args.extend_from_slice(target_args);
+        let output = run_cli_vec(self.cli, self.home, &args);
+        serde_json::from_str(&output).unwrap()
+    }
+
     fn find(&self, name: &str, role: &str) -> String {
         if name.is_empty() {
             run_cli(
@@ -430,6 +661,16 @@ impl FixtureRun<'_> {
             )
         }
     }
+}
+
+fn find_node_by_role<'a>(node: &'a serde_json::Value, role: &str) -> Option<&'a serde_json::Value> {
+    if node["role"] == role {
+        return Some(node);
+    }
+    node["children"]
+        .as_array()?
+        .iter()
+        .find_map(|child| find_node_by_role(child, role))
 }
 
 fn assert_no_native_fields(value: &serde_json::Value) {
@@ -495,6 +736,24 @@ fn run_cli_vec(cli: &Path, home: &Path, args: &[&str]) -> String {
         );
     }
     stdout
+}
+
+fn run_cli_expect_failure<const N: usize>(cli: &Path, home: &Path, args: [&str; N]) -> String {
+    eprintln!("running agent-ctrl {args:?} (expecting failure)");
+    let output = Command::new(cli)
+        .args(args)
+        .env("AGENT_CTRL_HOME", home)
+        .output()
+        .expect("running agent-ctrl");
+    assert!(
+        !output.status.success(),
+        "agent-ctrl unexpectedly succeeded"
+    );
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 fn run_cli_no_capture<const N: usize>(cli: &Path, home: &Path, args: [&str; N]) {

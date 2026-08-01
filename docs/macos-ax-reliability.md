@@ -39,8 +39,9 @@ right after a `cargo build`, toggle the entry off and back on.
 ## Deterministic Fixture
 
 Use `agent-ctrl-ax-fixture` for repeatable real-AX testing. It is a Cocoa
-app with stable common controls: status label, text field, button,
-checkbox, popup button, and a wired-up selection action.
+app with stable common controls, duplicate identifiers, an attached sheet,
+and a popover. The controls report distinct status text so the integration
+test can prove which native element received each action.
 
 ```bash
 cargo build -p agent-ctrl-cli -p agent-ctrl-ax-fixture
@@ -96,20 +97,18 @@ want to drive it through coordinate-based clicks for the rest of the flow.
 Refs are valid only for the snapshot that produced them. The surface uses
 two recovery strategies, in order:
 
-1. **AXIdentifier fast path.** When the snapshot captured a non-empty
+1. **Unique AXIdentifier fast path.** When the snapshot captured a non-empty
    `AXIdentifier` (AppKit `accessibilityIdentifier`) for the element, the
-   surface walks the live tree looking for a node with the same identifier
-   and uses that node directly. This survives renames, reorderings, and
-   value changes.
+   surface walks the live tree and uses it only when exactly one node has that
+   identifier. This survives renames, reorderings, and value changes without
+   making duplicate identifiers ambiguous.
 2. **`(role, name, nth)` walk.** Falls back to a pre-order DFS that
    matches the role and name from the snapshot, picking the n-th match.
    This survives identifier-less apps but is sensitive to label changes.
 
-Apps that set `accessibilityIdentifier` (well-tested AppKit apps, anything
-built with `NSAccessibilityCustomAction`-style ergonomics) get the
-identifier path automatically. Apps that don't (Electron's default tree,
-many third-party Mac apps, anything that exposes plain Cocoa without
-identifier annotations) fall back to the role/name walk.
+Apps that set unique `accessibilityIdentifier` values get the identifier path
+automatically. Apps that omit them, and apps with duplicated identifiers in
+repeated templates, fall back to the role/name walk.
 
 If an app redraws or navigates, run `snapshot` again before acting:
 
@@ -122,21 +121,25 @@ agent-ctrl click "$(agent-ctrl find "OK" --role button --first)"
 
 ## Sheets, Dialogs, And Popups
 
-Cocoa modal UI comes in three shapes, and only the last needs the
-window-list dance:
+Cocoa modal UI can be nested in the pinned window's AX tree or exposed as a
+sibling top-level window:
 
-1. **Sheets** (`NSSavePanel`, `NSOpenPanel`, alerts started with
-   `beginSheetModalForWindow:`) attach to the parent window. They appear
-   in the parent's AX tree as another `AXWindow` child; `snapshot` of
-   the parent process shows them automatically. Use `find --role
-   text-field` etc. on the same session.
+1. **Attached sheets and AppKit popovers** normally appear inside the parent
+   AX tree as a nested dialog. The surface keeps the parent window pinned when
+   that dialog owns focus. Find its scope ref, then constrain child queries:
+
+```bash
+DIALOG="$(agent-ctrl find --role dialog --first)"
+agent-ctrl click "$(agent-ctrl find "Confirm" --role button --in "$DIALOG" --first)"
+```
+
+   `window-list` continues to show the parent top-level window in this case.
 2. **App-modal panels** (`runModal`, `NSAlert.runModal`) take over the
    parent app's main thread. AX queries to that app block until the
    modal is dismissed. `snapshot` and `find` from another process still
    work; act on the modal first, then continue.
-3. **Standalone modal windows** (popovers, file dialogs that open as
-   their own top-level window, popup menus) become sibling top-level
-   windows. Use the standard `window-list` flow:
+3. **Sibling modal windows** include panels or dialogs that the app exposes as
+   a separate top-level AX window. Use the standard `window-list` flow:
 
 ```bash
 agent-ctrl window-list
@@ -158,9 +161,10 @@ item is **silently ignored** by AppKit.
 
 Mouse-driven actions (`click` fallback, `double-click`, `right-click`,
 `hover`, `drag`, `scroll`, `select`, raw `mouse`) require the target
-window to be foreground; CGEvent posts go to whatever's under the
-cursor at OS level, not to a particular AXUIElement. The surface raises
-the pinned window via `AXRaise` before each pointer action.
+window to be foreground; CGEvent posts go to whatever is under the
+cursor at OS level, not to a particular AXUIElement. The surface requests app
+activation, raises the pinned window via `AXRaise`, and briefly waits for
+activation before each pointer action.
 
 Common foreground gotchas:
 
@@ -184,11 +188,11 @@ Use the right text primitive:
 - `clipboard write "text"` plus `clipboard paste` is the right fallback
   for fields without a settable `AXValue`. Restore the user's clipboard
   yourself if you care about preserving it.
-- `type "text"` uses `CGEventKeyboardSetUnicodeString` to send each
-  code unit through the HID event tap. Useful for shortcut flows and
-  apps that need real keystrokes, but it does not go through any IME.
-  CJK composition and dead-key sequences will not work; use `fill` or
-  clipboard paste for those.
+- `type "text"` uses `CGEventKeyboardSetUnicodeString` to send the complete
+  UTF-16 sequence through one keyboard down/up pair. This preserves emoji and
+  other supplementary characters, but it does not go through any IME. CJK
+  composition and dead-key sequences will not work; use `fill` or clipboard
+  paste for those.
 - `press "Cmd+S"` posts a virtual key down/up with modifier flags. Best
   for shortcuts and chord-only flows.
 
@@ -305,9 +309,9 @@ npm run build --workspace=@agent-ctrl/client
 npm run test --workspace=@agent-ctrl/client
 ```
 
-The opt-in fixture test exercises every action verb, the AXIdentifier
-fast path, the `select` popup-click flow, the screenshot path with
-annotations, and the `switch-app` round trip between Finder and the
-fixture. It runs on a real Cocoa fixture, so it requires both
-Accessibility and Screen Recording grants on the local
-`agent-ctrl` binary and a logged-in GUI session.
+The opt-in fixture test exercises every action verb, unique and duplicate
+AXIdentifier resolution, scoped attached sheets and popovers, Unicode keyboard
+input, check-state rejection, popup selection, annotated screenshots, and the
+`switch-app` round trip between Finder and the fixture. It runs on a real Cocoa
+fixture, so it requires both Accessibility and Screen Recording grants on the
+local `agent-ctrl` binary and a logged-in GUI session.

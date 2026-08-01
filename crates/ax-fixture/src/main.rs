@@ -41,8 +41,12 @@ mod macos_app {
     const NS_BUTTON_TYPE_MOMENTARY_PUSH_IN: NSUInteger = 0;
     const NS_BUTTON_TYPE_SWITCH: NSUInteger = 3;
     const NS_ROUNDED_BEZEL_STYLE: NSUInteger = 1;
+    const NS_MAX_Y_EDGE: NSUInteger = 3;
+    const NS_POPOVER_BEHAVIOR_APPLICATION_DEFINED: NSInteger = 0;
 
     static STATUS_FIELD: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
+    static MAIN_WINDOW: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
+    static ACTIVE_POPOVER: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
     static CLICK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     #[repr(C)]
@@ -92,6 +96,7 @@ mod macos_app {
 
             let target = make_target();
             let window = create_window();
+            MAIN_WINDOW.store(window, Ordering::SeqCst);
             let content: Id = msg_send![window, contentView];
             build_controls(content, target);
 
@@ -144,11 +149,11 @@ mod macos_app {
         set_identifier(field, "fixture-text-field");
         add_subview(content, field);
 
-        let button = button("Increment", rect(24.0, 188.0, 140.0, 34.0));
-        let _: () = msg_send![button, setTarget: target];
-        let _: () = msg_send![button, setAction: sel!(increment:)];
-        set_identifier(button, "fixture-increment-button");
-        add_subview(content, button);
+        let increment_button = button("Increment", rect(24.0, 188.0, 140.0, 34.0));
+        let _: () = msg_send![increment_button, setTarget: target];
+        let _: () = msg_send![increment_button, setAction: sel!(increment:)];
+        set_identifier(increment_button, "fixture-increment-button");
+        add_subview(content, increment_button);
 
         let checkbox = checkbox("Enable advanced mode", rect(24.0, 150.0, 220.0, 24.0));
         set_identifier(checkbox, "fixture-advanced-checkbox");
@@ -162,6 +167,30 @@ mod macos_app {
         let _: () = msg_send![popup, setAction: sel!(selectionChanged:)];
         set_identifier(popup, "fixture-fruit-popup");
         add_subview(content, popup);
+
+        let sheet = button("Open attached sheet", rect(380.0, 244.0, 200.0, 34.0));
+        let _: () = msg_send![sheet, setTarget: target];
+        let _: () = msg_send![sheet, setAction: sel!(openSheet:)];
+        set_identifier(sheet, "fixture-open-sheet");
+        add_subview(content, sheet);
+
+        let popover = button("Show popover", rect(380.0, 198.0, 200.0, 34.0));
+        let _: () = msg_send![popover, setTarget: target];
+        let _: () = msg_send![popover, setAction: sel!(showPopover:)];
+        set_identifier(popover, "fixture-show-popover");
+        add_subview(content, popover);
+
+        let duplicate_first = button("Duplicate First", rect(380.0, 150.0, 200.0, 34.0));
+        let _: () = msg_send![duplicate_first, setTarget: target];
+        let _: () = msg_send![duplicate_first, setAction: sel!(duplicateFirst:)];
+        set_identifier(duplicate_first, "fixture-duplicate-button");
+        add_subview(content, duplicate_first);
+
+        let duplicate_second = button("Duplicate Second", rect(380.0, 104.0, 200.0, 34.0));
+        let _: () = msg_send![duplicate_second, setTarget: target];
+        let _: () = msg_send![duplicate_second, setAction: sel!(duplicateSecond:)];
+        set_identifier(duplicate_second, "fixture-duplicate-button");
+        add_subview(content, duplicate_second);
 
         let hint = label(
             "AX fixture ready: use snapshot, find, click, focus, fill, check, type, press",
@@ -236,6 +265,30 @@ mod macos_app {
                 sel!(selectionChanged:),
                 selection_changed as extern "C" fn(&Object, Sel, Id),
             );
+            decl.add_method(
+                sel!(openSheet:),
+                open_sheet as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(closeSheet:),
+                close_sheet as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(showPopover:),
+                show_popover as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(closePopover:),
+                close_popover as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(duplicateFirst:),
+                duplicate_first as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(duplicateSecond:),
+                duplicate_second as extern "C" fn(&Object, Sel, Id),
+            );
             decl.register()
         } else if let Some(class) = Class::get("AgentCtrlAxFixtureTarget") {
             class
@@ -275,7 +328,120 @@ mod macos_app {
             let chosen = std::ffi::CStr::from_ptr(utf8)
                 .to_string_lossy()
                 .into_owned();
-            let value = nsstring(&format!("Status: chose {chosen}"));
+            set_status(&format!("Status: chose {chosen}"));
+        }
+    }
+
+    extern "C" fn open_sheet(_this: &Object, _cmd: Sel, _sender: Id) {
+        let parent = MAIN_WINDOW.load(Ordering::SeqCst);
+        if parent.is_null() {
+            return;
+        }
+        unsafe {
+            let frame = rect(0.0, 0.0, 420.0, 190.0);
+            let sheet: Id = msg_send![class!(NSWindow), alloc];
+            let sheet: Id = msg_send![
+                sheet,
+                initWithContentRect: frame
+                styleMask: NS_WINDOW_STYLE_TITLED
+                backing: NS_BACKING_STORE_BUFFERED
+                defer: NO
+            ];
+            let title = nsstring("Fixture Attached Sheet");
+            let _: () = msg_send![sheet, setTitle: title];
+            let _: () = msg_send![sheet, setReleasedWhenClosed: NO];
+            let content: Id = msg_send![sheet, contentView];
+            let text = label(
+                "Attached sheet content is scoped independently.",
+                rect(24.0, 118.0, 360.0, 28.0),
+            );
+            set_identifier(text, "fixture-sheet-label");
+            add_subview(content, text);
+
+            let confirm = button("Sheet Confirm", rect(220.0, 52.0, 160.0, 34.0));
+            let target: Id = msg_send![class!(AgentCtrlAxFixtureTarget), new];
+            let _: () = msg_send![confirm, setTarget: target];
+            let _: () = msg_send![confirm, setAction: sel!(closeSheet:)];
+            set_identifier(confirm, "fixture-sheet-confirm");
+            add_subview(content, confirm);
+
+            let _: () = msg_send![parent, beginSheet: sheet completionHandler: std::ptr::null_mut::<Object>()];
+        }
+    }
+
+    extern "C" fn close_sheet(_this: &Object, _cmd: Sel, sender: Id) {
+        if sender.is_null() {
+            return;
+        }
+        unsafe {
+            let sheet: Id = msg_send![sender, window];
+            if sheet.is_null() {
+                return;
+            }
+            let parent: Id = msg_send![sheet, sheetParent];
+            if !parent.is_null() {
+                let _: () = msg_send![parent, endSheet: sheet];
+            }
+            let _: () = msg_send![sheet, orderOut: std::ptr::null_mut::<Object>()];
+            set_status("Status: sheet confirmed");
+        }
+    }
+
+    extern "C" fn show_popover(_this: &Object, _cmd: Sel, sender: Id) {
+        if sender.is_null() || !ACTIVE_POPOVER.load(Ordering::SeqCst).is_null() {
+            return;
+        }
+        unsafe {
+            let popover: Id = msg_send![class!(NSPopover), new];
+            let controller: Id = msg_send![class!(NSViewController), new];
+            let view: Id = msg_send![class!(NSView), alloc];
+            let view: Id = msg_send![view, initWithFrame: rect(0.0, 0.0, 320.0, 150.0)];
+            set_identifier(view, "fixture-popover-root");
+
+            let text = label("Fixture Popover", rect(24.0, 94.0, 270.0, 28.0));
+            set_identifier(text, "fixture-popover-label");
+            add_subview(view, text);
+
+            let close = button("Popover Close", rect(136.0, 34.0, 160.0, 34.0));
+            let target: Id = msg_send![class!(AgentCtrlAxFixtureTarget), new];
+            let _: () = msg_send![close, setTarget: target];
+            let _: () = msg_send![close, setAction: sel!(closePopover:)];
+            set_identifier(close, "fixture-popover-close");
+            add_subview(view, close);
+
+            let _: () = msg_send![controller, setView: view];
+            let _: () = msg_send![popover, setContentViewController: controller];
+            let _: () = msg_send![popover, setBehavior: NS_POPOVER_BEHAVIOR_APPLICATION_DEFINED];
+            let sender_bounds: NSRect = msg_send![sender, bounds];
+            let _: () = msg_send![popover, showRelativeToRect: sender_bounds ofView: sender preferredEdge: NS_MAX_Y_EDGE];
+            ACTIVE_POPOVER.store(popover, Ordering::SeqCst);
+        }
+    }
+
+    extern "C" fn close_popover(_this: &Object, _cmd: Sel, _sender: Id) {
+        let popover = ACTIVE_POPOVER.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if popover.is_null() {
+            return;
+        }
+        unsafe {
+            let _: () = msg_send![popover, close];
+            let _: () = msg_send![popover, release];
+            set_status("Status: popover closed");
+        }
+    }
+
+    extern "C" fn duplicate_first(_this: &Object, _cmd: Sel, _sender: Id) {
+        unsafe { set_status("Status: duplicate first") }
+    }
+
+    extern "C" fn duplicate_second(_this: &Object, _cmd: Sel, _sender: Id) {
+        unsafe { set_status("Status: duplicate second") }
+    }
+
+    unsafe fn set_status(text: &str) {
+        let field = STATUS_FIELD.load(Ordering::SeqCst);
+        if !field.is_null() {
+            let value = nsstring(text);
             let _: () = msg_send![field, setStringValue: value];
         }
     }
