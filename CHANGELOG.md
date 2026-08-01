@@ -88,6 +88,8 @@ All notable changes to **agent-ctrl** are recorded here. The format is loosely b
   preserves supplementary Unicode characters such as emoji.
 - macOS AX raw wheel events now honor their requested screen coordinates, and
   pointer fallbacks reject empty or non-finite element bounds.
+- GitHub release publishing now uses the supported Intel macOS runner and only
+  creates the release after every platform artifact and checksum is present.
 - AX window listing and `focus-window` preview using session-oriented
   `pid:<pid>:window:<index>` ids and AX `AXRaise`.
 - **Linux AT-SPI surface (`agent-ctrl-surface-atspi`), snapshot-read path.**
