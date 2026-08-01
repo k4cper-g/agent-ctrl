@@ -119,7 +119,9 @@ pub enum Checked {
 /// Element state flags exposed by every accessibility platform.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
-    /// Whether the element is currently displayed and not occluded.
+    /// Whether the accessibility backend reports the element as visible or
+    /// on-screen. This does not guarantee that another window is not
+    /// occluding it.
     pub visible: bool,
     /// Whether the element accepts user input.
     pub enabled: bool,
@@ -181,7 +183,11 @@ pub struct Node {
     pub opaque: bool,
 
     /// Platform-specific handle, used internally by the surface.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Native handles may contain process-local pointers or OS identifiers.
+    /// They are retained in daemon memory for action-time rediscovery but are
+    /// deliberately excluded from the public wire snapshot.
+    #[serde(skip)]
     pub native: Option<NativeHandle>,
 }
 

@@ -1,7 +1,7 @@
 // Public entrypoint for `@agent-ctrl/client`.
 
-export { AgentCtrl, type AgentCtrlOptions } from "./client.js";
-export { systemTimeToMs } from "./types.js";
+export { AgentCtrl, type AgentCtrlOptions, type OpenedSession } from "./client.js";
+export { PROTOCOL_VERSION, systemTimeToMs } from "./types.js";
 export type {
   Action,
   ActionResult,
@@ -17,9 +17,9 @@ export type {
   IsResult,
   MouseButton,
   MouseOp,
-  NativeHandle,
   Node,
   NodeState,
+  ObservedMatch,
   RefEntry,
   RefId,
   RefMap,

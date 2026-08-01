@@ -1,8 +1,10 @@
 // Wire types for the agent-ctrl daemon protocol.
 //
 // These mirror the Rust types in `crates/core` and `crates/daemon/src/dispatcher.rs`.
-// They are hand-maintained for now; a future commit will generate them from the
-// Rust source via `ts-rs` to eliminate drift.
+// A Rust contract test checks the closed unions below against the source enums.
+
+/** Wire protocol version implemented by this client. */
+export const PROTOCOL_VERSION = 2;
 
 // ---------- Identifiers ----------
 
@@ -14,7 +16,7 @@ export type RefId = string;
 
 // ---------- Surface ----------
 
-export type SurfaceKind = "uia" | "ax" | "android" | "ios" | "mock";
+export type SurfaceKind = "uia" | "ax" | "atspi" | "android" | "ios" | "mock";
 
 // ---------- Roles ----------
 
@@ -53,13 +55,6 @@ export interface NodeState {
   required?: boolean;
 }
 
-/** Platform-specific element handle, kept opaque to client code. */
-export type NativeHandle =
-  | { platform: "uia"; runtime_id: number[]; automation_id?: string }
-  | { platform: "ax"; element_ref: number }
-  | { platform: "android"; window_id: number; virtual_view_id: number; resource_id?: string }
-  | { platform: "ios"; element_id: string };
-
 export interface Node {
   ref_id?: RefId;
   role: Role;
@@ -71,14 +66,11 @@ export interface Node {
   level?: number;
   children?: Node[];
   opaque?: boolean;
-  native?: NativeHandle;
 }
 
 // ---------- Snapshot ----------
 
 export interface SnapshotOptions {
-  selector?: string;
-  interactive?: boolean;
   compact?: boolean;
   depth?: number;
   /** Which window/process to capture. Defaults to the foreground window. */
@@ -116,7 +108,6 @@ export interface RefEntry {
   role: Role;
   name: string;
   nth: number;
-  native?: NativeHandle;
 }
 
 export interface RefMap {
@@ -228,6 +219,16 @@ export interface FindMatch {
   name: string;
 }
 
+/** A wait-query match, including nodes that do not have an actionable ref. */
+export interface ObservedMatch {
+  /** Present when the matched node can be targeted by a follow-up action. */
+  ref_id?: RefId;
+  role: Role;
+  name: string;
+  value?: string;
+  state: NodeState;
+}
+
 // ---------- Inspect ----------
 
 export type GetField = "text" | "value" | "name" | "role" | "state" | "bounds" | "window";
@@ -279,7 +280,7 @@ export interface WaitOptions {
 
 /** Outcome of a `wait-for` invocation. */
 export type WaitOutcome =
-  | { outcome: "matched"; found?: FindMatch; elapsed_ms: number }
+  | { outcome: "matched"; found?: ObservedMatch; elapsed_ms: number }
   | { outcome: "gone"; elapsed_ms: number }
   | { outcome: "stable"; elapsed_ms: number }
   | { outcome: "timeout"; elapsed_ms: number };
@@ -331,7 +332,8 @@ export type RequestOp =
   | { op: "wait"; session: SessionId; opts: WaitOptions }
   | { op: "list_windows"; session: SessionId }
   | { op: "close_session"; session: SessionId }
-  | { op: "batch"; session: SessionId; steps: BatchStep[]; bail?: boolean };
+  | { op: "batch"; session: SessionId; steps: BatchStep[]; bail?: boolean }
+  | { op: "shutdown" };
 
 export type Request = { id: string; auth?: string } & RequestOp;
 
@@ -339,9 +341,9 @@ export type Response = { id: string } & (
   | {
       result: "session_opened";
       session: SessionId;
-      protocol_version?: number;
-      surface?: SurfaceKind;
-      capabilities?: string[];
+      protocol_version: number;
+      surface: SurfaceKind;
+      capabilities: string[];
     }
   | { result: "snapshot"; snapshot: Snapshot }
   | { result: "action_done"; outcome: ActionResult }
@@ -352,6 +354,7 @@ export type Response = { id: string } & (
   | { result: "windows"; windows: WindowInfo[] }
   | { result: "batch_done"; outcomes: BatchStepOutcome[] }
   | { result: "closed" }
+  | { result: "stopped" }
   | { result: "error"; message: string }
 );
 

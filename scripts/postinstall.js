@@ -19,6 +19,8 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readFileSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from "fs"
@@ -26,6 +28,7 @@ import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 import { platform, arch } from "os"
 import { execSync } from "child_process"
+import { createHash } from "crypto"
 import { get } from "https"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -34,11 +37,7 @@ const binDir = join(projectRoot, "bin")
 
 const GITHUB_REPO = "k4cper-g/agent-ctrl"
 
-const packageJson = JSON.parse(
-  await import("fs").then((m) =>
-    m.readFileSync(join(projectRoot, "package.json"), "utf8"),
-  ),
-)
+const packageJson = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"))
 const version = packageJson.version
 
 function getBinaryName() {
@@ -65,30 +64,42 @@ function noticeUnsupported() {
   console.log("")
 }
 
-function downloadFile(url, dest) {
+function downloadFile(url, dest, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest)
-    const request = (currentUrl) => {
-      get(currentUrl, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) {
-          request(res.headers.location)
+    get(url, (res) => {
+      if ([301, 302, 307, 308].includes(res.statusCode ?? 0)) {
+        res.resume()
+        if (!res.headers.location || redirectsLeft === 0) {
+          reject(new Error(`invalid redirect for ${url}`))
           return
         }
-        if (res.statusCode !== 200) {
-          reject(new Error(`HTTP ${res.statusCode} for ${currentUrl}`))
-          return
-        }
-        res.pipe(file)
-        file.on("finish", () => file.close(() => resolve()))
-      }).on("error", (err) => {
+        downloadFile(res.headers.location, dest, redirectsLeft - 1).then(resolve, reject)
+        return
+      }
+      if (res.statusCode !== 200) {
+        res.resume()
+        reject(new Error(`HTTP ${res.statusCode} for ${url}`))
+        return
+      }
+
+      const file = createWriteStream(dest, { flags: "wx", mode: 0o600 })
+      const fail = (err) => {
+        file.destroy()
         try {
           unlinkSync(dest)
         } catch {}
         reject(err)
-      })
-    }
-    request(url)
+      }
+      res.on("error", fail)
+      file.on("error", fail)
+      file.on("finish", () => file.close(resolve))
+      res.pipe(file)
+    }).on("error", reject)
   })
+}
+
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex")
 }
 
 async function main() {
@@ -104,6 +115,8 @@ async function main() {
   }
 
   const binaryPath = join(binDir, binaryName)
+  const tempBinaryPath = `${binaryPath}.${process.pid}.download`
+  const checksumPath = `${tempBinaryPath}.sha256`
 
   if (existsSync(binaryPath)) {
     if (platform() !== "win32") {
@@ -121,12 +134,26 @@ async function main() {
   console.log(`  ${url}`)
 
   try {
-    await downloadFile(url, binaryPath)
+    await downloadFile(url, tempBinaryPath)
+    await downloadFile(`${url}.sha256`, checksumPath)
+    const checksumText = readFileSync(checksumPath, "utf8").trim()
+    const expected = checksumText.match(/^[a-fA-F0-9]{64}/)?.[0]?.toLowerCase()
+    const actual = sha256(tempBinaryPath)
+    if (!expected || actual !== expected) {
+      throw new Error(`SHA-256 mismatch for ${binaryName}`)
+    }
+    renameSync(tempBinaryPath, binaryPath)
+    unlinkSync(checksumPath)
     if (platform() !== "win32") {
       chmodSync(binaryPath, 0o755)
     }
     console.log(`agent-ctrl: ready (${binaryName}).`)
   } catch (err) {
+    for (const path of [tempBinaryPath, checksumPath]) {
+      try {
+        unlinkSync(path)
+      } catch {}
+    }
     console.warn(
       `agent-ctrl: could not download native binary (${err.message}).`,
     )

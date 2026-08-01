@@ -3,9 +3,10 @@
 use std::time::{Duration, Instant};
 
 use agent_ctrl_core::{
-    tree_signature, Action, ActionResult, Checked, FindMatch, FindQuery, GetField, GetResult,
-    IsResult, Node, RefId, Snapshot, SnapshotOptions, StateField, SurfaceKind, WaitOptions,
-    WaitOutcome, WaitPredicate, WindowInfo,
+    capability, required_capabilities, tree_signature, Action, ActionResult, Checked, Error,
+    FindMatch, FindQuery, GetField, GetResult, IsResult, Node, ObservedMatch, RefId, Snapshot,
+    SnapshotOptions, StateField, Surface, SurfaceKind, WaitOptions, WaitOutcome, WaitPredicate,
+    WindowInfo,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -295,11 +296,12 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
         RequestOp::OpenSession { surface } => match factory::open_surface(surface).await {
             Ok(s) => {
                 let surface = s.kind();
-                let capabilities = s
+                let mut capabilities = s
                     .capabilities()
                     .iter()
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
+                capabilities.sort_unstable();
                 ResponseBody::SessionOpened {
                     session: state.open(s).await,
                     protocol_version: PROTOCOL_VERSION,
@@ -319,6 +321,12 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
             let Some(surface) = guard.surface.as_ref() else {
                 return Response::error(&id, format!("session {session} is closed"));
             };
+            if !surface.capabilities().supports(capability::SNAPSHOT) {
+                return Response::error(
+                    &id,
+                    unsupported_message(surface.as_ref(), "snapshot", capability::SNAPSHOT),
+                );
+            }
             match surface.snapshot(&opts).await {
                 Ok(s) => {
                     // Cache both the snapshot and the options that produced
@@ -343,6 +351,9 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
             let Some(surface) = guard.surface.as_ref() else {
                 return Response::error(&id, format!("session {session} is closed"));
             };
+            if let Err(message) = ensure_action_supported(surface.as_ref(), &action) {
+                return Response::error(&id, message);
+            }
             match surface.act(&action).await {
                 Ok(o) => ResponseBody::ActionDone { outcome: o },
                 Err(e) => ResponseBody::Error {
@@ -412,6 +423,12 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
             let Some(surface) = guard.surface.as_ref() else {
                 return Response::error(&id, format!("session {session} is closed"));
             };
+            if !surface.capabilities().supports(capability::WINDOWS) {
+                return Response::error(
+                    &id,
+                    unsupported_message(surface.as_ref(), "list_windows", capability::WINDOWS),
+                );
+            }
             match surface.list_windows().await {
                 Ok(windows) => ResponseBody::Windows { windows },
                 Err(e) => ResponseBody::Error {
@@ -435,6 +452,23 @@ pub async fn dispatch(state: &DaemonState, request: Request) -> Response {
         },
     };
     Response { id, body }
+}
+
+fn unsupported_message(surface: &dyn Surface, action: &str, capability: &str) -> String {
+    Error::Unsupported {
+        surface: surface.kind().as_str().into(),
+        action: format!("{action} (requires capability {capability:?})"),
+    }
+    .to_string()
+}
+
+fn ensure_action_supported(surface: &dyn Surface, action: &Action) -> Result<(), String> {
+    for capability in required_capabilities(action) {
+        if !surface.capabilities().supports(capability) {
+            return Err(unsupported_message(surface, action.kind_name(), capability));
+        }
+    }
+    Ok(())
 }
 
 async fn cached_snapshot(
@@ -571,6 +605,7 @@ async fn batch_act(
     let Some(surface) = guard.surface.as_ref() else {
         return Err(format!("session {session} is closed"));
     };
+    ensure_action_supported(surface.as_ref(), &action)?;
     surface
         .act(&action)
         .await
@@ -642,6 +677,13 @@ async fn batch_list_windows(
     let Some(surface) = guard.surface.as_ref() else {
         return Err(format!("session {session} is closed"));
     };
+    if !surface.capabilities().supports(capability::WINDOWS) {
+        return Err(unsupported_message(
+            surface.as_ref(),
+            "list_windows",
+            capability::WINDOWS,
+        ));
+    }
     surface
         .list_windows()
         .await
@@ -710,6 +752,13 @@ async fn run_wait(
             let Some(surface) = guard.surface.as_ref() else {
                 return Err("session is closed".into());
             };
+            if !surface.capabilities().supports(capability::SNAPSHOT) {
+                return Err(unsupported_message(
+                    surface.as_ref(),
+                    "wait",
+                    capability::SNAPSHOT,
+                ));
+            }
             let snap = surface
                 .snapshot(&snap_opts)
                 .await
@@ -724,7 +773,7 @@ async fn run_wait(
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match &opts.predicate {
             WaitPredicate::Appears { query } => {
-                if let Some(found) = snap.find(query).into_iter().next() {
+                if let Some(found) = snap.observe(query).into_iter().next() {
                     return Ok(WaitOutcome::Matched {
                         found: Some(found),
                         elapsed_ms,
@@ -732,7 +781,7 @@ async fn run_wait(
                 }
             }
             WaitPredicate::Gone { query } => {
-                if snap.find(query).is_empty() {
+                if snap.observe(query).is_empty() {
                     return Ok(WaitOutcome::Gone { elapsed_ms });
                 }
             }
@@ -753,9 +802,9 @@ async fn run_wait(
                 field,
                 value,
             } => {
-                if let Some(found) =
-                    first_match_where(&snap, query, |node| state_value(node, *field) == *value)
-                {
+                if let Some(found) = first_observation_where(&snap, query, |observed| {
+                    observed_state_value(observed, *field) == *value
+                }) {
                     return Ok(WaitOutcome::Matched {
                         found: Some(found),
                         elapsed_ms,
@@ -764,10 +813,11 @@ async fn run_wait(
             }
             WaitPredicate::TextContains { query, text } => {
                 let needle = text.to_lowercase();
-                if let Some(found) = first_match_where(&snap, query, |node| {
-                    node.value
+                if let Some(found) = first_observation_where(&snap, query, |observed| {
+                    observed
+                        .value
                         .as_deref()
-                        .unwrap_or(&node.name)
+                        .unwrap_or(&observed.name)
                         .to_lowercase()
                         .contains(&needle)
                 }) {
@@ -779,8 +829,9 @@ async fn run_wait(
             }
             WaitPredicate::ValueContains { query, value } => {
                 let needle = value.to_lowercase();
-                if let Some(found) = first_match_where(&snap, query, |node| {
-                    node.value
+                if let Some(found) = first_observation_where(&snap, query, |observed| {
+                    observed
+                        .value
                         .as_deref()
                         .unwrap_or_default()
                         .to_lowercase()
@@ -850,15 +901,24 @@ async fn run_window_wait(
     }
 }
 
-fn first_match_where<F>(snap: &Snapshot, query: &FindQuery, pred: F) -> Option<FindMatch>
+fn first_observation_where<F>(snap: &Snapshot, query: &FindQuery, pred: F) -> Option<ObservedMatch>
 where
-    F: Fn(&Node) -> bool,
+    F: Fn(&ObservedMatch) -> bool,
 {
     let mut query = query.clone();
     query.limit = None;
-    snap.find(&query)
-        .into_iter()
-        .find(|m| snap.node_by_ref(&m.ref_id).is_some_and(&pred))
+    snap.observe(&query).into_iter().find(pred)
+}
+
+fn observed_state_value(observed: &ObservedMatch, field: StateField) -> bool {
+    match field {
+        StateField::Visible => observed.state.visible,
+        StateField::Enabled => observed.state.enabled,
+        StateField::Focused => observed.state.focused,
+        StateField::Selected => observed.state.selected.unwrap_or(false),
+        StateField::Checked => observed.state.checked == Some(Checked::True),
+        StateField::Expanded => observed.state.expanded.unwrap_or(false),
+    }
 }
 
 async fn window_title_present(
@@ -870,6 +930,13 @@ async fn window_title_present(
     let Some(surface) = guard.surface.as_ref() else {
         return Err("session is closed".into());
     };
+    if !surface.capabilities().supports(capability::WINDOWS) {
+        return Err(unsupported_message(
+            surface.as_ref(),
+            "wait_for_window",
+            capability::WINDOWS,
+        ));
+    }
     let windows = surface
         .list_windows()
         .await
@@ -885,7 +952,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use agent_ctrl_core::{AppContext, RefMap, Role, State};
+    use agent_ctrl_core::{AppContext, MockSurface, RefMap, Role, State};
 
     #[test]
     fn request_roundtrips_with_correlation_id() {
@@ -939,7 +1006,23 @@ mod tests {
     }
 
     #[test]
-    fn first_match_where_ignores_query_limit_and_returns_satisfying_node() {
+    fn capability_gate_rejects_unsupported_action_before_dispatch() {
+        let surface = MockSurface::new();
+        let error = ensure_action_supported(
+            &surface,
+            &Action::Screenshot {
+                region: None,
+                target: None,
+                annotated: false,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("not supported"));
+        assert!(error.contains("screenshot"));
+    }
+
+    #[test]
+    fn first_observation_where_ignores_query_limit_and_returns_satisfying_node() {
         let mut refs = RefMap::new();
         let first_ref = refs.insert(Role::Button, "Save".into(), 0, None);
         let second_ref = refs.insert(Role::Button, "Save".into(), 1, None);
@@ -1004,8 +1087,9 @@ mod tests {
             limit: Some(1),
             ..FindQuery::default()
         };
-        let found = first_match_where(&snap, &query, |node| node.state.enabled).unwrap();
-        assert_eq!(found.ref_id, second_ref);
+        let found =
+            first_observation_where(&snap, &query, |observed| observed.state.enabled).unwrap();
+        assert_eq!(found.ref_id, Some(second_ref));
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ console.log(`Syncing version ${version} ...`)
 const cargoTomlPath = join(rootDir, "Cargo.toml")
 let cargoToml = readFileSync(cargoTomlPath, "utf-8")
 
-// Match the first line beginning with `version = "..."` — this is the
+// Match the first line beginning with `version = "..."` - this is the
 // [workspace.package] version. Inter-crate path deps include `version` mid-line
 // (`{ path = "...", version = "..." }`) and are not affected by `^version`.
 const cargoVersionRegex = /^version\s*=\s*"[^"]*"/m
@@ -47,7 +47,7 @@ if (oldMatch !== newCargoVersion) {
   console.log("  Cargo.toml already up to date")
 }
 
-// Update Cargo.lock to match. Best-effort — if cargo isn't on PATH or the
+// Update Cargo.lock to match. Best-effort - if cargo isn't on PATH or the
 // network is unavailable, surface the error but don't fail version:sync.
 if (cargoTomlUpdated) {
   try {

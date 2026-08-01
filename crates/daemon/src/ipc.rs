@@ -62,11 +62,11 @@ pub async fn run_tcp<F, Fut>(
 ) -> std::io::Result<()>
 where
     F: FnOnce(std::net::SocketAddr) -> Fut,
-    Fut: std::future::Future<Output = ()>,
+    Fut: std::future::Future<Output = std::io::Result<()>>,
 {
     let listener = TcpListener::bind(bind).await?;
     let local = listener.local_addr()?;
-    bound(local).await;
+    bound(local).await?;
     tracing::info!("agent-ctrl daemon listening on tcp://{local}");
 
     // Single shared shutdown signal: any connection that processes a

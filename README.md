@@ -18,8 +18,9 @@ npm install -g @agent-ctrl/cli
 
 The package ships a Node launcher; the postinstall step downloads the
 matching native binary for your platform from the corresponding GitHub
-Release. Supported in v0.1.x: Windows x64, macOS arm64, macOS x64. Linux
-is on the roadmap.
+Release and verifies its release-published SHA-256 checksum before installing
+it. Supported in v0.1.x: Windows x64, macOS arm64, macOS x64. Linux is on the
+roadmap for prebuilt distribution.
 
 ### Windows binary
 
@@ -94,6 +95,10 @@ agent-ctrl close                                 # stop the daemon
 ```
 
 Every action follows the same pattern: `snapshot` once to learn what's on screen, then issue actions by ref. Refs are valid only for the snapshot that produced them - re-snapshot before acting on a tree that has changed.
+
+Surfaces advertise capabilities when a session opens, and the daemon enforces
+them before dispatch. Native OS handles stay inside the surface process and are
+never included in JSON snapshots or TypeScript values.
 
 ## Commands
 
@@ -362,7 +367,7 @@ agent-ctrl uses a client-daemon architecture mirroring agent-browser:
 2. **Rust daemon** (`crates/daemon`) - long-running process that owns surface sessions and dispatches snapshot / action / find / wait / list-windows requests.
 3. **Surface trait** (`crates/core`) - cross-platform contract every backend implements. Per-platform crates (`crates/surface-uia`, `surface-ax`, `surface-atspi`) provide the implementations, gated by `target_os`.
 
-The daemon starts via `agent-ctrl open <surface>` and persists across CLI invocations for fast subsequent operations. Each session has its own daemon process and writes a discovery file at `~/.agent-ctrl/<session>.json`.
+The daemon starts via `agent-ctrl open <surface>` and persists across CLI invocations for fast subsequent operations. Each session has its own daemon process and writes an atomic discovery file at `~/.agent-ctrl/<session>.json`. On Unix, the directory and files are restricted to the current user. Read-only discovery never removes stale files; `agent-ctrl doctor --fix` performs explicit cleanup.
 
 ## Workspace layout
 

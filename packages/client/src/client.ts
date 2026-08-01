@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 
+import { PROTOCOL_VERSION } from "./types.js";
 import type {
   Action,
   ActionResult,
@@ -43,11 +44,22 @@ export interface AgentCtrlOptions {
   stderr?: "inherit" | "ignore";
   /** Working directory for the daemon process. */
   cwd?: string;
+  /** Default deadline for one request. Defaults to 30 seconds. */
+  requestTimeoutMs?: number;
 }
 
 interface PendingRequest {
   resolve: (response: Response) => void;
   reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/** Metadata negotiated when a surface session opens. */
+export interface OpenedSession {
+  session: SessionId;
+  protocolVersion: number;
+  surface: SurfaceKind;
+  capabilities: readonly string[];
 }
 
 /**
@@ -60,6 +72,7 @@ interface PendingRequest {
 export class AgentCtrl {
   private readonly proc: ChildProcess;
   private readonly reader: ReadlineInterface;
+  private readonly requestTimeoutMs: number;
   private readonly pending = new Map<string, PendingRequest>();
   private closed = false;
   private exitError: Error | null = null;
@@ -70,6 +83,10 @@ export class AgentCtrl {
       throw new Error("AgentCtrl: `command` cannot be empty");
     }
     const [binary, ...args] = command as [string, ...string[]];
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    if (!Number.isFinite(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new Error("AgentCtrl: `requestTimeoutMs` must be a positive number");
+    }
 
     this.proc = spawn(binary, args, {
       stdio: ["pipe", "pipe", options.stderr ?? "inherit"],
@@ -93,6 +110,7 @@ export class AgentCtrl {
         : `daemon exited with code ${code ?? "unknown"}`;
       this.exitError ??= new Error(reason);
       for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
         p.reject(this.exitError);
       }
       this.pending.clear();
@@ -105,6 +123,7 @@ export class AgentCtrl {
       this.closed = true;
       this.exitError = err;
       for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
         p.reject(err);
       }
       this.pending.clear();
@@ -113,8 +132,25 @@ export class AgentCtrl {
 
   /** Open a new session against the requested surface. */
   async openSession(surface: SurfaceKind): Promise<SessionId> {
+    return (await this.openSessionInfo(surface)).session;
+  }
+
+  /** Open a session and return its negotiated protocol metadata. */
+  async openSessionInfo(surface: SurfaceKind): Promise<OpenedSession> {
     const r = await this.send({ op: "open_session", surface });
-    if (r.result === "session_opened") return r.session;
+    if (r.result === "session_opened") {
+      if (r.protocol_version !== PROTOCOL_VERSION) {
+        throw new Error(
+          `open_session failed: daemon protocol ${r.protocol_version} is incompatible with client protocol ${PROTOCOL_VERSION}`,
+        );
+      }
+      return {
+        session: r.session,
+        protocolVersion: r.protocol_version,
+        surface: r.surface,
+        capabilities: r.capabilities,
+      };
+    }
     throw asError("open_session", r);
   }
 
@@ -127,7 +163,11 @@ export class AgentCtrl {
 
   /** Execute an action against the session. */
   async act(session: SessionId, action: Action): Promise<ActionResult> {
-    const r = await this.send({ op: "act", session, action });
+    const timeoutMs =
+      action.kind === "wait"
+        ? Math.max(this.requestTimeoutMs, action.ms + 5_000)
+        : this.requestTimeoutMs;
+    const r = await this.send({ op: "act", session, action }, timeoutMs);
     if (r.result === "action_done") return r.outcome;
     throw asError("act", r);
   }
@@ -172,7 +212,10 @@ export class AgentCtrl {
    * branch on `outcome.outcome` directly.
    */
   async waitFor(session: SessionId, opts: WaitOptions): Promise<WaitOutcome> {
-    const r = await this.send({ op: "wait", session, opts });
+    const r = await this.send(
+      { op: "wait", session, opts },
+      Math.max(this.requestTimeoutMs, opts.timeout_ms + 5_000),
+    );
     if (r.result === "wait_done") return r.outcome;
     throw asError("wait", r);
   }
@@ -197,7 +240,17 @@ export class AgentCtrl {
     steps: BatchStep[],
     { bail = false }: { bail?: boolean } = {},
   ): Promise<BatchStepOutcome[]> {
-    const r = await this.send({ op: "batch", session, steps, bail });
+    const declaredWaitMs = steps.reduce((total, step) => {
+      if (step.op === "wait") return total + step.opts.timeout_ms;
+      if (step.op === "act" && step.action.kind === "wait") {
+        return total + step.action.ms;
+      }
+      return total;
+    }, 0);
+    const r = await this.send(
+      { op: "batch", session, steps, bail },
+      Math.max(this.requestTimeoutMs, declaredWaitMs + 5_000),
+    );
     if (r.result === "batch_done") return r.outcomes;
     throw asError("batch", r);
   }
@@ -217,7 +270,7 @@ export class AgentCtrl {
    * immediately rather than being left to hang on the daemon's exit.
    */
   async close({ gracePeriodMs = 5_000 } = {}): Promise<void> {
-    if (this.closed && this.proc.exitCode !== null) return;
+    if (this.closed || this.proc.exitCode !== null || this.proc.signalCode !== null) return;
     if (!this.closed) {
       this.proc.stdin?.end();
     }
@@ -227,42 +280,64 @@ export class AgentCtrl {
     if (this.pending.size > 0) {
       const closeError = new Error("AgentCtrl: client closed before response arrived");
       for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
         p.reject(closeError);
       }
       this.pending.clear();
     }
 
-    if (this.proc.exitCode !== null) return;
+    if (this.proc.exitCode !== null || this.proc.signalCode !== null) return;
 
     await new Promise<void>((resolve) => {
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        clearTimeout(timer);
+        if (forceTimer) clearTimeout(forceTimer);
+        this.proc.off("exit", finish);
+        this.proc.off("close", finish);
+        this.proc.off("error", finish);
+        resolve();
+      };
       const timer = setTimeout(() => {
         // Daemon didn't exit gracefully - escalate.
         this.proc.kill("SIGKILL");
+        // Some failed or already-reaped child processes never emit another
+        // event after kill. Bound close latency even in that state.
+        forceTimer = setTimeout(finish, 1_000);
       }, gracePeriodMs);
-      this.proc.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
+      this.proc.once("exit", finish);
+      this.proc.once("close", finish);
+      this.proc.once("error", finish);
     });
   }
 
-  private send(op: RequestOp): Promise<Response> {
+  private send(op: RequestOp, timeoutMs = this.requestTimeoutMs): Promise<Response> {
     if (this.closed) {
       return Promise.reject(this.exitError ?? new Error("daemon is closed"));
     }
+    const deadlineMs =
+      Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? Math.min(timeoutMs, 2_147_483_647)
+        : this.requestTimeoutMs;
     const id = randomUUID();
     const request: Request = { id, ...op };
     return new Promise<Response>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${op.op} timed out after ${deadlineMs}ms`));
+      }, deadlineMs);
+      this.pending.set(id, { resolve, reject, timer });
       const stdin = this.proc.stdin;
       if (!stdin) {
         this.pending.delete(id);
+        clearTimeout(timer);
         reject(new Error("daemon stdin is not writable"));
         return;
       }
       stdin.write(`${JSON.stringify(request)}\n`, (err) => {
         if (err) {
           this.pending.delete(id);
+          clearTimeout(timer);
           reject(err);
         }
       });
@@ -287,6 +362,7 @@ export class AgentCtrl {
       return;
     }
     this.pending.delete(response.id);
+    clearTimeout(pending.timer);
     pending.resolve(response);
   }
 }

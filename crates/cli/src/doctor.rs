@@ -257,9 +257,8 @@ fn check_daemon(out: &mut Vec<Check>) {
         ),
     }
 
-    // Discover stale files BEFORE counting active sessions: `list_alive`
-    // prunes stale files as a side effect of its TCP probe, so checking
-    // it first would silently remove the very files we want to surface.
+    // Discovery and liveness checks are read-only. Stale files are removed
+    // only below when the user explicitly supplied `--fix`.
     let stale = list_stale(&dir);
 
     let alive = session_file::list_alive();
@@ -301,9 +300,7 @@ fn check_daemon(out: &mut Vec<Check>) {
     }
 }
 
-/// Walk the discovery dir for `.json` files whose endpoint no longer
-/// responds. `read_alive` already prunes them as a side effect, so this
-/// just collects the paths it removed and any remaining duds.
+/// Walk the discovery dir for `.json` files whose endpoint no longer responds.
 fn list_stale(dir: &PathBuf) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -317,14 +314,9 @@ fn list_stale(dir: &PathBuf) -> Vec<PathBuf> {
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        // read_alive removes the file and returns None when the endpoint
-        // doesn't answer; catching the case before that requires reading
-        // the file ourselves.
         if let Some(info) = session_file::read(stem) {
-            // Try to parse the endpoint and probe it directly. We don't
-            // call `read_alive` because we want to collect the path of
-            // the stale file before it's deleted (read_alive deletes on
-            // probe failure).
+            // Probe directly so malformed endpoints and connection failures
+            // are both reported as stale candidates.
             let alive = info
                 .endpoint
                 .parse::<std::net::SocketAddr>()

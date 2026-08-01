@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { AgentCtrl, type Snapshot } from "../src/index.js";
+import { AgentCtrl, PROTOCOL_VERSION, type Snapshot } from "../src/index.js";
 
 const DAEMON_COMMAND = [
   "cargo",
@@ -33,9 +33,14 @@ describe("AgentCtrl driving the mock surface", () => {
   it("opens a mock session, snapshots it, acts on it, then closes", async () => {
     client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
 
-    const session = await client.openSession("mock");
+    const opened = await client.openSessionInfo("mock");
+    const { session } = opened;
     expect(typeof session).toBe("string");
     expect(session.length).toBeGreaterThan(0);
+    expect(opened.protocolVersion).toBe(PROTOCOL_VERSION);
+    expect(opened.surface).toBe("mock");
+    expect(opened.capabilities).toContain("snapshot");
+    expect(opened.capabilities).toContain("actions");
 
     const snap: Snapshot = await client.snapshot(session);
     expect(snap.surface_kind).toBe("mock");
@@ -59,6 +64,28 @@ describe("AgentCtrl driving the mock surface", () => {
     await client.close();
     await expect(client.openSession("mock")).rejects.toThrow();
   }, 120_000);
+
+  it("times out requests when a child never answers", async () => {
+    client = new AgentCtrl({
+      command: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+      stderr: "ignore",
+      requestTimeoutMs: 100,
+    });
+    await expect(client.openSession("mock")).rejects.toThrow(/timed out/);
+    await client.close({ gracePeriodMs: 100 });
+    client = null;
+  }, 10_000);
+
+  it("closes cleanly after a spawn failure", async () => {
+    client = new AgentCtrl({
+      command: [`agent-ctrl-does-not-exist-${Date.now()}`],
+      stderr: "ignore",
+      requestTimeoutMs: 1_000,
+    });
+    await expect(client.openSession("mock")).rejects.toThrow();
+    await expect(client.close({ gracePeriodMs: 100 })).resolves.toBeUndefined();
+    client = null;
+  }, 10_000);
 
   it("returns an error result for unknown sessions", async () => {
     client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });

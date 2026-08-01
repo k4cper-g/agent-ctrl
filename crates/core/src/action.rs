@@ -169,6 +169,41 @@ pub enum Action {
     },
 }
 
+impl Action {
+    /// Stable snake-case action label used in capability and error messages.
+    #[must_use]
+    pub const fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Click { .. } => "click",
+            Self::DoubleClick { .. } => "double_click",
+            Self::RightClick { .. } => "right_click",
+            Self::Hover { .. } => "hover",
+            Self::Focus { .. } => "focus",
+            Self::Type { .. } => "type",
+            Self::Fill { .. } => "fill",
+            Self::Press { .. } => "press",
+            Self::KeyDown { .. } => "key_down",
+            Self::KeyUp { .. } => "key_up",
+            Self::Scroll { .. } => "scroll",
+            Self::Drag { .. } => "drag",
+            Self::Select { .. } => "select",
+            Self::SelectAll { .. } => "select_all",
+            Self::Check { .. } => "check",
+            Self::Uncheck { .. } => "uncheck",
+            Self::Toggle { .. } => "toggle",
+            Self::Clear { .. } => "clear",
+            Self::Clipboard { .. } => "clipboard",
+            Self::Mouse { .. } => "mouse",
+            Self::Highlight { .. } => "highlight",
+            Self::ScrollIntoView { .. } => "scroll_into_view",
+            Self::Wait { .. } => "wait",
+            Self::SwitchApp { .. } => "switch_app",
+            Self::FocusWindow { .. } => "focus_window",
+            Self::Screenshot { .. } => "screenshot",
+        }
+    }
+}
+
 /// Clipboard operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]

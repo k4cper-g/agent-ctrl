@@ -19,6 +19,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+#[cfg(target_os = "linux")]
+use agent_ctrl_core::capability;
 use agent_ctrl_core::{
     Action, ActionResult, CapabilitySet, Error, Result, Snapshot, SnapshotOptions, Surface,
     SurfaceKind, WindowInfo,
@@ -51,7 +53,9 @@ impl AtSpiSurface {
             let inner = linux::AtSpiInner::new().await?;
             Ok(Self {
                 // snapshot-only for now; the action vocabulary is a follow-up.
-                capabilities: CapabilitySet::new().with("snapshot").with("windows"),
+                capabilities: CapabilitySet::new()
+                    .with(capability::SNAPSHOT)
+                    .with(capability::WINDOWS),
                 inner,
             })
         }
@@ -96,7 +100,7 @@ impl Surface for AtSpiSurface {
         // the daemon and agents get a clear, capability-consistent answer.
         Err(Error::Unsupported {
             surface: SurfaceKind::AtSpi.as_str().into(),
-            action: action_name(action).into(),
+            action: action.kind_name().into(),
         })
     }
 
@@ -117,37 +121,5 @@ impl Surface for AtSpiSurface {
     async fn shutdown(&mut self) -> Result<()> {
         // The zbus connection is closed when `AtSpiInner` is dropped.
         Ok(())
-    }
-}
-
-/// Snake-case label for an [`Action`], used in [`Error::Unsupported`] messages.
-fn action_name(action: &Action) -> &'static str {
-    match action {
-        Action::Click { .. } => "click",
-        Action::DoubleClick { .. } => "double_click",
-        Action::RightClick { .. } => "right_click",
-        Action::Hover { .. } => "hover",
-        Action::Focus { .. } => "focus",
-        Action::Type { .. } => "type",
-        Action::Fill { .. } => "fill",
-        Action::Press { .. } => "press",
-        Action::KeyDown { .. } => "key_down",
-        Action::KeyUp { .. } => "key_up",
-        Action::Scroll { .. } => "scroll",
-        Action::Drag { .. } => "drag",
-        Action::Select { .. } => "select",
-        Action::SelectAll { .. } => "select_all",
-        Action::Check { .. } => "check",
-        Action::Uncheck { .. } => "uncheck",
-        Action::Toggle { .. } => "toggle",
-        Action::Clear { .. } => "clear",
-        Action::Clipboard { .. } => "clipboard",
-        Action::Mouse { .. } => "mouse",
-        Action::Highlight { .. } => "highlight",
-        Action::ScrollIntoView { .. } => "scroll_into_view",
-        Action::Wait { .. } => "wait",
-        Action::SwitchApp { .. } => "switch_app",
-        Action::FocusWindow { .. } => "focus_window",
-        Action::Screenshot { .. } => "screenshot",
     }
 }

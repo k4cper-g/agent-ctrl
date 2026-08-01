@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::node::{AppContext, NativeHandle, Node, RefId, WindowContext};
+use crate::node::{AppContext, NativeHandle, Node, RefId, State, WindowContext};
 use crate::role::Role;
 use crate::surface::SurfaceKind;
 
@@ -56,17 +56,30 @@ pub struct FindMatch {
     pub name: String,
 }
 
+/// One observation from a snapshot query.
+///
+/// Unlike [`FindMatch`], an observation does not require an actionable ref.
+/// This lets wait predicates observe static labels, status text, and other
+/// meaningful content without pretending every node can be acted on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservedMatch {
+    /// Ref when the matched node is actionable on this surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_id: Option<RefId>,
+    /// Role at capture time.
+    pub role: Role,
+    /// Accessible name at capture time.
+    pub name: String,
+    /// Value at capture time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// State at capture time.
+    pub state: State,
+}
+
 /// Knobs controlling what a snapshot captures.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SnapshotOptions {
-    /// CSS / platform selector to scope the snapshot to a subtree.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selector: Option<String>,
-
-    /// Emit only interactive nodes plus their structural ancestors.
-    #[serde(default)]
-    pub interactive: bool,
-
     /// Drop redundant intermediate nodes (single-child generic groups, etc.).
     #[serde(default)]
     pub compact: bool,
@@ -168,6 +181,27 @@ impl Snapshot {
         collect_matches(root, query, limit, &mut out);
         out
     }
+
+    /// Search all nodes matching `query`, including nodes without refs.
+    ///
+    /// This is the observation counterpart to [`Self::find`]. It is used by
+    /// wait predicates so static text can satisfy appearance, disappearance,
+    /// state, text, and value conditions consistently across surfaces.
+    #[must_use]
+    pub fn observe(&self, query: &FindQuery) -> Vec<ObservedMatch> {
+        let mut out = Vec::new();
+        let limit = query.limit.unwrap_or(usize::MAX);
+        let root = if let Some(target) = &query.in_ref {
+            match find_subtree(&self.root, target) {
+                Some(node) => node,
+                None => return out,
+            }
+        } else {
+            &self.root
+        };
+        collect_observations(root, query, limit, &mut out);
+        out
+    }
 }
 
 fn find_subtree<'a>(node: &'a Node, target: &RefId) -> Option<&'a Node> {
@@ -200,6 +234,32 @@ fn collect_matches(node: &Node, query: &FindQuery, limit: usize, out: &mut Vec<F
             return;
         }
         collect_matches(child, query, limit, out);
+    }
+}
+
+fn collect_observations(
+    node: &Node,
+    query: &FindQuery,
+    limit: usize,
+    out: &mut Vec<ObservedMatch>,
+) {
+    if out.len() >= limit {
+        return;
+    }
+    if matches_filters(node, query) {
+        out.push(ObservedMatch {
+            ref_id: node.ref_id.clone(),
+            role: node.role.clone(),
+            name: node.name.clone(),
+            value: node.value.clone(),
+            state: node.state.clone(),
+        });
+    }
+    for child in &node.children {
+        if out.len() >= limit {
+            return;
+        }
+        collect_observations(child, query, limit, out);
     }
 }
 
@@ -245,7 +305,7 @@ pub struct RefEntry {
     /// 0-based index disambiguating multiple nodes with the same `(role, name)`.
     pub nth: usize,
     /// Platform handle when the surface can provide one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub native: Option<NativeHandle>,
 }
 
@@ -462,5 +522,54 @@ mod tests {
             ..FindQuery::default()
         };
         assert!(snap.find(&q).is_empty());
+    }
+
+    #[test]
+    fn observe_includes_nodes_without_refs() {
+        let mut snap = fixture();
+        snap.root.children.push(Node {
+            ref_id: None,
+            role: Role::Region,
+            name: "Background task complete".into(),
+            description: None,
+            value: Some("ready".into()),
+            state: State {
+                visible: true,
+                enabled: true,
+                ..State::default()
+            },
+            bounds: None,
+            level: None,
+            children: Vec::new(),
+            opaque: false,
+            native: None,
+        });
+        let observed = snap.observe(&FindQuery {
+            name: Some("task complete".into()),
+            ..FindQuery::default()
+        });
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].name, "Background task complete");
+        assert!(observed[0].ref_id.is_none());
+        assert_eq!(observed[0].value.as_deref(), Some("ready"));
+    }
+
+    #[test]
+    fn native_handles_are_not_serialized() {
+        let mut snap = fixture();
+        snap.root.native = Some(NativeHandle::Ax {
+            element_ref: 0xdead_beef,
+            identifier: Some("private-id".into()),
+        });
+        let first_ref = snap.refs.iter().next().map(|(id, _)| id.clone()).unwrap();
+        snap.refs.entries.get_mut(&first_ref).unwrap().native = Some(NativeHandle::Uia {
+            runtime_id: vec![1, 2, 3, 4],
+            automation_id: Some("private-automation-id".into()),
+        });
+
+        let json = serde_json::to_value(&snap).unwrap();
+        assert!(json["root"].get("native").is_none());
+        let refs = json["refs"]["entries"].as_object().unwrap();
+        assert!(refs.values().all(|entry| entry.get("native").is_none()));
     }
 }

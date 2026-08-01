@@ -36,18 +36,23 @@ jobs:
           $ErrorActionPreference = "Stop"
           # Raw binary alongside the archive, named so the npm launcher can
           # download it directly without extraction.
-          Copy-Item target\release\agent-ctrl.exe agent-ctrl-win32-x64.exe
+          $raw = "agent-ctrl-win32-x64.exe"
+          Copy-Item target\release\agent-ctrl.exe $raw
+          $hash = (Get-FileHash -Algorithm SHA256 $raw).Hash.ToLowerInvariant()
+          Set-Content -NoNewline -Encoding utf8 "$raw.sha256" "$hash  $raw"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-binary
           path: |
             agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
             agent-ctrl-win32-x64.exe
+            agent-ctrl-win32-x64.exe.sha256
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
             agent-ctrl-win32-x64.exe
+            agent-ctrl-win32-x64.exe.sha256
           generate_release_notes: true
 
   macos-binary:
@@ -85,6 +90,7 @@ jobs:
             x86_64-apple-darwin)  raw=agent-ctrl-darwin-x64 ;;
           esac
           cp "target/${{ matrix.target }}/release/agent-ctrl" "$raw"
+          shasum -a 256 "$raw" > "$raw.sha256"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
           echo "RAW=$raw" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
@@ -93,9 +99,11 @@ jobs:
           path: |
             ${{ env.ASSET }}
             ${{ env.RAW }}
+            ${{ env.RAW }}.sha256
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ env.ASSET }}
             ${{ env.RAW }}
+            ${{ env.RAW }}.sha256
           generate_release_notes: true

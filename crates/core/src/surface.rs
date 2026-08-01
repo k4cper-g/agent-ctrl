@@ -14,6 +14,57 @@ use crate::action::{Action, ActionResult};
 use crate::error::{Error, Result};
 use crate::snapshot::{Snapshot, SnapshotOptions};
 
+/// Stable capability names advertised by surfaces and enforced by the daemon.
+pub mod capability {
+    /// Basic accessibility-tree capture.
+    pub const SNAPSHOT: &str = "snapshot";
+    /// General semantic actions such as click, focus, fill, and select.
+    pub const ACTIONS: &str = "actions";
+    /// Pixel capture.
+    pub const SCREENSHOT: &str = "screenshot";
+    /// Synthetic keyboard input.
+    pub const KEYBOARD: &str = "keyboard";
+    /// Synthetic pointer input.
+    pub const MOUSE: &str = "mouse";
+    /// Pointer drag gestures.
+    pub const DRAG: &str = "drag";
+    /// Top-level window enumeration and focus.
+    pub const WINDOWS: &str = "windows";
+    /// Cross-application switching.
+    pub const MULTI_APP: &str = "multi_app";
+}
+
+/// Capabilities required to dispatch an action.
+///
+/// Every action requires [`capability::ACTIONS`]. Actions that depend on an
+/// optional input or output subsystem require its capability as well.
+#[must_use]
+pub fn required_capabilities(action: &Action) -> &'static [&'static str] {
+    use capability::{ACTIONS, DRAG, KEYBOARD, MOUSE, MULTI_APP, SCREENSHOT, WINDOWS};
+
+    match action {
+        Action::Type { .. }
+        | Action::Press { .. }
+        | Action::KeyDown { .. }
+        | Action::KeyUp { .. }
+        | Action::SelectAll { .. }
+        | Action::Clipboard {
+            op: crate::action::ClipboardOp::Copy | crate::action::ClipboardOp::Paste,
+        } => &[ACTIONS, KEYBOARD],
+        Action::DoubleClick { .. }
+        | Action::RightClick { .. }
+        | Action::Hover { .. }
+        | Action::Scroll { .. }
+        | Action::Mouse { .. }
+        | Action::Highlight { .. } => &[ACTIONS, MOUSE],
+        Action::Drag { .. } => &[ACTIONS, MOUSE, DRAG],
+        Action::SwitchApp { .. } => &[ACTIONS, MULTI_APP],
+        Action::FocusWindow { .. } => &[ACTIONS, WINDOWS],
+        Action::Screenshot { .. } => &[ACTIONS, SCREENSHOT],
+        _ => &[ACTIONS],
+    }
+}
+
 /// One row of [`Surface::list_windows`] output.
 ///
 /// Mirrors agent-browser's `tab_list` shape (one entry per open tab) but
@@ -96,6 +147,7 @@ impl SurfaceKind {
 /// Standard feature names:
 ///
 /// - `"snapshot"` - basic tree capture (every surface)
+/// - `"actions"` - semantic action dispatch
 /// - `"screenshot"` - pixel capture
 /// - `"keyboard"` - synthetic keyboard input
 /// - `"mouse"` - synthetic pointer input
@@ -176,4 +228,40 @@ pub trait Surface: Send + Sync {
 
     /// Tear down the session. After this returns the surface must not be used.
     async fn shutdown(&mut self) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{capability, required_capabilities};
+    use crate::{Action, ClipboardOp, RefId};
+
+    #[test]
+    fn action_capabilities_include_optional_subsystems() {
+        let target = RefId("ref_0".into());
+        assert_eq!(
+            required_capabilities(&Action::Click {
+                ref_id: target.clone()
+            }),
+            &[capability::ACTIONS]
+        );
+        assert_eq!(
+            required_capabilities(&Action::Press {
+                keys: "Enter".into()
+            }),
+            &[capability::ACTIONS, capability::KEYBOARD]
+        );
+        assert_eq!(
+            required_capabilities(&Action::Drag {
+                from: target.clone(),
+                to: target
+            }),
+            &[capability::ACTIONS, capability::MOUSE, capability::DRAG]
+        );
+        assert_eq!(
+            required_capabilities(&Action::Clipboard {
+                op: ClipboardOp::Read
+            }),
+            &[capability::ACTIONS]
+        );
+    }
 }

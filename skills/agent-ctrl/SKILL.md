@@ -16,7 +16,9 @@ apps via the OS accessibility tree with compact `@eN` element refs.
 npm i -g @agent-ctrl/cli
 ```
 
-v0.1.x ships Windows x64. macOS AX is preview; Linux/iOS/Android planned.
+v0.1.x ships Windows x64. macOS AX is preview. Linux AT-SPI supports
+snapshot, queries, inspection, and window listing but not actions yet.
+Android and iOS are planned.
 
 ## First command
 
@@ -30,7 +32,7 @@ agent-ctrl info
 ## Quick start
 
 ```bash
-# Open a session against the OS surface (uia | ax | mock)
+# Open a session against the OS surface (uia | ax | atspi | mock)
 agent-ctrl open uia --session demo
 
 # Snapshot the focused window - returns a compact a11y tree with @eN refs
@@ -67,9 +69,9 @@ re-walking the tree.
 After `snapshot`, query without re-walking the OS:
 
 ```bash
-agent-ctrl find --name "Save"           # case-insensitive substring
-agent-ctrl get @e0 name                  # one field from a ref
-agent-ctrl is @e2 enabled                # boolean state
+agent-ctrl find "Save"                  # case-insensitive substring
+agent-ctrl get name @e0                  # one field from a ref
+agent-ctrl is enabled @e2                # boolean state
 ```
 
 ## TypeScript SDK
@@ -82,8 +84,10 @@ import { AgentCtrl } from "@agent-ctrl/client"
 const ctrl = new AgentCtrl()
 const session = await ctrl.openSession("uia")
 
-const snap = await ctrl.snapshot(session)
-await ctrl.act(session, { kind: "click", ref_id: "@e0" })
+await ctrl.snapshot(session)
+const [save] = await ctrl.find(session, { name: "Save", exact: true })
+if (!save) throw new Error("Save button not found")
+await ctrl.act(session, { kind: "click", ref_id: save.ref_id })
 await ctrl.waitFor(session, {
   predicate: { kind: "stable", idle_ms: 250 },
   timeout_ms: 5000,

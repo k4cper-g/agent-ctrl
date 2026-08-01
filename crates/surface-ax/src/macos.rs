@@ -221,7 +221,7 @@ pub(super) fn snapshot(
     let max_depth = opts.depth.unwrap_or(DEFAULT_DEPTH);
     let mut refs = RefMap::new();
     let mut nth_seen = HashMap::new();
-    let node = build_node(root, 0, max_depth, &mut refs, &mut nth_seen);
+    let node = build_node(root, 0, max_depth, opts.compact, &mut refs, &mut nth_seen);
     let window_id = window_id(pinned);
     // SAFETY: `root` is returned by a create/copy rule helper.
     unsafe { CFRelease(root.cast::<c_void>()) };
@@ -487,6 +487,7 @@ fn build_node(
     element: AXUIElementRef,
     depth: usize,
     max_depth: usize,
+    compact: bool,
     refs: &mut RefMap,
     nth_seen: &mut HashMap<(Role, String), usize>,
 ) -> Node {
@@ -525,7 +526,7 @@ fn build_node(
     let children = if depth >= max_depth {
         Vec::new()
     } else {
-        build_children(element, depth + 1, max_depth, refs, nth_seen)
+        build_children(element, depth + 1, max_depth, compact, refs, nth_seen)
     };
 
     Node {
@@ -610,6 +611,7 @@ fn build_children(
     element: AXUIElementRef,
     depth: usize,
     max_depth: usize,
+    compact: bool,
     refs: &mut RefMap,
     nth_seen: &mut HashMap<(Role, String), usize>,
 ) -> Vec<Node> {
@@ -623,18 +625,29 @@ fn build_children(
         // SAFETY: index is within CFArray bounds.
         let child = unsafe { CFArrayGetValueAtIndex(array_ref, idx) };
         if !child.is_null() {
-            children.push(build_node(
+            let mut node = build_node(
                 child as AXUIElementRef,
                 depth,
                 max_depth,
+                compact,
                 refs,
                 nth_seen,
-            ));
+            );
+            if compact && is_compactable(&node) {
+                children.append(&mut node.children);
+            } else {
+                children.push(node);
+            }
         }
     }
     // SAFETY: release the copy-rule array after extracting child pointers.
     unsafe { CFRelease(array_ref.cast::<c_void>()) };
     children
+}
+
+/// Compact-mode predicate: drop unnamed structural-only wrapper nodes.
+fn is_compactable(node: &Node) -> bool {
+    matches!(node.role, Role::Generic) && node.name.is_empty() && !node.state.focused
 }
 
 fn act_click(

@@ -15,6 +15,8 @@
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #![allow(unsafe_code)]
 
+#[cfg(target_os = "windows")]
+use agent_ctrl_core::capability;
 #[cfg(not(target_os = "windows"))]
 use agent_ctrl_core::Error;
 use agent_ctrl_core::{
@@ -48,12 +50,14 @@ impl UiaSurface {
             let inner = windows_impl::UiaInner::new()?;
             Ok(Self {
                 capabilities: CapabilitySet::new()
-                    .with("snapshot")
-                    .with("screenshot")
-                    .with("keyboard")
-                    .with("mouse")
-                    .with("drag")
-                    .with("multi_app"),
+                    .with(capability::SNAPSHOT)
+                    .with(capability::ACTIONS)
+                    .with(capability::SCREENSHOT)
+                    .with(capability::KEYBOARD)
+                    .with(capability::MOUSE)
+                    .with(capability::DRAG)
+                    .with(capability::WINDOWS)
+                    .with(capability::MULTI_APP),
                 inner,
             })
         }

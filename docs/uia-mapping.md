@@ -38,7 +38,7 @@ both UIA and our `Role` derive from the same ARIA-equivalent vocabulary.
 | `Pane`            | `Generic`         | UIA's catch-all container; carries little semantic value. |
 | `ProgressBar`     | `Generic`         | No interactive role; emit but mark `state.enabled = false`. |
 | `RadioButton`     | `Radio`           | |
-| `ScrollBar`       | `Generic`         | Skip in `interactive_only` snapshots. |
+| `ScrollBar`       | `Generic`         | Structural; unnamed wrappers are removed in `compact` mode. |
 | `SemanticZoom`    | `Group`           | Rare; deferred. |
 | `Separator`       | `Generic`         | Drop in `compact` snapshots. |
 | `Slider`          | `Slider`          | |
@@ -113,7 +113,7 @@ from the prefix) is intentionally deferred to v0.2.
 | `level`        | UIA `Level` property when positive (tree items, list items, headings); else `None` |
 | `role`         | per §1 |
 | `state`        | per §2 |
-| `native`       | `NativeHandle::Uia { runtime_id, automation_id }` (see §7) |
+| `native`       | Internal `NativeHandle::Uia { runtime_id, automation_id }` (see §7); omitted from serialized snapshots |
 
 **Dropped fields** (intentionally not carried into `Node`):
 - `AcceleratorKey`, `AccessKey` - keyboard hints; agents rarely need them and we surface keyboard input separately.
@@ -154,8 +154,8 @@ For each action we accept, the UIA call we make. Falls back to synthetic
 | `FocusWindow`       | `WindowPattern.SetWindowVisualState(Normal)` (best-effort) + the `AttachThreadInput` foreground bringer; re-pins the session | n/a |
 | `Screenshot`        | `GetWindowDC` + `BitBlt` for the pinned window, screen DC for desktop / region / element-ref targets, optional cached-ref annotations | n/a |
 
-**Decision:** `surface-uia` advertises `snapshot`, `screenshot`, `keyboard`,
-`mouse`, `drag`, `multi_app`. Click / double-click / right-click / hover,
+**Decision:** `surface-uia` advertises `snapshot`, `actions`, `screenshot`,
+`keyboard`, `mouse`, `drag`, `windows`, and `multi_app`. Click / double-click / right-click / hover,
 drag, and screenshot (window / region / element-ref / desktop, with optional
 `@eN` annotations) are all wired. The `CapabilitySet` returned from
 `UiaSurface::open()` reflects this and the daemon won't dispatch anything
@@ -188,19 +188,20 @@ control directly and never depends on what is visually on top.
 
 | Field | Source |
 |---|---|
-| `app.id`         | Application User Model ID (AUMID) when available; else process executable basename. AUMID lookup uses `SHGetPropertyStoreForWindow` + `PKEY_AppUserModel_ID`. |
-| `app.name`       | Process executable's `FileDescription` from version resources, falling back to executable basename. |
+| `app.id`         | Full executable path from `QueryFullProcessImageNameW`; falls back to `pid:<pid>` when process metadata is inaccessible. |
+| `app.name`       | Executable file stem; falls back to `pid_<pid>`. |
 | `window.id`      | Top-level `HWND` rendered as a hex string. |
 | `window.title`   | The top-level window's UIA `Name` (which on Windows is the title bar). |
 
 ### 5.1 Window targeting
 
 `SnapshotOptions::target` (a [`WindowTarget`](../crates/core/src/snapshot.rs))
-selects which window the snapshot captures. Three variants in v0.1:
+selects which window the snapshot captures. Four variants in v0.1:
 
 - `Foreground` *(default)* - `GetForegroundWindow()`. Original behavior.
 - `Pid { pid }` - first visible top-level window owned by `pid`. Found via `EnumWindows` + `GetWindowThreadProcessId`.
 - `Title { title }` - first visible top-level window whose title contains `title` (case-insensitive). Found via `EnumWindows` + `GetWindowTextW`.
+- `ProcessName { name }` - first visible top-level window whose executable file stem contains `name` (case-insensitive).
 
 Once a snapshot resolves a target, the worker stores the HWND on `WorkerState`
 and **subsequent actions reuse the same HWND**, even if the user changes focus.
@@ -227,7 +228,7 @@ monitor hosting the pinned window (`GetDpiForWindow`) and divide every
 setups with mixed DPI where one window spans monitors are edge-cased to the
 pinned window's monitor.
 
-## 7. `NativeHandle::Uia`
+## 7. Internal `NativeHandle::Uia`
 
 ```rust
 NativeHandle::Uia {
@@ -236,7 +237,9 @@ NativeHandle::Uia {
 }
 ```
 
-We populate both. `automation_id` is the most stable identifier UIA exposes
+We populate both internally and omit them from the wire snapshot. This avoids
+leaking platform handles while preserving fast action-time lookup.
+`automation_id` is the most stable identifier UIA exposes
 (set by the developer at design time on WPF / WinUI controls); `runtime_id`
 is what UIA itself uses to compare elements but is unstable across runs.
 
@@ -255,8 +258,8 @@ For each interactive node we emit, the `RefMap` entry stores:
 
 - `role`     - per §1
 - `name`     - `Name` after trimming
-- `nth`      - 0-based count of preceding siblings with the same `(role, name)` under the same parent
-- `native`   - `NativeHandle::Uia` (per §7)
+- `nth`      - 0-based count of preceding nodes with the same `(role, name)` in the snapshot's global pre-order walk
+- `native`   - internal `NativeHandle::Uia` (per §7), never serialized
 
 `(role, name, nth)` is the durable lookup tuple. UIA-specific identifiers
 are a fast-path hint, never the source of truth.
