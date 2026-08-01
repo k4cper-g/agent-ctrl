@@ -47,13 +47,6 @@ jobs:
             agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
             agent-ctrl-win32-x64.exe
             agent-ctrl-win32-x64.exe.sha256
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            agent-ctrl-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
-            agent-ctrl-win32-x64.exe
-            agent-ctrl-win32-x64.exe.sha256
-          generate_release_notes: true
 
   macos-binary:
     name: macOS binary (${{ matrix.target }})
@@ -65,7 +58,7 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-14
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -100,10 +93,42 @@ jobs:
             ${{ env.ASSET }}
             ${{ env.RAW }}
             ${{ env.RAW }}.sha256
+
+  publish-release:
+    name: Publish GitHub release
+    needs:
+      - windows-binary
+      - macos-binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*binary*"
+          merge-multiple: true
+          path: dist
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          expected=(
+            "agent-ctrl-${tag}-x86_64-pc-windows-msvc.zip"
+            "agent-ctrl-win32-x64.exe"
+            "agent-ctrl-win32-x64.exe.sha256"
+            "agent-ctrl-${tag}-aarch64-apple-darwin.tar.gz"
+            "agent-ctrl-darwin-arm64"
+            "agent-ctrl-darwin-arm64.sha256"
+            "agent-ctrl-${tag}-x86_64-apple-darwin.tar.gz"
+            "agent-ctrl-darwin-x64"
+            "agent-ctrl-darwin-x64.sha256"
+          )
+          for asset in "${expected[@]}"; do
+            test -f "dist/${asset}"
+          done
+          count="$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          test "$count" -eq "${#expected[@]}"
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ${{ env.ASSET }}
-            ${{ env.RAW }}
-            ${{ env.RAW }}.sha256
+          files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
