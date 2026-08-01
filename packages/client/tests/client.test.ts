@@ -20,6 +20,16 @@ const DAEMON_COMMAND = [
   "daemon",
 ];
 
+function createMockClient(): AgentCtrl {
+  return new AgentCtrl({
+    command: DAEMON_COMMAND,
+    stderr: "ignore",
+    // A cold `cargo run` on CI can take longer than the production request
+    // deadline before the daemon is ready to answer its first request.
+    requestTimeoutMs: 120_000,
+  });
+}
+
 describe("AgentCtrl driving the mock surface", () => {
   let client: AgentCtrl | null = null;
 
@@ -31,7 +41,7 @@ describe("AgentCtrl driving the mock surface", () => {
   });
 
   it("opens a mock session, snapshots it, acts on it, then closes", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
 
     const opened = await client.openSessionInfo("mock");
     const { session } = opened;
@@ -60,7 +70,7 @@ describe("AgentCtrl driving the mock surface", () => {
   }, 120_000); // first cargo build can be slow
 
   it("rejects calls after close()", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
     await client.close();
     await expect(client.openSession("mock")).rejects.toThrow();
   }, 120_000);
@@ -88,14 +98,14 @@ describe("AgentCtrl driving the mock surface", () => {
   }, 10_000);
 
   it("returns an error result for unknown sessions", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
     await expect(
       client.snapshot("00000000-0000-0000-0000-000000000000"),
     ).rejects.toThrow(/unknown session/);
   }, 120_000);
 
   it("find returns matching refs from the cached snapshot", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
     const session = await client.openSession("mock");
     await client.snapshot(session);
 
@@ -112,7 +122,7 @@ describe("AgentCtrl driving the mock surface", () => {
   }, 120_000);
 
   it("find errors before any snapshot has been taken", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
     const session = await client.openSession("mock");
     await expect(client.find(session, { name: "OK" })).rejects.toThrow(
       /no snapshot cached/,
@@ -120,7 +130,7 @@ describe("AgentCtrl driving the mock surface", () => {
   }, 120_000);
 
   it("waitFor matches an existing element on the first poll", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
     const session = await client.openSession("mock");
     await client.snapshot(session);
 
@@ -136,7 +146,7 @@ describe("AgentCtrl driving the mock surface", () => {
   }, 120_000);
 
   it("waitFor reports timeout for a never-matching predicate", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
     const session = await client.openSession("mock");
     await client.snapshot(session);
 
@@ -149,7 +159,7 @@ describe("AgentCtrl driving the mock surface", () => {
   }, 120_000);
 
   it("listWindows returns the mock surface's single window marked pinned", async () => {
-    client = new AgentCtrl({ command: DAEMON_COMMAND, stderr: "ignore" });
+    client = createMockClient();
     const session = await client.openSession("mock");
     await client.snapshot(session);
 
